@@ -19,7 +19,7 @@ export default function ReportScreen() {
         <SafeAreaView style={styles.container}>
             <StatusBar barStyle="dark-content" />
 
-            {/* 1. Aligned Header */}
+            {/* Header Section */}
             <View style={styles.header}>
                 <TouchableOpacity onPress={() => router.back()} style={styles.headerSideAction}>
                     <Ionicons name="chevron-back" size={26} color="#2563EB" />
@@ -30,17 +30,15 @@ export default function ReportScreen() {
                     <Text style={styles.headerSubtitle}>CEBU HUB</Text>
                 </View>
 
-                {/* UPDATED BUTTON: Navigates to reporthistory.tsx */}
                 <TouchableOpacity
                     style={styles.statusButton}
-                    onPress={() => router.push('/reporthistory')}
+                    onPress={() => router.push('/reporthistory' as any)}
                 >
                     <Ionicons name="list" size={16} color="#2563EB" />
                     <Text style={styles.statusButtonText}>Report Status</Text>
                 </TouchableOpacity>
             </View>
 
-            {/* 2. ScrollView with flexGrow */}
             <ScrollView
                 contentContainerStyle={styles.scrollContent}
                 showsVerticalScrollIndicator={false}
@@ -50,7 +48,11 @@ export default function ReportScreen() {
                 </Text>
 
                 {/* Quick Snap Card */}
-                <TouchableOpacity style={styles.reportCard}>
+                <TouchableOpacity
+                    style={styles.reportCard}
+                    onPress={() => router.push('/quicksnap' as any)}
+                    activeOpacity={0.7}
+                >
                     <View style={[styles.iconContainer, { backgroundColor: '#FFFBEB' }]}>
                         <Ionicons name="flash" size={26} color="#F59E0B" />
                     </View>
@@ -68,7 +70,11 @@ export default function ReportScreen() {
                 </TouchableOpacity>
 
                 {/* Moderate Report Card */}
-                <TouchableOpacity style={styles.reportCard}>
+                <TouchableOpacity
+                    style={styles.reportCard}
+                    onPress={() => router.push('/moderate' as any)}
+                    activeOpacity={0.7}
+                >
                     <View style={[styles.iconContainer, { backgroundColor: '#EFF6FF' }]}>
                         <Ionicons name="warning-outline" size={26} color="#2563EB" />
                     </View>
@@ -80,8 +86,12 @@ export default function ReportScreen() {
                     </View>
                 </TouchableOpacity>
 
-                {/* General Inquiry Card */}
-                <TouchableOpacity style={styles.reportCard}>
+                {/* General Inquiry Card - Updated to navigate to inquiry.tsx */}
+                <TouchableOpacity
+                    style={styles.reportCard}
+                    onPress={() => router.push('/inquiry' as any)}
+                    activeOpacity={0.7}
+                >
                     <View style={[styles.iconContainer, { backgroundColor: '#F8FAFC' }]}>
                         <Ionicons name="help-circle-outline" size={26} color="#64748B" />
                     </View>
@@ -93,7 +103,7 @@ export default function ReportScreen() {
                     </View>
                 </TouchableOpacity>
 
-                {/* 3. Footer */}
+                {/* Footer Section */}
                 <View style={styles.footer}>
                     <Text style={styles.footerText}>
                         CEBU CITY DISASTER RISK REDUCTION & MANAGEMENT OFFICE
@@ -116,48 +126,14 @@ const styles = StyleSheet.create({
         backgroundColor: '#FFFFFF',
         marginTop: 20,
     },
-    headerSideAction: {
-        width: 30,
-        justifyContent: 'center',
-    },
-    headerTitleContainer: {
-        flex: 1,
-        marginLeft: 10,
-    },
-    headerTitle: {
-        fontSize: 22,
-        fontWeight: '700',
-        color: '#1E293B',
-        letterSpacing: -0.5,
-    },
-    headerSubtitle: {
-        fontSize: 12,
-        fontWeight: '700',
-        color: '#94A3B8',
-        letterSpacing: 1,
-        marginTop: -2,
-    },
-    statusButton: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        backgroundColor: '#EFF6FF',
-        paddingHorizontal: 12,
-        paddingVertical: 10,
-        borderRadius: 20,
-    },
+    headerSideAction: { width: 30, justifyContent: 'center' },
+    headerTitleContainer: { flex: 1, marginLeft: 10 },
+    headerTitle: { fontSize: 20, fontWeight: '700', color: '#1E293B', letterSpacing: -0.5 },
+    headerSubtitle: { fontSize: 12, fontWeight: '700', color: '#94A3B8', letterSpacing: 1, marginTop: -2 },
+    statusButton: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#EFF6FF', paddingHorizontal: 12, paddingVertical: 10, borderRadius: 20, flexShrink: 0, marginLeft: 10 },
     statusButtonText: { color: '#2563EB', fontWeight: '700', marginLeft: 4, fontSize: 13 },
-    scrollContent: {
-        paddingHorizontal: 20,
-        paddingTop: 10,
-        paddingBottom: 40,
-        flexGrow: 1,
-    },
-    instructionText: {
-        fontSize: 15,
-        color: '#64748B',
-        lineHeight: 22,
-        marginBottom: 25,
-    },
+    scrollContent: { paddingHorizontal: 20, paddingTop: 10, paddingBottom: 40, flexGrow: 1 },
+    instructionText: { fontSize: 15, color: '#64748B', lineHeight: 22, marginBottom: 25 },
     reportCard: {
         flexDirection: 'row',
         backgroundColor: '#FFFFFF',
@@ -172,40 +148,13 @@ const styles = StyleSheet.create({
         borderWidth: 1,
         borderColor: '#F1F5F9'
     },
-    iconContainer: {
-        width: 56,
-        height: 56,
-        borderRadius: 14,
-        justifyContent: 'center',
-        alignItems: 'center'
-    },
+    iconContainer: { width: 56, height: 56, borderRadius: 14, justifyContent: 'center', alignItems: 'center' },
     cardTextContent: { flex: 1, marginLeft: 16 },
-    cardHeaderRow: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        alignItems: 'flex-start',
-        marginBottom: 4
-    },
-    cardTitle: { fontSize: 17, fontWeight: '800', color: '#1E293B' },
-    priorityBadge: {
-        backgroundColor: '#FEE2E2',
-        paddingHorizontal: 8,
-        paddingVertical: 5,
-        borderRadius: 8
-    },
+    cardHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 },
+    cardTitle: { fontSize: 17, fontWeight: '800', color: '#1E293B', flex: 1, marginRight: 10, lineHeight: 22 },
+    priorityBadge: { backgroundColor: '#FEE2E2', paddingHorizontal: 8, paddingVertical: 5, borderRadius: 8, flexShrink: 0 },
     priorityBadgeText: { color: '#EF4444', fontSize: 9, fontWeight: '900' },
     cardDescription: { fontSize: 14, color: '#64748B', lineHeight: 20 },
-    footer: {
-        marginTop: 'auto',
-        paddingVertical: 30,
-        alignItems: 'center'
-    },
-    footerText: {
-        fontSize: 10,
-        color: '#CBD5E1',
-        fontWeight: '800',
-        textAlign: 'center',
-        letterSpacing: 0.8,
-        width: '80%',
-    }
+    footer: { marginTop: 'auto', paddingVertical: 30, alignItems: 'center' },
+    footerText: { fontSize: 10, color: '#CBD5E1', fontWeight: '800', textAlign: 'center', letterSpacing: 0.8, width: '80%' }
 });

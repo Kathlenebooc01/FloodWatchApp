@@ -13,7 +13,6 @@ import {
     View
 } from 'react-native';
 
-// Mock data based on your design
 const HISTORY_DATA = [
     {
         id: '1',
@@ -85,13 +84,19 @@ export default function ReportHistoryScreen() {
         <SafeAreaView style={styles.container}>
             <StatusBar barStyle="dark-content" />
 
-            {/* Header */}
+            {/* HEADER - NOW MATCHES REPORT SCREEN ALIGNMENT EXACTLY */}
             <View style={styles.header}>
-                <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-                    <Ionicons name="chevron-back" size={28} color="#2563EB" />
+                <TouchableOpacity onPress={() => router.back()} style={styles.headerSideAction}>
+                    <Ionicons name="chevron-back" size={26} color="#2563EB" />
                 </TouchableOpacity>
-                <Text style={styles.headerTitle}>My Report History</Text>
-                <View style={{ width: 28 }} />
+
+                <View style={styles.headerTitleContainer}>
+                    <Text style={styles.headerTitle}>My Report History</Text>
+                    <Text style={styles.headerSubtitle}>CEBU HUB</Text>
+                </View>
+
+                {/* Placeholder to keep the alignment balanced */}
+                <View style={styles.headerRightPlaceholder} />
             </View>
 
             <FlatList
@@ -116,13 +121,34 @@ const styles = StyleSheet.create({
         justifyContent: 'space-between',
         paddingHorizontal: 20,
         paddingTop: Platform.OS === 'android' ? 15 : 0,
-        paddingBottom: 20,
-        borderBottomWidth: 1,
-        borderBottomColor: '#F1F5F9',
+        paddingBottom: 10, // Adjusted to match Report Screen
+        backgroundColor: '#FFFFFF',
         marginTop: 20,
     },
-    backButton: { padding: 5 },
-    headerTitle: { fontSize: 20, fontWeight: '800', color: '#0F172A' },
+    headerSideAction: {
+        width: 30,
+        justifyContent: 'center',
+    },
+    headerTitleContainer: {
+        flex: 1,
+        marginLeft: 10,
+    },
+    headerTitle: {
+        fontSize: 20, // Match the size you adjusted in Report Screen
+        fontWeight: '700',
+        color: '#1E293B',
+        letterSpacing: -0.5,
+    },
+    headerSubtitle: {
+        fontSize: 12,
+        fontWeight: '700',
+        color: '#94A3B8',
+        letterSpacing: 1,
+        marginTop: -2,
+    },
+    headerRightPlaceholder: {
+        width: 30, // To balance the left back button width
+    },
     listContent: { padding: 20 },
     historyCard: {
         flexDirection: 'row',
@@ -132,7 +158,6 @@ const styles = StyleSheet.create({
         marginBottom: 16,
         borderWidth: 1,
         borderColor: '#F1F5F9',
-        // Shadow for premium look
         shadowColor: '#000',
         shadowOffset: { width: 0, height: 2 },
         shadowOpacity: 0.05,

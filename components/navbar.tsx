@@ -42,14 +42,14 @@ export default function Navbar() {
                 </Text>
             </TouchableOpacity>
 
-            {/* Center Report Button - Connected to report.tsx */}
+            {/* Center Report Button */}
             <TouchableOpacity
                 style={styles.reportContainer}
                 onPress={() => router.push('/report' as any)}
             >
                 <View style={[
                     styles.reportCircle,
-                    isActive('/report') && { backgroundColor: '#B91C1C' } // Darker red when active
+                    isActive('/report') && { backgroundColor: '#B91C1C' }
                 ]}>
                     <MaterialCommunityIcons name="alert-octagon" size={32} color="#FFFFFF" />
                 </View>
@@ -58,7 +58,7 @@ export default function Navbar() {
                 </Text>
             </TouchableOpacity>
 
-            {/* Hotline - Type casted to fix TS2345 */}
+            {/* Hotline - Navigates to app/hotline.tsx */}
             <TouchableOpacity
                 style={styles.navItem}
                 onPress={() => router.push('/hotline' as any)}
@@ -73,7 +73,7 @@ export default function Navbar() {
                 </Text>
             </TouchableOpacity>
 
-            {/* Profile - Type casted to fix TS2345 */}
+            {/* Profile */}
             <TouchableOpacity
                 style={styles.navItem}
                 onPress={() => router.push('/profile' as any)}
@@ -105,7 +105,6 @@ const styles = StyleSheet.create({
         bottom: 0,
         left: 0,
         right: 0,
-        // Elevation for Android, Shadow for iOS
         elevation: 20,
         shadowColor: '#000',
         shadowOffset: { width: 0, height: -2 },
@@ -128,7 +127,7 @@ const styles = StyleSheet.create({
     },
     reportContainer: {
         alignItems: 'center',
-        marginTop: -45, // Pull the circle up
+        marginTop: -45,
         flex: 1,
     },
     reportCircle: {
@@ -140,7 +139,6 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         borderWidth: 4,
         borderColor: '#FFFFFF',
-        // Shadow for the center button
         elevation: 8,
         shadowColor: '#000',
         shadowOpacity: 0.3,
