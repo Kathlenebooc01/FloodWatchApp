@@ -1,5 +1,4 @@
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import * as Location from 'expo-location';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
@@ -12,42 +11,27 @@ import {
     View
 } from 'react-native';
 
-// Updated import path based on your project structure
 import Navbar from '@/components/navbar';
+import { getCurrentFullAddress } from '@/utils/location';
 
 export default function Dashboard() {
     const router = useRouter();
-    const [streetAddress, setStreetAddress] = useState('Fetching...');
+    const [fullAddress, setFullAddress] = useState('Fetching location...');
     const [cityName, setCityName] = useState('');
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
         (async () => {
-            let { status } = await Location.requestForegroundPermissionsAsync();
-
-            if (status !== 'granted') {
-                setStreetAddress('Permission denied');
-                setLoading(false);
-                return;
-            }
-
             try {
-                let location = await Location.getCurrentPositionAsync({
-                    accuracy: Location.Accuracy.Balanced,
-                });
-
-                let reverseGeocode = await Location.reverseGeocodeAsync({
-                    latitude: location.coords.latitude,
-                    longitude: location.coords.longitude,
-                });
-
-                if (reverseGeocode.length > 0) {
-                    const address = reverseGeocode[0];
-                    setStreetAddress(address.name || address.district || 'Current Vicinity');
-                    setCityName(address.city ? address.city.toUpperCase() : '');
+                const addr = await getCurrentFullAddress();
+                setFullAddress(addr.full);
+                setCityName(addr.city);
+            } catch (error: any) {
+                if (error?.message === 'PERMISSION_DENIED') {
+                    setFullAddress('Location permission denied');
+                } else {
+                    setFullAddress('Location unavailable');
                 }
-            } catch (error) {
-                setStreetAddress('Location Unavailable');
             } finally {
                 setLoading(false);
             }
@@ -67,8 +51,8 @@ export default function Dashboard() {
                             {loading ? (
                                 <ActivityIndicator size="small" color="#2563EB" style={{ alignSelf: 'flex-start', marginTop: 2 }} />
                             ) : (
-                                <Text style={styles.locationName} numberOfLines={1}>
-                                    {streetAddress}{cityName ? `, ${cityName}` : ''}
+                                <Text style={styles.locationName} numberOfLines={2}>
+                                    {fullAddress}
                                 </Text>
                             )}
                         </View>
@@ -125,7 +109,7 @@ export default function Dashboard() {
                         </View>
                     </View>
                     <Text style={styles.riskBody}>
-                        Immediate evacuation advised for low-lying areas in <Text style={{ fontWeight: '700' }}>{streetAddress}</Text> due to rising water levels.
+                        Immediate evacuation advised for low-lying areas in <Text style={{ fontWeight: '700' }}>{fullAddress}</Text> due to rising water levels.
                     </Text>
                     <View style={styles.riskBarContainer}>
                         <View style={[styles.riskTab, styles.tabLow]}><Text style={styles.tabTextLow}>LOW</Text></View>
@@ -191,7 +175,7 @@ const styles = StyleSheet.create({
     scrollPadding: { padding: 20, paddingBottom: 110 },
     header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, marginTop: 15 },
     locationLabel: { fontSize: 10, color: '#94A3B8', fontWeight: '700', letterSpacing: 0.5 },
-    locationName: { fontSize: 16, fontWeight: '800', color: '#1E293B' },
+    locationName: { fontSize: 15, fontWeight: '800', color: '#1E293B', flexWrap: 'wrap' },
     locationRow: { flexDirection: 'row', alignItems: 'center', flex: 1, marginRight: 10 },
     notifCircle: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#F8FAFC', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#F1F5F9' },
     weatherCard: { backgroundColor: '#EFF6FF', borderRadius: 20, padding: 20, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15 },

@@ -1,6 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
-import * as Location from 'expo-location';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
@@ -18,6 +17,8 @@ import {
     View
 } from 'react-native';
 
+import { getCurrentFullAddress } from '@/utils/location';
+
 const { width } = Dimensions.get('window');
 
 export default function ModerateReportScreen() {
@@ -27,7 +28,7 @@ export default function ModerateReportScreen() {
     const [images, setImages] = useState<string[]>([]);
     const [showSuccess, setShowSuccess] = useState(false);
     const [loadingLocation, setLoadingLocation] = useState(false);
-    const [locationName, setLocationName] = useState('FETCHING LOCATION...');
+    const [locationName, setLocationName] = useState('Fetching location...');
 
     const isFormValid = subject.trim().length > 0 && observations.trim().length > 0;
 
@@ -54,32 +55,14 @@ export default function ModerateReportScreen() {
     const fetchLocation = async () => {
         setLoadingLocation(true);
         try {
-            let { status } = await Location.requestForegroundPermissionsAsync();
-            if (status !== 'granted') {
-                setLocationName('PERMISSION DENIED');
-                return;
-            }
-
-            let location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-
-            let reverseGeocode = await Location.reverseGeocodeAsync({
-                latitude: location.coords.latitude,
-                longitude: location.coords.longitude,
-            });
-
-            if (reverseGeocode.length > 0) {
-                const address = reverseGeocode[0];
-
-                // FIXED FALLBACK LOGIC: Try district -> street -> name -> subregion -> then unknown
-                const specificLoc = address.district || address.street || address.name || address.subregion || "STREET UNKNOWN";
-                const city = address.city || address.subregion || "CEBU CITY";
-
-                setLocationName(`${specificLoc}, ${city}`.toUpperCase());
+            const addr = await getCurrentFullAddress();
+            setLocationName(addr.full);
+        } catch (error: any) {
+            if (error?.message === 'PERMISSION_DENIED') {
+                setLocationName('Location permission denied');
             } else {
-                setLocationName('ADDRESS NOT FOUND');
+                setLocationName('Location unavailable');
             }
-        } catch (error) {
-            setLocationName('LOCATION UNAVAILABLE');
         } finally {
             setLoadingLocation(false);
         }
@@ -148,7 +131,7 @@ export default function ModerateReportScreen() {
                     <View style={styles.locationIconCircle}><Ionicons name="location-outline" size={20} color="#2563EB" /></View>
                     <View style={{ flex: 1 }}>
                         <Text style={styles.locationLabel}>Current Location</Text>
-                        <Text style={styles.locationValue} numberOfLines={1}>{locationName}</Text>
+                        <Text style={styles.locationValue} numberOfLines={2}>{locationName}</Text>
                     </View>
                     <TouchableOpacity onPress={fetchLocation} disabled={loadingLocation}>
                         {loadingLocation ? <ActivityIndicator size="small" color="#2563EB" /> : <Ionicons name="locate" size={20} color="#64748B" />}

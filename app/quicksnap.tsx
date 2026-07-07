@@ -1,6 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
 import { CameraView, FlashMode, useCameraPermissions } from 'expo-camera';
-import * as Location from 'expo-location';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import {
@@ -12,6 +11,8 @@ import {
     TouchableOpacity,
     View
 } from 'react-native';
+
+import { getCurrentFullAddress } from '@/utils/location';
 
 export default function QuickSnapScreen() {
     const router = useRouter();
@@ -27,35 +28,15 @@ export default function QuickSnapScreen() {
 
     useEffect(() => {
         (async () => {
-            let { status } = await Location.requestForegroundPermissionsAsync();
-            if (status !== 'granted') {
-                setLocationName('LOCATION DENIED');
-                return;
-            }
             try {
-                // High accuracy helps get better street-level data
-                let location = await Location.getCurrentPositionAsync({
-                    accuracy: Location.Accuracy.Balanced,
-                });
-
-                let reverseGeocode = await Location.reverseGeocodeAsync({
-                    latitude: location.coords.latitude,
-                    longitude: location.coords.longitude,
-                });
-
-                if (reverseGeocode.length > 0) {
-                    const address = reverseGeocode[0];
-
-                    // IMPROVED LOGIC: Multi-step fallback to avoid "UNKNOWN"
-                    const specific = address.district || address.street || address.name || address.subregion || "STREET UNKNOWN";
-                    const city = address.city || address.subregion || "CEBU CITY";
-                    const region = address.region || "PH";
-
-                    const display = `${specific}, ${city}, ${region}`;
-                    setLocationName(display.toUpperCase());
+                const addr = await getCurrentFullAddress();
+                setLocationName(addr.full.toUpperCase());
+            } catch (error: any) {
+                if (error?.message === 'PERMISSION_DENIED') {
+                    setLocationName('LOCATION PERMISSION DENIED');
+                } else {
+                    setLocationName('LOCATION UNAVAILABLE');
                 }
-            } catch (error) {
-                setLocationName('LOCATION UNAVAILABLE');
             }
         })();
     }, []);
@@ -147,7 +128,7 @@ export default function QuickSnapScreen() {
                         <View style={styles.bottomContainer}>
                             <View style={styles.locationRow}>
                                 <Ionicons name="location-sharp" size={16} color="white" />
-                                <Text style={styles.locationText} numberOfLines={1}>{locationName}</Text>
+                                <Text style={styles.locationText} numberOfLines={2}>{locationName}</Text>
                             </View>
                             <View style={styles.controlsRow}>
                                 <TouchableOpacity style={styles.iconCircle} onPress={() => setFlash(f => f === 'off' ? 'on' : 'off')}>
