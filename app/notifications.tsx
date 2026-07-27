@@ -3,102 +3,37 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import {
+    ActivityIndicator,
     Animated,
     Dimensions,
     Modal,
+    RefreshControl,
     SafeAreaView,
     ScrollView,
     StatusBar,
     StyleSheet,
     Text,
     TouchableOpacity,
-    View,
+    View
 } from 'react-native';
+
+import { supabase } from '@/utils/supabase';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 type Category = 'All' | 'Emergency' | 'Updates';
 
-const NOTIFICATIONS_DATA = [
-    {
-        id: '1',
-        category: 'Emergency',
-        title: 'Severe Weather Warning',
-        time: '2m ago',
-        desc: 'The Philippine Atmospheric, Geophysical and Astronomical Services Administration (PAGASA) has issued a Red Rainfall Warning for Talisay and surrounding areas in Metro Cebu. Extremely heavy rainfall (exceeding 30mm/hour) is expected to continue for the next 3 hours. Serious flooding is expected in low-lying areas and near river systems.',
-        location: 'Talisay City',
-        fullTime: 'Today, 9:39 AM',
-        icon: 'warning',
-        iconColor: '#EF4444',
-        iconBg: '#FEE2E2',
-        unread: true,
-    },
-    {
-        id: '2',
-        category: 'Emergency',
-        title: 'Critical Water Level',
-        time: '45m ago',
-        desc: 'Guadalupe River sensors have reached Stage 2 alert level. Monitoring stations are on active watch. Residents near riverbanks should seek higher ground immediately.',
-        location: 'Guadalupe River',
-        fullTime: 'Today, 8:55 AM',
-        icon: 'water',
-        iconColor: '#EF4444',
-        iconBg: '#FEE2E2',
-        unread: true,
-    },
-    {
-        id: '3',
-        category: 'Emergency',
-        title: 'Evacuation Order Issued',
-        time: '1h ago',
-        desc: 'Local government units in Barangay Mabolo have issued a mandatory evacuation order for residents within 50 meters of the creek due to rapidly rising water levels.',
-        location: 'Mabolo, Cebu City',
-        fullTime: 'Today, 8:12 AM',
-        icon: 'alert-circle',
-        iconColor: '#EF4444',
-        iconBg: '#FEE2E2',
-        unread: false,
-    },
-    {
-        id: '4',
-        category: 'Updates',
-        title: 'Relief Operations Ongoing',
-        time: '2h ago',
-        desc: 'Relief operations are currently underway in affected barangays. CDRRMO teams are distributing food packs, water, and emergency supplies to displaced families in evacuation centers.',
-        location: 'Cebu City',
-        fullTime: 'Today, 7:45 AM',
-        icon: 'heart',
-        iconColor: '#10B981',
-        iconBg: '#ECFDF5',
-        unread: false,
-    },
-    {
-        id: '5',
-        category: 'Updates',
-        title: 'Road Clearing Update',
-        time: '3h ago',
-        desc: 'DPWH teams have cleared major debris on N. Bacalso Avenue and Colon Street. Both roads are now passable to light vehicles. Motorists are advised to drive slowly.',
-        location: 'Cebu City',
-        fullTime: 'Today, 6:30 AM',
-        icon: 'construct',
-        iconColor: '#F59E0B',
-        iconBg: '#FEF3C7',
-        unread: false,
-    },
-    {
-        id: '6',
-        category: 'Updates',
-        title: 'Rainfall Advisory Lifted',
-        time: '4h ago',
-        desc: 'PAGASA has lifted the Orange Rainfall Warning for northern Cebu. Weather conditions are expected to improve within the next 2 hours. Residents may return to normal activities with caution.',
-        location: 'Northern Cebu',
-        fullTime: 'Today, 5:50 AM',
-        icon: 'partly-sunny',
-        iconColor: '#2563EB',
-        iconBg: '#EFF6FF',
-        unread: false,
-    },
-];
+interface Notification {
+    id: string;
+    category: string;
+    title: string;
+    description: string;
+    location: string;
+    created_at: string;
+    icon: string;
+    icon_color: string;
+    icon_bg: string;
+}
 
 const STORAGE_KEY = 'floodwatch_read_notif_ids';
 
@@ -111,30 +46,116 @@ export default function NotificationsScreen() {
     const [modalVisible, setModalVisible] = useState(false);
     const slideAnim = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
 
-    // Keep notifications in state so unread can be updated
-    const [notifications, setNotifications] = useState(NOTIFICATIONS_DATA);
+    // Notifications from Supabase
+    const [notifications, setNotifications] = useState<Notification[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [refreshing, setRefreshing] = useState(false);
+    const [readIds, setReadIds] = useState<string[]>([]);
 
-    // Load persisted read IDs on mount and apply them
+    // Fetch notifications from Supabase
+    const fetchNotifications = async () => {
+        try {
+            console.log('📲 Fetching notifications from Supabase...');
+            
+            const { data, error } = await supabase
+                .from('notifications')
+                .select('*')
+                .order('created_at', { ascending: false });
+
+            if (error) {
+                console.error('❌ Supabase error:', error);
+                throw error;
+            }
+
+            if (data) {
+                setNotifications(data);
+                console.log('✅ Loaded', data.length, 'notifications from Supabase');
+            }
+        } catch (error: any) {
+            console.error('❌ Error fetching notifications:', error.message);
+        } finally {
+            setLoading(false);
+            setRefreshing(false);
+        }
+    };
+
+    // Load read IDs from storage
+    const loadReadIds = async () => {
+        try {
+            const stored = await AsyncStorage.getItem(STORAGE_KEY);
+            if (stored) {
+                setReadIds(JSON.parse(stored));
+            }
+        } catch (error) {
+            console.error('Error loading read IDs:', error);
+        }
+    };
+
+    // Save read IDs to storage
+    const saveReadIds = async (ids: string[]) => {
+        try {
+            await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(ids));
+        } catch (error) {
+            console.error('Error saving read IDs:', error);
+        }
+    };
+
     useEffect(() => {
-        (async () => {
-            try {
-                const stored = await AsyncStorage.getItem(STORAGE_KEY);
-                if (stored) {
-                    const readIds: string[] = JSON.parse(stored);
-                    setNotifications(prev =>
-                        prev.map(n => readIds.includes(n.id) ? { ...n, unread: false } : n)
-                    );
-                }
-            } catch {}
-        })();
+        loadReadIds();
+        fetchNotifications();
     }, []);
 
-    // Save a set of read IDs to AsyncStorage
-    const persistReadIds = async (updatedList: typeof NOTIFICATIONS_DATA) => {
-        try {
-            const readIds = updatedList.filter(n => !n.unread).map(n => n.id);
-            await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(readIds));
-        } catch {}
+    const onRefresh = () => {
+        setRefreshing(true);
+        fetchNotifications();
+    };
+
+    // Helper: Check if notification is unread
+    const isUnread = (id: string) => !readIds.includes(id);
+
+    // Helper: Get time ago
+    const getTimeAgo = (dateString: string) => {
+        const now = new Date();
+        const created = new Date(dateString);
+        const diffMs = now.getTime() - created.getTime();
+        const diffMins = Math.floor(diffMs / 60000);
+        const diffHours = Math.floor(diffMins / 60);
+        const diffDays = Math.floor(diffHours / 24);
+
+        if (diffMins < 1) return 'Just now';
+        if (diffMins < 60) return `${diffMins}m ago`;
+        if (diffHours < 24) return `${diffHours}h ago`;
+        if (diffDays === 1) return 'Yesterday';
+        return `${diffDays}d ago`;
+    };
+
+    // Helper: Format full time
+    const getFullTime = (dateString: string) => {
+        const date = new Date(dateString);
+        const today = new Date();
+        const isToday = date.toDateString() === today.toDateString();
+        
+        const timeStr = date.toLocaleTimeString('en-US', { 
+            hour: 'numeric', 
+            minute: '2-digit',
+            hour12: true 
+        });
+
+        if (isToday) return `Today, ${timeStr}`;
+        
+        const yesterday = new Date(today);
+        yesterday.setDate(yesterday.getDate() - 1);
+        if (date.toDateString() === yesterday.toDateString()) {
+            return `Yesterday, ${timeStr}`;
+        }
+
+        return date.toLocaleDateString('en-US', { 
+            month: 'short', 
+            day: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit',
+            hour12: true
+        });
     };
 
     // Filter notifications based on active tab
@@ -142,20 +163,22 @@ export default function NotificationsScreen() {
         ? notifications
         : notifications.filter(n => n.category === activeTab);
 
-    // Mark all as read and persist
+    // Mark all as read
     const markAllAsRead = () => {
-        const updated = notifications.map(n => ({ ...n, unread: false }));
-        setNotifications(updated);
-        persistReadIds(updated);
+        const allIds = notifications.map(n => n.id);
+        setReadIds(allIds);
+        saveReadIds(allIds);
     };
 
-    const openModal = (notif: any) => {
-        // Mark this notification as read when opened and persist
-        const updated = notifications.map(n =>
-            n.id === notif.id ? { ...n, unread: false } : n
-        );
-        setNotifications(updated);
-        persistReadIds(updated);
+    // Open modal and mark as read
+    const openModal = (notif: Notification) => {
+        // Mark as read
+        if (!readIds.includes(notif.id)) {
+            const newReadIds = [...readIds, notif.id];
+            setReadIds(newReadIds);
+            saveReadIds(newReadIds);
+        }
+
         setSelectedNotif(notif);
         setModalVisible(true);
         Animated.spring(slideAnim, {
@@ -181,8 +204,19 @@ export default function NotificationsScreen() {
         const data = tab === 'All'
             ? notifications
             : notifications.filter(n => n.category === tab);
-        return data.filter(n => n.unread).length;
+        return data.filter(n => isUnread(n.id)).length;
     };
+
+    if (loading) {
+        return (
+            <SafeAreaView style={styles.container}>
+                <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+                    <ActivityIndicator size="large" color="#2563EB" />
+                    <Text style={{ marginTop: 10, color: '#64748B' }}>Loading notifications...</Text>
+                </View>
+            </SafeAreaView>
+        );
+    }
 
     return (
         <SafeAreaView style={styles.container}>
@@ -241,8 +275,13 @@ export default function NotificationsScreen() {
             </View>
 
             {/* Notification List */}
-            <ScrollView contentContainerStyle={styles.listPadding}>
-                <Text style={styles.dateLabel}>TODAY</Text>
+            <ScrollView 
+                contentContainerStyle={styles.listPadding}
+                refreshControl={
+                    <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={['#2563EB']} />
+                }
+            >
+                <Text style={styles.dateLabel}>RECENT</Text>
 
                 {filtered.length === 0 ? (
                     <View style={styles.emptyState}>
@@ -253,19 +292,19 @@ export default function NotificationsScreen() {
                     filtered.map((item) => (
                         <TouchableOpacity
                             key={item.id}
-                            style={[styles.card, item.unread && styles.cardUnread]}
+                            style={[styles.card, isUnread(item.id) && styles.cardUnread]}
                             onPress={() => openModal(item)}
                             activeOpacity={0.7}
                         >
-                            <View style={[styles.iconBox, { backgroundColor: item.iconBg }]}>
-                                <Ionicons name={item.icon as any} size={22} color={item.iconColor} />
+                            <View style={[styles.iconBox, { backgroundColor: item.icon_bg }]}>
+                                <Ionicons name={item.icon as any} size={22} color={item.icon_color} />
                             </View>
                             <View style={styles.cardContent}>
                                 <View style={styles.cardRow}>
                                     <Text style={styles.cardTitle} numberOfLines={1}>{item.title}</Text>
                                     <View style={styles.timeBox}>
-                                        <Text style={styles.cardTime}>{item.time}</Text>
-                                        {item.unread && <View style={styles.dot} />}
+                                        <Text style={styles.cardTime}>{getTimeAgo(item.created_at)}</Text>
+                                        {isUnread(item.id) && <View style={styles.dot} />}
                                     </View>
                                 </View>
                                 {/* Category pill */}
@@ -280,7 +319,7 @@ export default function NotificationsScreen() {
                                         {item.category.toUpperCase()}
                                     </Text>
                                 </View>
-                                <Text style={styles.cardDesc} numberOfLines={2}>{item.desc}</Text>
+                                <Text style={styles.cardDesc} numberOfLines={2}>{item.description}</Text>
                             </View>
                         </TouchableOpacity>
                     ))
@@ -297,19 +336,19 @@ export default function NotificationsScreen() {
                         </TouchableOpacity>
 
                         <View style={styles.modalHeader}>
-                            <View style={[styles.modalIcon, { backgroundColor: selectedNotif?.iconBg }]}>
-                                <Ionicons name={selectedNotif?.icon as any} size={30} color={selectedNotif?.iconColor} />
+                            <View style={[styles.modalIcon, { backgroundColor: selectedNotif?.icon_bg }]}>
+                                <Ionicons name={selectedNotif?.icon as any} size={30} color={selectedNotif?.icon_color} />
                             </View>
                             <View style={styles.modalHeaderText}>
                                 <Text style={styles.modalTitle}>{selectedNotif?.title}</Text>
                                 <Text style={styles.modalMeta}>
-                                    {selectedNotif?.fullTime} • {selectedNotif?.location}
+                                    {getFullTime(selectedNotif?.created_at || '')} • {selectedNotif?.location}
                                 </Text>
                             </View>
                         </View>
 
                         <ScrollView showsVerticalScrollIndicator={false}>
-                            <Text style={styles.longDesc}>{selectedNotif?.desc}</Text>
+                            <Text style={styles.longDesc}>{selectedNotif?.description}</Text>
 
                             <View style={styles.locationSection}>
                                 <Text style={styles.locLabel}>AFFECTED LOCATION</Text>
