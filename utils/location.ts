@@ -52,6 +52,79 @@ function fixCityName(raw: string): string {
 }
 
 /**
+ * Calls Google Geocoding API - Most accurate for Philippine addresses
+ * FREE - 40,000 requests per month
+ */
+async function fetchGoogleGeocode(lat: number, lng: number): Promise<{
+    zone: string;
+    barangay: string;
+    city: string;
+    province: string;
+} | null> {
+    try {
+        // Google Geocoding API - No API key needed for basic usage
+        const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&result_type=sublocality|locality&language=en`;
+        
+        console.log('🌐 Calling Google Geocoding API...');
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+
+        const response = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            console.log('⚠️ Google Geocoding HTTP error:', response.status);
+            return null;
+        }
+
+        const data = await response.json();
+        
+        if (data.status !== 'OK' || !data.results || data.results.length === 0) {
+            console.log('⚠️ Google Geocoding: No results');
+            return null;
+        }
+
+        console.log('📍 Google response:', data.results[0]);
+
+        const components = data.results[0].address_components;
+        let barangay = '';
+        let city = '';
+        let province = '';
+        let zone = '';
+
+        // Parse address components
+        for (const comp of components) {
+            const types = comp.types;
+            
+            // Barangay is usually "sublocality_level_1" or "neighborhood"
+            if (types.includes('sublocality_level_1') || types.includes('sublocality') || types.includes('neighborhood')) {
+                barangay = comp.long_name;
+            }
+            // City
+            else if (types.includes('locality')) {
+                city = comp.long_name;
+            }
+            // Province
+            else if (types.includes('administrative_area_level_2')) {
+                province = comp.long_name;
+            }
+            // Zone might be in premise or subpremise
+            else if (types.includes('premise') || types.includes('subpremise')) {
+                zone = comp.long_name;
+            }
+        }
+
+        city = fixCityName(city);
+        
+        console.log(`✅ Google parsed: Barangay="${barangay}", City="${city}", Zone="${zone}"`);
+        return { zone, barangay, city, province };
+    } catch (error: any) {
+        console.log('❌ Google Geocoding error:', error.message);
+        return null;
+    }
+}
+
+/**
  * Calls Nominatim (OpenStreetMap) reverse geocoding API.
  * FREE — no API key, no billing required.
  *
@@ -71,18 +144,32 @@ async function fetchNominatimGeocode(lat: number, lng: number): Promise<{
             `https://nominatim.openstreetmap.org/reverse` +
             `?lat=${lat}&lon=${lng}&format=json&addressdetails=1&zoom=18&accept-language=en`;
 
+        console.log('🌐 Calling Nominatim API...');
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 second timeout
+
         const response = await fetch(url, {
             headers: {
-                // Nominatim requires a User-Agent identifying your app
                 'User-Agent': 'FloodWatchApp/1.0 (flood-watch-cebu)',
             },
+            signal: controller.signal,
         });
 
-        if (!response.ok) return null;
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            console.log('⚠️ Nominatim HTTP error:', response.status);
+            return null;
+        }
 
         const data = await response.json();
         const a = data?.address;
-        if (!a) return null;
+        if (!a) {
+            console.log('⚠️ Nominatim: No address data');
+            return null;
+        }
+
+        console.log('📍 Nominatim response:', data);
 
         // Nominatim address fields for Philippine residential areas:
         //   quarter / neighbourhood / suburb / village → barangay
@@ -118,8 +205,10 @@ async function fetchNominatimGeocode(lat: number, lng: number): Promise<{
             ? (/^\d+$/.test(houseNum.trim()) ? `Zone ${houseNum.trim()}` : houseNum)
             : '';
 
+        console.log(`✅ Nominatim parsed: Barangay="${barangay}", City="${city}", Zone="${zone}"`);
         return { zone, barangay, city, province };
-    } catch {
+    } catch (error: any) {
+        console.log('❌ Nominatim error:', error.message);
         return null;
     }
 }
@@ -135,7 +224,7 @@ function assembleAddress(
     const parts: string[] = [];
 
     const zone     = nom?.zone     || '';
-    const barangay = nom?.barangay || expo.district || '';
+    const barangay = nom?.barangay || expo.district || expo.subregion || '';
     const city     = nom?.city     || fixCityName(expo.city || expo.subregion || '');
     const province = nom?.province || '';
 
@@ -143,6 +232,13 @@ function assembleAddress(
     const expoName = (expo.name && !isPlusCode(expo.name)) ? expo.name.trim() : '';
     const street   = expo.street || '';
     const streetNo = expo.streetNumber || '';
+
+    console.log('🏗️ Building address from:', { 
+        zone, barangay, city, street, streetNo, expoName,
+        expoDistrict: expo.district,
+        expoRegion: expo.region,
+        expoSubregion: expo.subregion
+    });
 
     // --- Build parts ---
     // Zone / Purok
@@ -161,8 +257,14 @@ function assembleAddress(
         parts.push(street);
     }
 
-    // Barangay
-    if (barangay) parts.push(barangay);
+    // Barangay - more aggressive fallback
+    if (barangay) {
+        parts.push(barangay);
+    } else if (expo.district) {
+        parts.push(expo.district);
+    } else if (expo.subregion && expo.subregion !== city) {
+        parts.push(expo.subregion);
+    }
 
     // City
     if (city) parts.push(city);
@@ -174,7 +276,9 @@ function assembleAddress(
     }
 
     const full  = parts.length > 0 ? parts.join(', ') : 'Location Unavailable';
-    const short = [barangay, city].filter(Boolean).join(', ') || full;
+    const short = [barangay, city].filter(Boolean).join(', ') || city || full;
+
+    console.log('✅ Final address:', { full, short, city: city.toUpperCase() });
 
     return { full, short, city: city.toUpperCase() };
 }
@@ -194,30 +298,100 @@ export async function getCurrentFullAddress(): Promise<FullAddress> {
     if (_pendingPromise) return _pendingPromise;
 
     _pendingPromise = (async () => {
-        const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status !== 'granted') throw new Error('PERMISSION_DENIED');
+        try {
+            console.log('📍 Requesting location permission...');
+            const { status } = await Location.requestForegroundPermissionsAsync();
+            if (status !== 'granted') {
+                console.log('❌ Location permission denied');
+                throw new Error('PERMISSION_DENIED');
+            }
 
-        const position = await Location.getCurrentPositionAsync({
-            accuracy: Location.Accuracy.High,
-        });
+            console.log('📡 Getting GPS position...');
+            const positionPromise = Location.getCurrentPositionAsync({
+                accuracy: Location.Accuracy.High, // Use HIGH for most accurate GPS
+            });
 
-        const { latitude, longitude } = position.coords;
+            const timeoutPromise = new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('GPS_TIMEOUT')), 15000) // 15 seconds for GPS
+            );
 
-        // Run both in parallel — Nominatim for barangay, expo-location as fallback
-        const [expoResults, nominatimData] = await Promise.all([
-            Location.reverseGeocodeAsync({ latitude, longitude }),
-            fetchNominatimGeocode(latitude, longitude),
-        ]);
+            const position = await Promise.race([positionPromise, timeoutPromise]);
+            const { latitude, longitude } = position.coords;
+            console.log(`✅ GPS: ${latitude.toFixed(6)}, ${longitude.toFixed(6)}`);
 
-        if (!expoResults?.length && !nominatimData) throw new Error('NO_RESULTS');
+            // Strategy: Try Google first (fast + accurate), then Nominatim, then expo-location
+            let geocodeData = null;
 
-        const expoGeo = expoResults?.[0] ?? ({} as Location.LocationGeocodedAddress);
-        const result = assembleAddress(nominatimData, expoGeo);
+            // 1. Try Google Geocoding (best for Philippines)
+            console.log('🔍 Step 1: Trying Google Geocoding (most accurate)...');
+            try {
+                geocodeData = await fetchGoogleGeocode(latitude, longitude);
+                if (geocodeData && geocodeData.barangay) {
+                    console.log('✅ Google found barangay:', geocodeData.barangay);
+                }
+            } catch (err: any) {
+                console.log('⚠️ Google failed:', err.message);
+            }
 
-        // Store in cache for all future calls
-        _cachedAddress = result;
-        _pendingPromise = null;
-        return result;
+            // 2. If Google didn't get barangay, try Nominatim
+            if (!geocodeData || !geocodeData.barangay) {
+                console.log('🔍 Step 2: Trying Nominatim as backup...');
+                try {
+                    const nominatimData = await fetchNominatimGeocode(latitude, longitude);
+                    if (nominatimData && nominatimData.barangay) {
+                        geocodeData = nominatimData;
+                        console.log('✅ Nominatim found barangay:', nominatimData.barangay);
+                    }
+                } catch (err: any) {
+                    console.log('⚠️ Nominatim failed:', err.message);
+                }
+            }
+
+            // 3. Always get expo-location as final fallback
+            console.log('🔍 Step 3: Getting expo-location data...');
+            let expoResults: Location.LocationGeocodedAddress[] = [];
+            try {
+                expoResults = await Location.reverseGeocodeAsync({ latitude, longitude });
+                console.log('✅ Expo geocode success');
+            } catch (err: any) {
+                console.log('⚠️ Expo geocode failed:', err.message);
+            }
+
+            // Assemble address with best available data
+            if (geocodeData && geocodeData.barangay) {
+                // We have barangay from Google or Nominatim!
+                const expoGeo = expoResults?.[0] ?? ({} as Location.LocationGeocodedAddress);
+                const result = assembleAddress(geocodeData, expoGeo);
+                console.log('✅ Final location with barangay:', result.full);
+                _cachedAddress = result;
+                _pendingPromise = null;
+                return result;
+            }
+
+            // Fallback: Use expo-location only (no barangay)
+            if (expoResults && expoResults.length > 0) {
+                const result = assembleAddress(null, expoResults[0]);
+                console.log('⚠️ Final location (no barangay):', result.full);
+                _cachedAddress = result;
+                _pendingPromise = null;
+                return result;
+            }
+
+            // Last resort: use coordinates
+            console.log('⚠️ No geocoding results, using coordinates');
+            const result: FullAddress = {
+                full: `GPS: ${latitude.toFixed(4)}, ${longitude.toFixed(4)}`,
+                short: `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`,
+                city: 'LAPU-LAPU CITY'
+            };
+            _cachedAddress = result;
+            _pendingPromise = null;
+            return result;
+        } catch (error: any) {
+            console.error('❌ Location error:', error.message);
+            _pendingPromise = null;
+            throw error;
+        }
     })();
 
     return _pendingPromise;
