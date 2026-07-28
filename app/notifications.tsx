@@ -1,8 +1,10 @@
+import { supabase } from '@/utils/supabase';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import {
+    ActivityIndicator,
     Animated,
     Dimensions,
     Modal,
@@ -19,138 +21,165 @@ const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 type Category = 'All' | 'Emergency' | 'Updates';
 
-const NOTIFICATIONS_DATA = [
-    {
-        id: '1',
-        category: 'Emergency',
-        title: 'Severe Weather Warning',
-        time: '2m ago',
-        desc: 'The Philippine Atmospheric, Geophysical and Astronomical Services Administration (PAGASA) has issued a Red Rainfall Warning for Talisay and surrounding areas in Metro Cebu. Extremely heavy rainfall (exceeding 30mm/hour) is expected to continue for the next 3 hours. Serious flooding is expected in low-lying areas and near river systems.',
-        location: 'Talisay City',
-        fullTime: 'Today, 9:39 AM',
-        icon: 'warning',
-        iconColor: '#EF4444',
-        iconBg: '#FEE2E2',
-        unread: true,
-    },
-    {
-        id: '2',
-        category: 'Emergency',
-        title: 'Critical Water Level',
-        time: '45m ago',
-        desc: 'Guadalupe River sensors have reached Stage 2 alert level. Monitoring stations are on active watch. Residents near riverbanks should seek higher ground immediately.',
-        location: 'Guadalupe River',
-        fullTime: 'Today, 8:55 AM',
-        icon: 'water',
-        iconColor: '#EF4444',
-        iconBg: '#FEE2E2',
-        unread: true,
-    },
-    {
-        id: '3',
-        category: 'Emergency',
-        title: 'Evacuation Order Issued',
-        time: '1h ago',
-        desc: 'Local government units in Barangay Mabolo have issued a mandatory evacuation order for residents within 50 meters of the creek due to rapidly rising water levels.',
-        location: 'Mabolo, Cebu City',
-        fullTime: 'Today, 8:12 AM',
-        icon: 'alert-circle',
-        iconColor: '#EF4444',
-        iconBg: '#FEE2E2',
-        unread: false,
-    },
-    {
-        id: '4',
-        category: 'Updates',
-        title: 'Relief Operations Ongoing',
-        time: '2h ago',
-        desc: 'Relief operations are currently underway in affected barangays. CDRRMO teams are distributing food packs, water, and emergency supplies to displaced families in evacuation centers.',
-        location: 'Cebu City',
-        fullTime: 'Today, 7:45 AM',
-        icon: 'heart',
-        iconColor: '#10B981',
-        iconBg: '#ECFDF5',
-        unread: false,
-    },
-    {
-        id: '5',
-        category: 'Updates',
-        title: 'Road Clearing Update',
-        time: '3h ago',
-        desc: 'DPWH teams have cleared major debris on N. Bacalso Avenue and Colon Street. Both roads are now passable to light vehicles. Motorists are advised to drive slowly.',
-        location: 'Cebu City',
-        fullTime: 'Today, 6:30 AM',
-        icon: 'construct',
-        iconColor: '#F59E0B',
-        iconBg: '#FEF3C7',
-        unread: false,
-    },
-    {
-        id: '6',
-        category: 'Updates',
-        title: 'Rainfall Advisory Lifted',
-        time: '4h ago',
-        desc: 'PAGASA has lifted the Orange Rainfall Warning for northern Cebu. Weather conditions are expected to improve within the next 2 hours. Residents may return to normal activities with caution.',
-        location: 'Northern Cebu',
-        fullTime: 'Today, 5:50 AM',
-        icon: 'partly-sunny',
-        iconColor: '#2563EB',
-        iconBg: '#EFF6FF',
-        unread: false,
-    },
-];
-
-const STORAGE_KEY = 'floodwatch_read_notif_ids';
+interface Notification {
+    id: string;
+    category: 'Emergency' | 'Updates';
+    title: string;
+    time: string;
+    desc: string;
+    location: string;
+    fullTime: string;
+    icon: string;
+    iconColor: string;
+    iconBg: string;
+    unread: boolean;
+}
 
 const TABS: Category[] = ['All', 'Emergency', 'Updates'];
+const STORAGE_KEY = 'floodwatch_read_notif_ids';
+
+// Convert timestamp to "time ago" format
+const getTimeAgo = (dateString: string) => {
+    const now = new Date();
+    const published = new Date(dateString);
+    const diffMs = now.getTime() - published.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMins / 60);
+    const diffDays = Math.floor(diffHours / 24);
+
+    if (diffMins < 1) return 'now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    return `${diffDays}d ago`;
+};
+
+// Get full time format
+const getFullTime = (dateString: string) => {
+    const date = new Date(dateString);
+    return date.toLocaleString('en-US', { 
+        month: 'short', 
+        day: 'numeric', 
+        hour: 'numeric', 
+        minute: '2-digit',
+        hour12: true 
+    });
+};
+
+// Map alert type to icon and color
+const getAlertIcon = (alertType: string) => {
+    const type = (alertType || '').toLowerCase();
+    if (type.includes('evacuation') || type.includes('urgent')) {
+        return { icon: 'alert-circle', color: '#EF4444', bg: '#FEE2E2' };
+    } else if (type.includes('water') || type.includes('level') || type.includes('flood')) {
+        return { icon: 'water', color: '#EF4444', bg: '#FEE2E2' };
+    } else if (type.includes('weather') || type.includes('warning')) {
+        return { icon: 'warning', color: '#EF4444', bg: '#FEE2E2' };
+    } else if (type.includes('relief') || type.includes('operation')) {
+        return { icon: 'heart', color: '#10B981', bg: '#ECFDF5' };
+    } else if (type.includes('road') || type.includes('clear')) {
+        return { icon: 'construct', color: '#F59E0B', bg: '#FEF3C7' };
+    } else if (type.includes('advisory') || type.includes('lifted')) {
+        return { icon: 'checkmark-circle', color: '#2563EB', bg: '#EFF6FF' };
+    }
+    return { icon: 'information-circle', color: '#2563EB', bg: '#EFF6FF' };
+};
 
 export default function NotificationsScreen() {
     const router = useRouter();
     const [activeTab, setActiveTab] = useState<Category>('All');
-    const [selectedNotif, setSelectedNotif] = useState<any>(null);
+    const [selectedNotif, setSelectedNotif] = useState<Notification | null>(null);
     const [modalVisible, setModalVisible] = useState(false);
+    const [notifications, setNotifications] = useState<Notification[]>([]);
+    const [loading, setLoading] = useState(true);
     const slideAnim = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
 
-    // Keep notifications in state so unread can be updated
-    const [notifications, setNotifications] = useState(NOTIFICATIONS_DATA);
+    // Fetch notifications from Supabase
+    const fetchNotifications = async () => {
+        try {
+            setLoading(true);
+            const { data, error } = await supabase
+                .from('notifications')
+                .select('*')
+                .order('created_at', { ascending: false });
 
-    // Load persisted read IDs on mount and apply them
+            if (error) {
+                console.error('❌ Fetch error:', error);
+                return;
+            }
+
+            if (!data || data.length === 0) {
+                console.log('⚠️ No notifications found');
+                setNotifications([]);
+                setLoading(false);
+                return;
+            }
+
+            // Load read IDs from storage
+            const stored = await AsyncStorage.getItem(STORAGE_KEY);
+            const readIds: string[] = stored ? JSON.parse(stored) : [];
+
+            // Transform database data to our format
+            const transformed: Notification[] = data.map((item: any) => {
+                const alertIcon = getAlertIcon(item.alert_type || item.title);
+                const category = (item.alert_type || '').toLowerCase().includes('relief') || 
+                                (item.alert_type || '').toLowerCase().includes('operation') ||
+                                (item.alert_type || '').toLowerCase().includes('road') ||
+                                (item.alert_type || '').toLowerCase().includes('advisory') ? 'Updates' : 'Emergency';
+
+                return {
+                    id: item.id,
+                    category: category as 'Emergency' | 'Updates',
+                    title: item.title || 'Notification',
+                    time: getTimeAgo(item.created_at),
+                    desc: item.description || item.message || 'No description available',
+                    location: item.location || 'Cebu',
+                    fullTime: getFullTime(item.created_at),
+                    icon: alertIcon.icon,
+                    iconColor: alertIcon.color,
+                    iconBg: alertIcon.bg,
+                    unread: !readIds.includes(item.id),
+                };
+            });
+
+            setNotifications(transformed);
+            console.log('✅ Notifications loaded:', transformed.length);
+        } catch (err: any) {
+            console.error('❌ Fetch exception:', err.message);
+            setNotifications([]);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // Fetch on mount and refresh every 30 seconds
     useEffect(() => {
-        (async () => {
-            try {
-                const stored = await AsyncStorage.getItem(STORAGE_KEY);
-                if (stored) {
-                    const readIds: string[] = JSON.parse(stored);
-                    setNotifications(prev =>
-                        prev.map(n => readIds.includes(n.id) ? { ...n, unread: false } : n)
-                    );
-                }
-            } catch {}
-        })();
+        fetchNotifications();
+        const interval = setInterval(fetchNotifications, 30000);
+        return () => clearInterval(interval);
     }, []);
 
-    // Save a set of read IDs to AsyncStorage
-    const persistReadIds = async (updatedList: typeof NOTIFICATIONS_DATA) => {
+    // Persist read IDs when notifications change
+    const persistReadIds = async (updatedList: Notification[]) => {
         try {
             const readIds = updatedList.filter(n => !n.unread).map(n => n.id);
             await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(readIds));
         } catch {}
     };
 
-    // Filter notifications based on active tab
+    // Filter notifications
     const filtered = activeTab === 'All'
         ? notifications
         : notifications.filter(n => n.category === activeTab);
 
-    // Mark all as read and persist
+    // Mark all as read
     const markAllAsRead = () => {
         const updated = notifications.map(n => ({ ...n, unread: false }));
         setNotifications(updated);
         persistReadIds(updated);
     };
 
-    const openModal = (notif: any) => {
-        // Mark this notification as read when opened and persist
+    // Open modal
+    const openModal = (notif: Notification) => {
         const updated = notifications.map(n =>
             n.id === notif.id ? { ...n, unread: false } : n
         );
@@ -166,6 +195,7 @@ export default function NotificationsScreen() {
         }).start();
     };
 
+    // Close modal
     const closeModal = () => {
         Animated.timing(slideAnim, {
             toValue: SCREEN_HEIGHT,
@@ -177,6 +207,7 @@ export default function NotificationsScreen() {
         });
     };
 
+    // Count unread
     const unreadCount = (tab: Category) => {
         const data = tab === 'All'
             ? notifications
@@ -205,7 +236,7 @@ export default function NotificationsScreen() {
                 <Text style={styles.mainTitle}>Notifications</Text>
             </View>
 
-            {/* Clickable Tabs */}
+            {/* Tabs */}
             <View style={styles.tabBar}>
                 {TABS.map((tab) => {
                     const count = unreadCount(tab);
@@ -244,7 +275,12 @@ export default function NotificationsScreen() {
             <ScrollView contentContainerStyle={styles.listPadding}>
                 <Text style={styles.dateLabel}>TODAY</Text>
 
-                {filtered.length === 0 ? (
+                {loading ? (
+                    <View style={styles.loadingState}>
+                        <ActivityIndicator size="large" color="#2563EB" />
+                        <Text style={styles.loadingText}>Loading notifications...</Text>
+                    </View>
+                ) : filtered.length === 0 ? (
                     <View style={styles.emptyState}>
                         <Ionicons name="notifications-off-outline" size={48} color="#CBD5E1" />
                         <Text style={styles.emptyText}>No {activeTab.toLowerCase()} notifications</Text>
@@ -268,7 +304,6 @@ export default function NotificationsScreen() {
                                         {item.unread && <View style={styles.dot} />}
                                     </View>
                                 </View>
-                                {/* Category pill */}
                                 <View style={[
                                     styles.categoryPill,
                                     item.category === 'Emergency' ? styles.pillEmergency : styles.pillUpdate,
@@ -363,6 +398,12 @@ const styles = StyleSheet.create({
     listPadding: { padding: 20 },
     dateLabel:   { fontSize: 12, fontWeight: '800', color: '#94A3B8', marginBottom: 15 },
 
+    // Loading/Empty states
+    loadingState: { alignItems: 'center', paddingTop: 60 },
+    loadingText: { fontSize: 15, color: '#94A3B8', fontWeight: '600', marginTop: 12 },
+    emptyState: { alignItems: 'center', paddingTop: 60 },
+    emptyText:  { fontSize: 15, color: '#CBD5E1', fontWeight: '600', marginTop: 12 },
+
     // Cards
     card:       { flexDirection: 'row', backgroundColor: '#F8FAFC', borderRadius: 18, padding: 16, marginBottom: 12, borderWidth: 1, borderColor: '#F1F5F9' },
     cardUnread: { backgroundColor: '#FAFBFF', borderColor: '#DBEAFE' },
@@ -375,17 +416,13 @@ const styles = StyleSheet.create({
     dot:        { width: 8, height: 8, borderRadius: 4, backgroundColor: '#2563EB', marginLeft: 6 },
     cardDesc:   { fontSize: 13, color: '#64748B', marginTop: 6, lineHeight: 19 },
 
-    // Category pills on cards
+    // Category pills
     categoryPill:        { alignSelf: 'flex-start', paddingHorizontal: 7, paddingVertical: 2, borderRadius: 5, marginBottom: 5 },
     pillEmergency:       { backgroundColor: '#FEE2E2' },
     pillUpdate:          { backgroundColor: '#ECFDF5' },
     categoryPillText:    { fontSize: 9, fontWeight: '800', letterSpacing: 0.5 },
     pillTextEmergency:   { color: '#EF4444' },
     pillTextUpdate:      { color: '#10B981' },
-
-    // Empty state
-    emptyState: { alignItems: 'center', paddingTop: 60 },
-    emptyText:  { fontSize: 15, color: '#CBD5E1', fontWeight: '600', marginTop: 12 },
 
     // Modal
     overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },

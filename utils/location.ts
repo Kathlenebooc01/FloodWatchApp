@@ -7,6 +7,10 @@ export interface FullAddress {
     short: string;
     /** City/municipality only in uppercase, e.g. "LAPU-LAPU CITY" */
     city: string;
+    /** Latitude from GPS */
+    latitude: number;
+    /** Longitude from GPS */
+    longitude: number;
 }
     
 // ─── Module-level cache ────────────────────────────────────────────────────
@@ -130,7 +134,9 @@ async function fetchNominatimGeocode(lat: number, lng: number): Promise<{
  */
 function assembleAddress(
     nom: Awaited<ReturnType<typeof fetchNominatimGeocode>>,
-    expo: Location.LocationGeocodedAddress
+    expo: Location.LocationGeocodedAddress,
+    latitude: number = 0,
+    longitude: number = 0,
 ): FullAddress {
     const parts: string[] = [];
 
@@ -176,7 +182,7 @@ function assembleAddress(
     const full  = parts.length > 0 ? parts.join(', ') : 'Location Unavailable';
     const short = [barangay, city].filter(Boolean).join(', ') || full;
 
-    return { full, short, city: city.toUpperCase() };
+    return { full, short, city: city.toUpperCase(), latitude, longitude };
 }
 
 /**
@@ -212,7 +218,7 @@ export async function getCurrentFullAddress(): Promise<FullAddress> {
         if (!expoResults?.length && !nominatimData) throw new Error('NO_RESULTS');
 
         const expoGeo = expoResults?.[0] ?? ({} as Location.LocationGeocodedAddress);
-        const result = assembleAddress(nominatimData, expoGeo);
+        const result = assembleAddress(nominatimData, expoGeo, latitude, longitude);
 
         // Store in cache for all future calls
         _cachedAddress = result;
@@ -230,5 +236,5 @@ export function clearLocationCache(): void {
 }
 
 export function buildFullAddress(geo: Location.LocationGeocodedAddress): FullAddress {
-    return assembleAddress(null, geo);
+    return assembleAddress(null, geo, 0, 0);
 }

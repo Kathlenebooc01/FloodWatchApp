@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
@@ -18,6 +19,7 @@ import {
 
 import Navbar from '@/components/navbar';
 import { getCurrentFullAddress } from '@/utils/location';
+import { supabase } from '@/utils/supabase';
 
 const RELATIONSHIPS = [
     'Mother',
@@ -42,15 +44,133 @@ export default function ProfileScreen() {
     const router = useRouter();
 
     // ── Profile info ──
-    const [firstName, setFirstName] = useState('Juan');
-    const [lastName, setLastName]   = useState('Dela Cruz');
-    const [mobile, setMobile]       = useState('+63 *** *** ****');
+    const [profileId, setProfileId] = useState<string | null>(null);
+    const [firstName, setFirstName] = useState('');
+    const [lastName, setLastName]   = useState('');
+    const [mobile, setMobile]       = useState('');
     const [profilePhoto, setProfilePhoto] = useState<string | null>(null);
+    const [profileLoading, setProfileLoading] = useState(true);
 
     // ── Live location ──
-    const [locationText, setLocationText]     = useState('Fetching location...');
+    const [locationText, setLocationText]       = useState('Fetching location...');
     const [locationLoading, setLocationLoading] = useState(true);
 
+    // Load profile from Supabase on mount
+    useEffect(() => {
+        (async () => {
+            try {
+                console.log('📋 Loading profile...');
+                
+                // ⚡ INSTANT LOAD from AsyncStorage first
+                try {
+                    const storedProfile = await AsyncStorage.getItem('user_profile');
+                    if (storedProfile) {
+                        const profile = JSON.parse(storedProfile);
+                        setFirstName(profile.firstName || '');
+                        setLastName(profile.lastName || '');
+                        setMobile(profile.mobile || '');
+                        setProfilePhoto(profile.photo || null);
+                        setProfileLoading(false); // Stop loading immediately
+                        console.log('⚡ Loaded profile from cache (instant)');
+                    }
+                } catch {}
+                
+                // Then fetch fresh data from server in background
+                const { data: sessionData } = await supabase.auth.getSession();
+                const userId = sessionData?.session?.user?.id;
+                const userMeta = sessionData?.session?.user?.user_metadata;
+
+                console.log('👤 User ID:', userId);
+                console.log('📦 User metadata:', userMeta);
+
+                if (!userId) { 
+                    console.warn('⚠️ No user ID found - user not signed in');
+                    setProfileLoading(false); 
+                    return; 
+                }
+
+                // Fetch profile by user ID first
+                const { data, error } = await supabase
+                    .from('profiles')
+                    .select('*')
+                    .eq('id', userId)
+                    .maybeSingle();
+
+                console.log('📥 Profile data from DB:', data);
+                console.log('❌ Profile error:', error);
+
+                if (data && !error) {
+                    console.log('✅ Profile found by ID');
+                    console.log('📊 Full Name:', data.full_name);
+                    console.log('📊 Mobile:', data.mobile_number);
+                    
+                    setProfileId(data.id);
+                    // Split full_name into first and last name for display
+                    const names = (data.full_name || '').split(' ');
+                    const fname = names[0] || '';
+                    const lname = names.slice(1).join(' ') || '';
+                    
+                    setFirstName(fname || userMeta?.first_name || '');
+                    setLastName(lname || userMeta?.last_name || '');
+                    setMobile(data.mobile_number || userMeta?.phone || '');
+                    setProfilePhoto(data.avatar_url || null);
+                    
+                    // Update AsyncStorage with fresh data
+                    await AsyncStorage.setItem('user_profile', JSON.stringify({
+                        firstName: data.first_name,
+                        lastName: data.last_name,
+                        mobile: data.mobile_number,
+                        photo: data.avatar_url,
+                    }));
+                    console.log('💾 Updated AsyncStorage with DB data');
+                } else {
+                    console.log('⚠️ Profile not found by ID, trying by phone...');
+                    // Profile not found by ID — try by phone from metadata
+                    const phone = userMeta?.phone;
+                    if (phone) {
+                        const { data: phoneData } = await supabase
+                            .from('profiles')
+                            .select('*')
+                            .eq('mobile_number', phone)
+                            .maybeSingle();
+                        
+                        console.log('📥 Profile data by phone:', phoneData);
+                        
+                        if (phoneData) {
+                            console.log('✅ Profile found by phone');
+                            setProfileId(phoneData.id);
+                            // Split full_name into first and last name
+                            const names = (phoneData.full_name || '').split(' ');
+                            const fname = names[0] || '';
+                            const lname = names.slice(1).join(' ') || '';
+                            
+                            setFirstName(fname || '');
+                            setLastName(lname || '');
+                            setMobile(phoneData.mobile_number || '');
+                            setProfilePhoto(phoneData.avatar_url || null);
+                        } else {
+                            // No profile in DB, use metadata
+                            console.log('ℹ️ Using metadata fallback');
+                            setFirstName(userMeta?.first_name || '');
+                            setLastName(userMeta?.last_name || '');
+                            setMobile(userMeta?.phone || '');
+                        }
+                    } else {
+                        // Fallback: use metadata directly
+                        console.log('ℹ️ Using metadata fallback (no phone)');
+                        setFirstName(userMeta?.first_name || '');
+                        setLastName(userMeta?.last_name || '');
+                        setMobile(userMeta?.phone || '');
+                    }
+                }
+            } catch (err) {
+                console.error('❌ Error loading profile:', err);
+            }
+            finally { setProfileLoading(false); }
+        })();
+    }, []);
+
+    // Load live location
     useEffect(() => {
         (async () => {
             try {
@@ -66,9 +186,10 @@ export default function ProfileScreen() {
 
     // ── Edit Profile modal ──
     const [editModalVisible, setEditModalVisible] = useState(false);
-    const [editFirst, setEditFirst] = useState(firstName);
-    const [editLast, setEditLast]   = useState(lastName);
-    const [editMobile, setEditMobile] = useState(mobile);
+    const [editFirst, setEditFirst]   = useState('');
+    const [editLast, setEditLast]     = useState('');
+    const [editMobile, setEditMobile] = useState('');
+    const [savingProfile, setSavingProfile] = useState(false);
 
     const openEditModal = () => {
         setEditFirst(firstName);
@@ -77,15 +198,33 @@ export default function ProfileScreen() {
         setEditModalVisible(true);
     };
 
-    const handleSaveProfile = () => {
+    const handleSaveProfile = async () => {
         if (!editFirst.trim() || !editLast.trim()) {
             Alert.alert('Incomplete', 'Please enter your first and last name.');
             return;
         }
-        setFirstName(editFirst.trim());
-        setLastName(editLast.trim());
-        setMobile(editMobile.trim());
-        setEditModalVisible(false);
+        setSavingProfile(true);
+        try {
+            if (profileId) {
+                const fullName = `${editFirst.trim()} ${editLast.trim()}`.trim();
+                const { error } = await supabase
+                    .from('profiles')
+                    .update({
+                        full_name: fullName,
+                        mobile_number: editMobile.trim(),
+                    })
+                    .eq('id', profileId);
+                if (error) throw error;
+            }
+            setFirstName(editFirst.trim());
+            setLastName(editLast.trim());
+            setMobile(editMobile.trim());
+            setEditModalVisible(false);
+        } catch (err: any) {
+            Alert.alert('Error', err.message || 'Could not save profile.');
+        } finally {
+            setSavingProfile(false);
+        }
     };
 
     // ── Photo picker ──
@@ -102,7 +241,12 @@ export default function ProfileScreen() {
             quality: 0.8,
         });
         if (!result.canceled) {
-            setProfilePhoto(result.assets[0].uri);
+            const uri = result.assets[0].uri;
+            setProfilePhoto(uri);
+            // Save avatar_url to Supabase if we have a profile id
+            if (profileId) {
+                await supabase.from('profiles').update({ avatar_url: uri }).eq('id', profileId);
+            }
         }
     };
 
@@ -130,13 +274,17 @@ export default function ProfileScreen() {
     };
 
     // ── Emergency Contact modal ──
-    const [ecModalVisible, setEcModalVisible]       = useState(false);
-    const [ecName, setEcName]                       = useState('');
-    const [ecRelation, setEcRelation]               = useState('');
-    const [ecNumber, setEcNumber]                   = useState('');
+    const [ecModalVisible, setEcModalVisible]               = useState(false);
+    const [ecName, setEcName]                               = useState('');
+    const [ecRelation, setEcRelation]                       = useState('');
+    const [ecNumber, setEcNumber]                           = useState('');
     const [relationPickerVisible, setRelationPickerVisible] = useState(false);
+    const [savingEC, setSavingEC]                           = useState(false);
 
-    const handleSaveEmergency = () => {
+    // ── Sign Out modal ──
+    const [signOutModalVisible, setSignOutModalVisible] = useState(false);
+
+    const handleSaveEmergency = async () => {
         if (!ecName.trim() || !ecNumber.trim()) {
             Alert.alert('Incomplete', 'Please enter a name and contact number.');
             return;
@@ -145,8 +293,23 @@ export default function ProfileScreen() {
             Alert.alert('Incomplete', 'Please select a relationship.');
             return;
         }
-        setEcModalVisible(false);
-        Alert.alert('Saved', `Emergency contact "${ecName}" has been saved.`);
+        setSavingEC(true);
+        try {
+            const { error } = await supabase.from('distress_signals').insert([{
+                contact_name: ecName.trim(),
+                relationship: ecRelation,
+                contact_number: ecNumber.trim(),
+                profile_id: profileId,
+            }]);
+            if (error) throw error;
+            setEcModalVisible(false);
+            setEcName(''); setEcRelation(''); setEcNumber('');
+            Alert.alert('Saved', `Emergency contact "${ecName}" has been saved.`);
+        } catch (err: any) {
+            Alert.alert('Error', err.message || 'Could not save emergency contact.');
+        } finally {
+            setSavingEC(false);
+        }
     };
 
     return (
@@ -179,7 +342,9 @@ export default function ProfileScreen() {
                         </TouchableOpacity>
                     </View>
 
-                    <Text style={styles.fullName}>{firstName} {lastName}</Text>
+                    <Text style={styles.fullName}>
+                        {profileLoading ? 'Loading...' : `${firstName} ${lastName}`.trim() || 'Your Name'}
+                    </Text>
 
                     {/* Live location under the name */}
                     <View style={styles.locationRow}>
@@ -230,6 +395,16 @@ export default function ProfileScreen() {
                     <Ionicons name="people-outline" size={18} color="#2563EB" style={{ marginRight: 10 }} />
                     <Text style={styles.secondaryBtnText}>Set Emergency Contact</Text>
                 </TouchableOpacity>
+
+                {/* Sign Out */}
+                <TouchableOpacity
+                    style={styles.signOutBtn}
+                    activeOpacity={0.85}
+                    onPress={() => setSignOutModalVisible(true)}
+                >
+                    <Ionicons name="log-out-outline" size={18} color="#EF4444" style={{ marginRight: 10 }} />
+                    <Text style={styles.signOutBtnText}>Sign Out</Text>
+                </TouchableOpacity>
             </ScrollView>
 
             <Navbar />
@@ -237,61 +412,98 @@ export default function ProfileScreen() {
             {/* ══════════════════════════════════════
                 Edit Profile Modal
             ══════════════════════════════════════ */}
-            <Modal visible={editModalVisible} transparent animationType="slide">
-                <View style={styles.modalOverlay}>
-                    <View style={styles.modalSheet}>
-                        <View style={styles.modalHandle} />
-                        <Text style={styles.modalTitle}>Edit Profile</Text>
-                        <Text style={styles.modalSubtitle}>Update your personal information.</Text>
+            <Modal
+                visible={editModalVisible}
+                transparent
+                animationType="fade"
+                onRequestClose={() => setEditModalVisible(false)}
+            >
+                <View style={{
+                    flex: 1,
+                    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    padding: 24,
+                }}>
+                    <View style={{
+                        backgroundColor: '#FFFFFF',
+                        borderRadius: 20,
+                        padding: 24,
+                        width: '100%',
+                        maxWidth: 400,
+                        shadowColor: '#000',
+                        shadowOffset: { width: 0, height: 20 },
+                        shadowOpacity: 0.3,
+                        shadowRadius: 30,
+                        elevation: 20,
+                    }}>
+                        {/* Header */}
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                            <Text style={{ fontSize: 18, fontWeight: '700', color: '#1E293B' }}>Edit Profile</Text>
+                            <TouchableOpacity onPress={() => setEditModalVisible(false)}>
+                                <Ionicons name="close" size={24} color="#64748B" />
+                            </TouchableOpacity>
+                        </View>
 
+                        {/* First Name */}
                         <Text style={styles.inputLabel}>FIRST NAME</Text>
                         <View style={styles.inputRow}>
+                            <Ionicons name="person-outline" size={18} color="#94A3B8" style={{ marginRight: 8 }} />
                             <TextInput
                                 style={styles.inputField}
                                 placeholder="First name"
-                                placeholderTextColor="#94A3B8"
+                                placeholderTextColor="#CBD5E1"
                                 value={editFirst}
                                 onChangeText={setEditFirst}
                             />
                         </View>
 
+                        {/* Last Name */}
                         <Text style={styles.inputLabel}>LAST NAME</Text>
                         <View style={styles.inputRow}>
+                            <Ionicons name="person-outline" size={18} color="#94A3B8" style={{ marginRight: 8 }} />
                             <TextInput
                                 style={styles.inputField}
                                 placeholder="Last name"
-                                placeholderTextColor="#94A3B8"
+                                placeholderTextColor="#CBD5E1"
                                 value={editLast}
                                 onChangeText={setEditLast}
                             />
                         </View>
 
+                        {/* Mobile Number */}
                         <Text style={styles.inputLabel}>MOBILE NUMBER</Text>
                         <View style={styles.inputRow}>
+                            <Ionicons name="call-outline" size={18} color="#94A3B8" style={{ marginRight: 8 }} />
                             <TextInput
                                 style={styles.inputField}
                                 placeholder="+63 9XX XXX XXXX"
-                                placeholderTextColor="#94A3B8"
+                                placeholderTextColor="#CBD5E1"
                                 keyboardType="phone-pad"
                                 value={editMobile}
                                 onChangeText={setEditMobile}
                             />
                         </View>
 
-                        <View style={styles.modalActions}>
-                            <TouchableOpacity
-                                style={styles.modalCancelBtn}
-                                onPress={() => setEditModalVisible(false)}
-                            >
-                                <Text style={styles.modalCancelText}>Cancel</Text>
-                            </TouchableOpacity>
-                            <TouchableOpacity
-                                style={styles.modalConfirmBtn}
-                                onPress={handleSaveProfile}
-                            >
-                                <Text style={styles.modalConfirmText}>Save</Text>
-                            </TouchableOpacity>
-                        </View>
+                        {/* Save Button */}
+                        <TouchableOpacity
+                            style={{
+                                backgroundColor: '#2563EB',
+                                borderRadius: 12,
+                                height: 50,
+                                justifyContent: 'center',
+                                alignItems: 'center',
+                                marginTop: 8,
+                            }}
+                            onPress={handleSaveProfile}
+                            disabled={savingProfile}
+                        >
+                            {savingProfile ? (
+                                <ActivityIndicator color="#FFFFFF" />
+                            ) : (
+                                <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '700' }}>Save Changes</Text>
+                            )}
+                        </TouchableOpacity>
                     </View>
                 </View>
             </Modal>
@@ -299,20 +511,48 @@ export default function ProfileScreen() {
             {/* ══════════════════════════════════════
                 Change Password Modal
             ══════════════════════════════════════ */}
-            <Modal visible={pwModalVisible} transparent animationType="slide">
-                <View style={styles.modalOverlay}>
-                    <View style={styles.modalSheet}>
-                        <View style={styles.modalHandle} />
-                        <Text style={styles.modalTitle}>Change Password</Text>
-                        <Text style={styles.modalSubtitle}>Enter your current password and choose a new one.</Text>
+            <Modal
+                visible={pwModalVisible}
+                transparent
+                animationType="fade"
+                onRequestClose={() => { setPwModalVisible(false); setCurrentPw(''); setNewPw(''); setConfirmPw(''); }}
+            >
+                <View style={{
+                    flex: 1,
+                    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    padding: 24,
+                }}>
+                    <View style={{
+                        backgroundColor: '#FFFFFF',
+                        borderRadius: 20,
+                        padding: 24,
+                        width: '100%',
+                        maxWidth: 400,
+                        shadowColor: '#000',
+                        shadowOffset: { width: 0, height: 20 },
+                        shadowOpacity: 0.3,
+                        shadowRadius: 30,
+                        elevation: 20,
+                    }}>
+                        {/* Header */}
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                            <Text style={{ fontSize: 18, fontWeight: '700', color: '#1E293B' }}>Change Password</Text>
+                            <TouchableOpacity onPress={() => { setPwModalVisible(false); setCurrentPw(''); setNewPw(''); setConfirmPw(''); }}>
+                                <Ionicons name="close" size={24} color="#64748B" />
+                            </TouchableOpacity>
+                        </View>
 
+                        {/* Current Password */}
                         <Text style={styles.inputLabel}>CURRENT PASSWORD</Text>
                         <View style={styles.inputRow}>
+                            <Ionicons name="lock-closed-outline" size={18} color="#94A3B8" style={{ marginRight: 8 }} />
                             <TextInput
                                 style={styles.inputField}
                                 secureTextEntry={!showCurrent}
-                                placeholder="Enter current password"
-                                placeholderTextColor="#94A3B8"
+                                placeholder="••••••••"
+                                placeholderTextColor="#CBD5E1"
                                 value={currentPw}
                                 onChangeText={setCurrentPw}
                             />
@@ -321,13 +561,15 @@ export default function ProfileScreen() {
                             </TouchableOpacity>
                         </View>
 
+                        {/* New Password */}
                         <Text style={styles.inputLabel}>NEW PASSWORD</Text>
                         <View style={styles.inputRow}>
+                            <Ionicons name="lock-closed-outline" size={18} color="#94A3B8" style={{ marginRight: 8 }} />
                             <TextInput
                                 style={styles.inputField}
                                 secureTextEntry={!showNew}
-                                placeholder="Enter new password"
-                                placeholderTextColor="#94A3B8"
+                                placeholder="••••••••"
+                                placeholderTextColor="#CBD5E1"
                                 value={newPw}
                                 onChangeText={setNewPw}
                             />
@@ -336,13 +578,15 @@ export default function ProfileScreen() {
                             </TouchableOpacity>
                         </View>
 
+                        {/* Confirm New Password */}
                         <Text style={styles.inputLabel}>CONFIRM NEW PASSWORD</Text>
                         <View style={styles.inputRow}>
+                            <Ionicons name="lock-closed-outline" size={18} color="#94A3B8" style={{ marginRight: 8 }} />
                             <TextInput
                                 style={styles.inputField}
                                 secureTextEntry={!showConfirm}
-                                placeholder="Re-enter new password"
-                                placeholderTextColor="#94A3B8"
+                                placeholder="••••••••"
+                                placeholderTextColor="#CBD5E1"
                                 value={confirmPw}
                                 onChangeText={setConfirmPw}
                             />
@@ -351,17 +595,20 @@ export default function ProfileScreen() {
                             </TouchableOpacity>
                         </View>
 
-                        <View style={styles.modalActions}>
-                            <TouchableOpacity
-                                style={styles.modalCancelBtn}
-                                onPress={() => { setPwModalVisible(false); setCurrentPw(''); setNewPw(''); setConfirmPw(''); }}
-                            >
-                                <Text style={styles.modalCancelText}>Cancel</Text>
-                            </TouchableOpacity>
-                            <TouchableOpacity style={styles.modalConfirmBtn} onPress={handleSavePassword}>
-                                <Text style={styles.modalConfirmText}>Save</Text>
-                            </TouchableOpacity>
-                        </View>
+                        {/* Update Button */}
+                        <TouchableOpacity
+                            style={{
+                                backgroundColor: '#2563EB',
+                                borderRadius: 12,
+                                height: 50,
+                                justifyContent: 'center',
+                                alignItems: 'center',
+                                marginTop: 8,
+                            }}
+                            onPress={handleSavePassword}
+                        >
+                            <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '700' }}>Update Password</Text>
+                        </TouchableOpacity>
                     </View>
                 </View>
             </Modal>
@@ -369,60 +616,117 @@ export default function ProfileScreen() {
             {/* ══════════════════════════════════════
                 Emergency Contact Modal
             ══════════════════════════════════════ */}
-            <Modal visible={ecModalVisible} transparent animationType="slide">
-                <View style={styles.modalOverlay}>
-                    <View style={styles.modalSheet}>
-                        <View style={styles.modalHandle} />
-                        <Text style={styles.modalTitle}>Set Emergency Contact</Text>
-                        <Text style={styles.modalSubtitle}>This person will be notified during emergencies.</Text>
+            <Modal
+                visible={ecModalVisible}
+                transparent
+                animationType="fade"
+                onRequestClose={() => setEcModalVisible(false)}
+            >
+                <View style={{
+                    flex: 1,
+                    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    padding: 24,
+                }}>
+                    <View style={{
+                        backgroundColor: '#FFFFFF',
+                        borderRadius: 20,
+                        padding: 24,
+                        width: '100%',
+                        maxWidth: 400,
+                        shadowColor: '#000',
+                        shadowOffset: { width: 0, height: 20 },
+                        shadowOpacity: 0.3,
+                        shadowRadius: 30,
+                        elevation: 20,
+                    }}>
+                        {/* Header */}
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                            <Text style={{ fontSize: 18, fontWeight: '700', color: '#1E293B' }}>Set Emergency Contact</Text>
+                            <TouchableOpacity onPress={() => setEcModalVisible(false)}>
+                                <Ionicons name="close" size={24} color="#64748B" />
+                            </TouchableOpacity>
+                        </View>
 
+                        {/* Full Name */}
                         <Text style={styles.inputLabel}>FULL NAME</Text>
                         <View style={styles.inputRow}>
+                            <Ionicons name="person-outline" size={18} color="#94A3B8" style={{ marginRight: 8 }} />
                             <TextInput
                                 style={styles.inputField}
-                                placeholder="e.g. Maria Santos"
-                                placeholderTextColor="#94A3B8"
+                                placeholder="Enter contact name"
+                                placeholderTextColor="#CBD5E1"
                                 value={ecName}
                                 onChangeText={setEcName}
                             />
                         </View>
 
-                        {/* Relationship — tap to pick, not type */}
+                        {/* Relationship */}
                         <Text style={styles.inputLabel}>RELATIONSHIP</Text>
                         <TouchableOpacity
                             style={styles.inputRow}
                             onPress={() => setRelationPickerVisible(true)}
                             activeOpacity={0.7}
                         >
-                            <Text style={[styles.inputField, !ecRelation && { color: '#94A3B8' }]}>
+                            <Ionicons name="people-outline" size={18} color="#94A3B8" style={{ marginRight: 8 }} />
+                            <Text style={[styles.inputField, !ecRelation && { color: '#CBD5E1' }]}>
                                 {ecRelation || 'Select relationship'}
                             </Text>
                             <Ionicons name="chevron-down" size={18} color="#94A3B8" />
                         </TouchableOpacity>
 
+                        {/* Mobile Number */}
                         <Text style={styles.inputLabel}>MOBILE NUMBER</Text>
                         <View style={styles.inputRow}>
+                            <Text style={{ fontSize: 14, color: '#64748B', marginRight: 8 }}>+63</Text>
                             <TextInput
                                 style={styles.inputField}
-                                placeholder="+63 9XX XXX XXXX"
-                                placeholderTextColor="#94A3B8"
+                                placeholder="912 345 6789"
+                                placeholderTextColor="#CBD5E1"
                                 keyboardType="phone-pad"
                                 value={ecNumber}
                                 onChangeText={setEcNumber}
                             />
                         </View>
 
-                        <View style={styles.modalActions}>
-                            <TouchableOpacity
-                                style={styles.modalCancelBtn}
-                                onPress={() => setEcModalVisible(false)}
-                            >
-                                <Text style={styles.modalCancelText}>Cancel</Text>
-                            </TouchableOpacity>
-                            <TouchableOpacity style={styles.modalConfirmBtn} onPress={handleSaveEmergency}>
-                                <Text style={styles.modalConfirmText}>Save</Text>
-                            </TouchableOpacity>
+                        {/* Info note */}
+                        <View style={{
+                            flexDirection: 'row',
+                            backgroundColor: '#EFF6FF',
+                            padding: 12,
+                            borderRadius: 10,
+                            marginTop: 4,
+                            marginBottom: 16,
+                        }}>
+                            <Ionicons name="information-circle" size={18} color="#2563EB" style={{ marginRight: 8, marginTop: 1 }} />
+                            <Text style={{ fontSize: 12, color: '#64748B', flex: 1, lineHeight: 18 }}>
+                                This person will be automatically notified via SMS during extreme weather alerts or if you trigger an SOS signal from the app.
+                            </Text>
                         </View>
+
+                        {/* Save Button */}
+                        <TouchableOpacity
+                            style={{
+                                backgroundColor: '#2563EB',
+                                borderRadius: 12,
+                                height: 50,
+                                justifyContent: 'center',
+                                alignItems: 'center',
+                                flexDirection: 'row',
+                            }}
+                            onPress={handleSaveEmergency}
+                            disabled={savingEC}
+                        >
+                            {savingEC ? (
+                                <ActivityIndicator color="#FFFFFF" />
+                            ) : (
+                                <>
+                                    <Ionicons name="save-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+                                    <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '700' }}>Save Contact</Text>
+                                </>
+                            )}
+                        </TouchableOpacity>
                     </View>
                 </View>
             </Modal>
@@ -430,15 +734,42 @@ export default function ProfileScreen() {
             {/* ══════════════════════════════════════
                 Relationship Picker Modal
             ══════════════════════════════════════ */}
-            <Modal visible={relationPickerVisible} transparent animationType="fade">
-                <TouchableOpacity
-                    style={styles.pickerOverlay}
-                    activeOpacity={1}
-                    onPress={() => setRelationPickerVisible(false)}
-                >
-                    <View style={styles.pickerSheet}>
-                        <Text style={styles.pickerTitle}>Select Relationship</Text>
-                        <ScrollView showsVerticalScrollIndicator={false} style={{ maxHeight: 360 }}>
+            <Modal
+                visible={relationPickerVisible}
+                transparent
+                animationType="fade"
+                onRequestClose={() => setRelationPickerVisible(false)}
+            >
+                <View style={{
+                    flex: 1,
+                    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    padding: 24,
+                }}>
+                    <View style={{
+                        backgroundColor: '#FFFFFF',
+                        borderRadius: 20,
+                        padding: 20,
+                        width: '100%',
+                        maxWidth: 400,
+                        maxHeight: 500,
+                        shadowColor: '#000',
+                        shadowOffset: { width: 0, height: 20 },
+                        shadowOpacity: 0.3,
+                        shadowRadius: 30,
+                        elevation: 20,
+                    }}>
+                        {/* Header */}
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                            <Text style={{ fontSize: 18, fontWeight: '700', color: '#1E293B' }}>Select Relationship</Text>
+                            <TouchableOpacity onPress={() => setRelationPickerVisible(false)}>
+                                <Ionicons name="close" size={24} color="#64748B" />
+                            </TouchableOpacity>
+                        </View>
+
+                        {/* Scrollable list */}
+                        <ScrollView showsVerticalScrollIndicator={false}>
                             {RELATIONSHIPS.map((rel, i) => (
                                 <TouchableOpacity
                                     key={rel}
@@ -459,13 +790,124 @@ export default function ProfileScreen() {
                                         {rel}
                                     </Text>
                                     {ecRelation === rel && (
-                                        <Ionicons name="checkmark" size={18} color="#2563EB" />
+                                        <Ionicons name="checkmark-circle" size={20} color="#2563EB" />
                                     )}
                                 </TouchableOpacity>
                             ))}
                         </ScrollView>
                     </View>
-                </TouchableOpacity>
+                </View>
+            </Modal>
+
+            {/* ══════════════════════════════════════
+                Sign Out Confirmation Modal
+            ══════════════════════════════════════ */}
+            <Modal
+                visible={signOutModalVisible}
+                transparent
+                animationType="fade"
+                onRequestClose={() => setSignOutModalVisible(false)}
+            >
+                <View style={{
+                    flex: 1,
+                    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    padding: 24,
+                }}>
+                    <View style={{
+                        backgroundColor: '#FFFFFF',
+                        borderRadius: 24,
+                        padding: 32,
+                        width: '100%',
+                        maxWidth: 400,
+                        shadowColor: '#000',
+                        shadowOffset: { width: 0, height: 20 },
+                        shadowOpacity: 0.3,
+                        shadowRadius: 30,
+                        elevation: 20,
+                    }}>
+                        {/* Icon */}
+                        <View style={{ alignItems: 'center', marginBottom: 20 }}>
+                            <View style={{
+                                width: 80,
+                                height: 80,
+                                borderRadius: 40,
+                                backgroundColor: '#FEE2E2',
+                                justifyContent: 'center',
+                                alignItems: 'center',
+                                marginBottom: 16,
+                            }}>
+                                <Ionicons name="log-out-outline" size={36} color="#EF4444" />
+                            </View>
+                            <Text style={{
+                                fontSize: 24,
+                                fontWeight: '800',
+                                color: '#1E293B',
+                                marginBottom: 12,
+                            }}>Log Out?</Text>
+                            <Text style={{
+                                fontSize: 14,
+                                color: '#64748B',
+                                textAlign: 'center',
+                                lineHeight: 22,
+                            }}>
+                                Are you sure you want to log out of your account? You'll need to sign back in to receive real-time flood alerts.
+                            </Text>
+                        </View>
+
+                        {/* Buttons */}
+                        <TouchableOpacity
+                            style={{
+                                backgroundColor: '#2563EB',
+                                borderRadius: 14,
+                                height: 52,
+                                justifyContent: 'center',
+                                alignItems: 'center',
+                                marginBottom: 12,
+                            }}
+                            onPress={async () => {
+                                await supabase.auth.signOut();
+                                await AsyncStorage.removeItem('user_profile');
+                                setSignOutModalVisible(false);
+                                router.replace('/login' as any);
+                            }}
+                        >
+                            <Text style={{ color: '#FFFFFF', fontSize: 16, fontWeight: '700' }}>Log Out</Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                            style={{ alignItems: 'center', paddingVertical: 12 }}
+                            onPress={() => setSignOutModalVisible(false)}
+                        >
+                            <Text style={{ color: '#64748B', fontSize: 15, fontWeight: '600' }}>Cancel</Text>
+                        </TouchableOpacity>
+
+                        {/* Official Badge */}
+                        <View style={{
+                            alignItems: 'center',
+                            paddingTop: 20,
+                            marginTop: 20,
+                            borderTopWidth: 1,
+                            borderTopColor: '#F1F5F9',
+                        }}>
+                            <Ionicons name="shield-checkmark" size={16} color="#94A3B8" style={{ marginBottom: 4 }} />
+                            <Text style={{
+                                fontSize: 10,
+                                color: '#94A3B8',
+                                fontWeight: '600',
+                                letterSpacing: 1,
+                                textAlign: 'center',
+                            }}>OFFICIAL GOVERNMENT APPLICATION</Text>
+                            <Text style={{
+                                fontSize: 9,
+                                color: '#CBD5E1',
+                                marginTop: 2,
+                                textAlign: 'center',
+                            }}>Cebu City Disaster Risk Reduction Management Office</Text>
+                        </View>
+                    </View>
+                </View>
             </Modal>
         </SafeAreaView>
     );
@@ -539,6 +981,13 @@ const styles = StyleSheet.create({
         borderWidth: 1, borderColor: '#BFDBFE',
     },
     secondaryBtnText: { color: '#2563EB', fontSize: 16, fontWeight: '700' },
+    signOutBtn: {
+        flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+        backgroundColor: '#FFF1F2', borderRadius: 16,
+        height: 56, marginBottom: 14,
+        borderWidth: 1, borderColor: '#FECDD3',
+    },
+    signOutBtnText: { color: '#EF4444', fontSize: 16, fontWeight: '700' },
 
     // Modals
     modalOverlay: {
