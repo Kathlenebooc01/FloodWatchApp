@@ -77,10 +77,10 @@ export default function Dashboard() {
             
             console.log('🌤️ Fetching real weather from Open-Meteo API for:', latitude, longitude);
             
-            // Use FREE Open-Meteo API (no key needed)
+            // Use FREE Open-Meteo API with actual precipitation data
             const response = await Promise.race([
-                fetch(`https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,weather_code,cloud_cover&temperature_unit=celsius`),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('Weather API timeout')), 5000))
+                fetch(`https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,weather_code,precipitation,rain,precipitation_probability&hourly=precipitation_probability&temperature_unit=celsius&timezone=auto`),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Weather API timeout')), 10000))
             ]) as any;
             
             if (!response.ok) {
@@ -92,32 +92,40 @@ export default function Dashboard() {
             
             if (data.current) {
                 const temp = Math.round(data.current.temperature_2m * 10) / 10;
-                const precip = Math.round(data.current.cloud_cover || 0);
+                
+                // Use actual precipitation probability from hourly (current hour)
+                let precipProb = 0;
+                if (data.hourly?.precipitation_probability?.length > 0) {
+                    // Get current hour index
+                    const now = new Date();
+                    const hourIndex = now.getHours();
+                    precipProb = data.hourly.precipitation_probability[hourIndex] || 0;
+                }
                 
                 // Convert WMO weather code to condition string
                 const weatherCode = data.current.weather_code;
                 let condition = 'Cloudy';
-                if (weatherCode === 0) condition = 'Clear';
-                else if (weatherCode === 1 || weatherCode === 2) condition = 'Mostly Clear';
+                if (weatherCode === 0) condition = 'Clear Sky';
+                else if (weatherCode === 1) condition = 'Mostly Clear';
+                else if (weatherCode === 2) condition = 'Partly Cloudy';
                 else if (weatherCode === 3) condition = 'Overcast';
                 else if (weatherCode >= 45 && weatherCode <= 48) condition = 'Foggy';
-                else if (weatherCode >= 51 && weatherCode <= 67) condition = 'Drizzle';
+                else if (weatherCode >= 51 && weatherCode <= 55) condition = 'Light Drizzle';
+                else if (weatherCode >= 56 && weatherCode <= 57) condition = 'Freezing Drizzle';
+                else if (weatherCode >= 61 && weatherCode <= 63) condition = 'Rain';
+                else if (weatherCode === 65) condition = 'Heavy Rain';
                 else if (weatherCode >= 71 && weatherCode <= 77) condition = 'Snow';
-                else if (weatherCode >= 80 && weatherCode <= 82) condition = 'Rain';
-                else if (weatherCode >= 85 && weatherCode <= 86) condition = 'Heavy Snow';
-                else if (weatherCode === 80 || weatherCode === 81 || weatherCode === 82) condition = 'Rain Showers';
-                else if (weatherCode >= 80 && weatherCode <= 99) condition = 'Thunderstorm';
+                else if (weatherCode >= 80 && weatherCode <= 81) condition = 'Rain Showers';
+                else if (weatherCode === 82) condition = 'Heavy Showers';
+                else if (weatherCode >= 85 && weatherCode <= 86) condition = 'Snow Showers';
+                else if (weatherCode >= 95 && weatherCode <= 99) condition = 'Thunderstorm';
                 
                 setWeather({
                     temperature: temp,
                     condition: condition,
-                    precipitation: precip
+                    precipitation: precipProb
                 });
-                console.log('✅ Weather SUCCESSFULLY updated from Open-Meteo API:', {
-                    temperature: temp,
-                    condition: condition,
-                    precipitation: precip
-                });
+                console.log('✅ Weather updated:', { temp, condition, precipProb });
             } else {
                 console.log('❌ Invalid API response structure');
                 throw new Error('Invalid API response');
@@ -138,119 +146,87 @@ export default function Dashboard() {
         console.log('⚠️ Fallback database function - should not be called, API must be used!');
     };
 
-    // Function to fetch risk status from live_municipality_weather
+    // Function to fetch risk status based on REAL weather data from Open-Meteo
     const fetchRiskStatus = async () => {
         try {
-            console.log('🔍 Fetching risk status from live_municipality_weather...');
+            console.log('🔍 Fetching real-time risk status...');
             
-            // Get current location to show in risk status
             const addr = await getCurrentFullAddress();
             const userLocation = addr.full || 'Lapu-Lapu City';
-            const userCity = addr.city || 'Lapu-Lapu City';
-            
-            console.log('📍 User location:', userLocation, 'City:', userCity);
-            
-            // First, try to fetch weather data for user's specific municipality
-            let { data, error } = await supabase
-                .from('live_municipality_weather')
-                .select('*')
-                .ilike('municipality_name', `%${userCity}%`)
-                .limit(1);
+            const latitude = addr.latitude || 10.3157;
+            const longitude = addr.longitude || 123.8854;
 
-            console.log('📊 Risk status response for', userCity, ':', { data, error });
+            // Fetch real weather data from Open-Meteo
+            const response = await fetch(
+                `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,weather_code,precipitation,rain,wind_speed_10m&hourly=precipitation_probability&daily=precipitation_sum,wind_speed_10m_max&temperature_unit=celsius&wind_speed_unit=kmh&timezone=auto`
+            );
 
-            // If no exact match, get the nearest one or any available
-            if (!data || data.length === 0) {
-                console.log('⚠️ No exact match for', userCity, 'fetching any available data...');
-                const { data: anyData, error: anyError } = await supabase
-                    .from('live_municipality_weather')
-                    .select('*')
-                    .limit(1);
-                data = anyData;
-                error = anyError;
-            }
+            if (!response.ok) throw new Error('Weather API failed');
 
-            if (error) {
-                console.error('❌ Risk status error:', error);
-                setRiskStatus({
-                    risk_level: 'Info',
-                    alert_level: 0,
-                    location: userLocation,
-                    description: 'No active alerts at this time. System monitoring normal conditions.',
-                    updated_at: new Date().toISOString()
-                });
-                return;
-            }
+            const data = await response.json();
+            const current = data.current;
 
-            if (data && data.length > 0) {
-                const weather = data[0];
-                console.log('✅ Weather data found:', weather);
-                
-                // Determine risk level based on rainfall and wind speed
-                const rainfall = weather.rainfall || 0;
-                const windSpeed = weather.wind_speed || 0;
-                
-                let riskLevel = 'Info';
-                let alertLevel = 0;
-                let description = 'No active alerts.';
-                
-                // High risk: Heavy rainfall (>30mm) or strong winds (>50 km/h)
-                if (rainfall > 30 || windSpeed > 50) {
-                    riskLevel = 'High';
-                    alertLevel = 3;
-                    description = `⚠️ High flood risk! Rainfall: ${rainfall}mm, Wind: ${windSpeed} km/h. Stay alert and avoid flood-prone areas.`;
-                }
-                // Moderate risk: Moderate rainfall (10-30mm) or moderate winds (30-50 km/h)
-                else if (rainfall > 10 || windSpeed > 30) {
-                    riskLevel = 'Moderate';
-                    alertLevel = 2;
-                    description = `Monitor conditions closely. Rainfall: ${rainfall}mm, Wind: ${windSpeed} km/h. Be prepared for potential flooding.`;
-                }
-                // Low risk: Light rainfall (<10mm) or light winds (<30 km/h)
-                else if (rainfall > 0 || windSpeed > 0) {
-                    riskLevel = 'Low';
-                    alertLevel = 1;
-                    description = `Light precipitation expected. Rainfall: ${rainfall}mm, Wind: ${windSpeed} km/h. Conditions appear manageable.`;
-                }
-                
-                setRiskStatus({
-                    risk_level: riskLevel,
-                    alert_level: alertLevel,
-                    location: userLocation, // Show user's full location (e.g., "Buaya, Lapu-Lapu City")
-                    description: description,
-                    updated_at: weather.timestamp || new Date().toISOString()
-                });
-                
-                console.log('✅ Risk status set for', weather.municipality_name, ':', { riskLevel, alertLevel, rainfall, windSpeed });
+            const rainfall = current.rain || current.precipitation || 0;
+            const windSpeed = current.wind_speed_10m || 0;
+            const weatherCode = current.weather_code || 0;
+
+            // Get today's total precipitation forecast
+            const todayPrecip = data.daily?.precipitation_sum?.[0] || 0;
+
+            // Determine risk level based on REAL current conditions
+            let riskLevel = 'Info';
+            let alertLevel = 0;
+            let description = '';
+
+            // Risk is based ONLY on current actual rainfall and weather code - NOT forecast
+            if (rainfall > 30 || weatherCode >= 95) {
+                riskLevel = 'High';
+                alertLevel = 3;
+                description = `Heavy rainfall detected. Rain: ${rainfall}mm, Wind: ${windSpeed.toFixed(1)} km/h. Avoid flood-prone areas and stay indoors.`;
+            } else if (rainfall > 10 || (weatherCode >= 80 && weatherCode <= 94)) {
+                riskLevel = 'Moderate';
+                alertLevel = 2;
+                description = `Moderate rain activity. Rain: ${rainfall}mm, Wind: ${windSpeed.toFixed(1)} km/h. Stay alert and monitor updates.`;
+            } else if (rainfall > 2 || (weatherCode >= 61 && weatherCode <= 79)) {
+                // Only Low if it is meaningfully raining - more than light drizzle
+                riskLevel = 'Low';
+                alertLevel = 1;
+                description = `Light rain in your area. Rain: ${rainfall}mm, Wind: ${windSpeed.toFixed(1)} km/h. Conditions are manageable.`;
             } else {
-                console.log('⚠️ No risk status data found, showing Info status');
-                setRiskStatus({
-                    risk_level: 'Info',
-                    alert_level: 0,
-                    location: userLocation,
-                    description: 'No active alerts. All systems normal. Continue regular activities.',
-                    updated_at: new Date().toISOString()
-                });
+                // No rain at all = Info, no alert
+                riskLevel = 'Info';
+                alertLevel = 0;
+                description = `No flood risk. ${weatherCode === 0 ? 'Clear sky' : weatherCode <= 2 ? 'Mostly clear' : 'Partly cloudy'} conditions. Wind: ${windSpeed.toFixed(1)} km/h. All clear in your area.`;
             }
+
+            setRiskStatus({
+                risk_level: riskLevel,
+                alert_level: alertLevel,
+                location: userLocation,
+                description: description,
+                updated_at: new Date().toISOString(),
+            });
+
+            console.log('✅ Risk status updated:', { riskLevel, rainfall, windSpeed, weatherCode });
+
         } catch (err: any) {
-            console.error('❌ Risk status fetch exception:', err);
+            console.error('❌ Risk status fetch failed:', err);
             try {
                 const addr = await getCurrentFullAddress();
-                const userLocation = addr.full || 'Lapu-Lapu City';
                 setRiskStatus({
                     risk_level: 'Info',
                     alert_level: 0,
-                    location: userLocation,
-                    description: 'No active alerts at this time. System monitoring normal conditions.',
-                    updated_at: new Date().toISOString()
+                    location: addr.full || 'Lapu-Lapu City',
+                    description: 'No active alerts. All systems normal.',
+                    updated_at: new Date().toISOString(),
                 });
             } catch {
                 setRiskStatus({
                     risk_level: 'Info',
                     alert_level: 0,
                     location: 'Lapu-Lapu City',
-                    description: 'No active alerts at this time. System monitoring normal conditions.',
-                    updated_at: new Date().toISOString()
+                    description: 'No active alerts. All systems normal.',
+                    updated_at: new Date().toISOString(),
                 });
             }
         }

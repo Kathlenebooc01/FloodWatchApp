@@ -38,7 +38,7 @@ function getStatusStyle(status: string) {
         case 'pending':
             return { bg: '#FEF3C7', text: '#D97706', label: 'PENDING' };
         case 'rejected':
-            return { bg: '#FEE2E2', text: '#EF4444', label: 'REJECTED' };
+            return { bg: '#FED7AA', text: '#EA580C', label: 'REJECTED' }; // Orange instead of red
         default:
             return { bg: '#F1F5F9', text: '#64748B', label: status?.toUpperCase() || 'UNKNOWN' };
     }
@@ -109,6 +109,43 @@ export default function ReportHistoryScreen() {
 
     useEffect(() => {
         fetchReports();
+
+        // ── Real-time subscription - auto update when report status changes ──
+        const setupSubscription = async () => {
+            const { data: sessionData } = await supabase.auth.getSession();
+            const userId = sessionData?.session?.user?.id;
+            if (!userId) return null;
+
+            const channel = supabase
+                .channel(`report-history-${userId}-${Date.now()}`) // Unique channel name
+                .on(
+                    'postgres_changes',
+                    {
+                        event: '*', // INSERT, UPDATE, DELETE
+                        schema: 'public',
+                        table: 'incident_report',
+                        filter: `user_id=eq.${userId}`,
+                    },
+                    (payload) => {
+                        console.log('🔄 Report updated in real-time:', payload);
+                        fetchReports(); // Re-fetch all reports when any change happens
+                    }
+                )
+                .subscribe();
+
+            console.log('✅ Real-time subscription active for report history');
+            return channel;
+        };
+
+        let channelPromise = setupSubscription();
+
+        return () => {
+            channelPromise.then(channel => {
+                if (channel) {
+                    supabase.removeChannel(channel);
+                }
+            });
+        };
     }, []);
 
     const onRefresh = () => {

@@ -21,7 +21,10 @@ export default function ReportScreen() {
 
             {/* Header Section */}
             <View style={styles.header}>
-                <TouchableOpacity onPress={() => router.back()} style={styles.headerSideAction}>
+                <TouchableOpacity 
+                    onPress={() => router.replace('/dashboard' as any)} 
+                    style={styles.headerSideAction}
+                >
                     <Ionicons name="chevron-back" size={26} color="#2563EB" />
                 </TouchableOpacity>
 
