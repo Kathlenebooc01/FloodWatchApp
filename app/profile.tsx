@@ -251,27 +251,7 @@ export default function ProfileScreen() {
     };
 
     // ── Change Password modal ──
-    const [pwModalVisible, setPwModalVisible] = useState(false);
-    const [currentPw, setCurrentPw]           = useState('');
-    const [newPw, setNewPw]                   = useState('');
-    const [confirmPw, setConfirmPw]           = useState('');
-    const [showCurrent, setShowCurrent]       = useState(false);
-    const [showNew, setShowNew]               = useState(false);
-    const [showConfirm, setShowConfirm]       = useState(false);
-
-    const handleSavePassword = () => {
-        if (!currentPw || !newPw || !confirmPw) {
-            Alert.alert('Incomplete', 'Please fill in all password fields.');
-            return;
-        }
-        if (newPw !== confirmPw) {
-            Alert.alert('Mismatch', 'New password and confirmation do not match.');
-            return;
-        }
-        setPwModalVisible(false);
-        setCurrentPw(''); setNewPw(''); setConfirmPw('');
-        Alert.alert('Success', 'Password changed successfully.');
-    };
+    // REMOVED - not needed
 
     // ── Emergency Contact modal ──
     const [ecModalVisible, setEcModalVisible]               = useState(false);
@@ -280,6 +260,18 @@ export default function ProfileScreen() {
     const [ecNumber, setEcNumber]                           = useState('');
     const [relationPickerVisible, setRelationPickerVisible] = useState(false);
     const [savingEC, setSavingEC]                           = useState(false);
+    const [editingEcIndex, setEditingEcIndex]               = useState<number | null>(null);
+
+    // ── Saved contacts list ──
+    interface EmergencyContact { name: string; relation: string; number: string; }
+    const [emergencyContacts, setEmergencyContacts] = useState<EmergencyContact[]>([]);
+
+    // Load saved contacts from AsyncStorage
+    useEffect(() => {
+        AsyncStorage.getItem('emergency_contacts')
+            .then(raw => { if (raw) setEmergencyContacts(JSON.parse(raw)); })
+            .catch(() => {});
+    }, []);
 
     // ── Sign Out modal ──
     const [signOutModalVisible, setSignOutModalVisible] = useState(false);
@@ -295,21 +287,46 @@ export default function ProfileScreen() {
         }
         setSavingEC(true);
         try {
-            const { error } = await supabase.from('distress_signals').insert([{
-                contact_name: ecName.trim(),
-                relationship: ecRelation,
-                contact_number: ecNumber.trim(),
-                profile_id: profileId,
-            }]);
-            if (error) throw error;
+            const newContact = {
+                name: ecName.trim(),
+                relation: ecRelation,
+                number: ecNumber.trim(),
+            };
+
+            let updated: typeof emergencyContacts;
+            if (editingEcIndex !== null) {
+                // Edit existing
+                updated = emergencyContacts.map((c, i) => i === editingEcIndex ? newContact : c);
+            } else {
+                // Add new
+                updated = [...emergencyContacts, newContact];
+            }
+
+            await AsyncStorage.setItem('emergency_contacts', JSON.stringify(updated));
+            setEmergencyContacts(updated);
             setEcModalVisible(false);
             setEcName(''); setEcRelation(''); setEcNumber('');
-            Alert.alert('Saved', `Emergency contact "${ecName}" has been saved.`);
+            setEditingEcIndex(null);
         } catch (err: any) {
             Alert.alert('Error', err.message || 'Could not save emergency contact.');
         } finally {
             setSavingEC(false);
         }
+    };
+
+    const openAddContact = () => {
+        setEcName(''); setEcRelation(''); setEcNumber('');
+        setEditingEcIndex(null);
+        setEcModalVisible(true);
+    };
+
+    const openEditContact = (index: number) => {
+        const c = emergencyContacts[index];
+        setEcName(c.name);
+        setEcRelation(c.relation);
+        setEcNumber(c.number);
+        setEditingEcIndex(index);
+        setEcModalVisible(true);
     };
 
     return (
@@ -379,22 +396,32 @@ export default function ProfileScreen() {
 
                 {/* ── Buttons ── */}
                 <TouchableOpacity
-                    style={styles.primaryBtn}
-                    activeOpacity={0.85}
-                    onPress={() => setPwModalVisible(true)}
-                >
-                    <Ionicons name="lock-closed-outline" size={18} color="#FFFFFF" style={{ marginRight: 10 }} />
-                    <Text style={styles.primaryBtnText}>Change Password</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
                     style={styles.secondaryBtn}
                     activeOpacity={0.85}
-                    onPress={() => setEcModalVisible(true)}
+                    onPress={openAddContact}
                 >
                     <Ionicons name="people-outline" size={18} color="#2563EB" style={{ marginRight: 10 }} />
                     <Text style={styles.secondaryBtnText}>Set Emergency Contact</Text>
                 </TouchableOpacity>
+
+                {/* ── Emergency Contact Cards ── */}
+                {emergencyContacts.map((contact, index) => (
+                    <View key={index} style={styles.ecCard}>
+                        <View style={styles.ecCardHeader}>
+                            <Text style={styles.ecCardLabel}>EMERGENCY CONTACT</Text>
+                            <TouchableOpacity style={styles.ecEditBtn} onPress={() => openEditContact(index)}>
+                                <Ionicons name="pencil" size={12} color="#2563EB" />
+                                <Text style={styles.ecEditText}>EDIT</Text>
+                            </TouchableOpacity>
+                        </View>
+                        <Text style={styles.ecName}>{contact.name}</Text>
+                        <Text style={styles.ecRelation}>{contact.relation}</Text>
+                        <View style={styles.ecNumberRow}>
+                            <Ionicons name="call" size={15} color="#2563EB" />
+                            <Text style={styles.ecNumber}>{contact.number}</Text>
+                        </View>
+                    </View>
+                ))}
 
                 {/* Sign Out */}
                 <TouchableOpacity
@@ -509,111 +536,6 @@ export default function ProfileScreen() {
             </Modal>
 
             {/* ══════════════════════════════════════
-                Change Password Modal
-            ══════════════════════════════════════ */}
-            <Modal
-                visible={pwModalVisible}
-                transparent
-                animationType="fade"
-                onRequestClose={() => { setPwModalVisible(false); setCurrentPw(''); setNewPw(''); setConfirmPw(''); }}
-            >
-                <View style={{
-                    flex: 1,
-                    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-                    justifyContent: 'center',
-                    alignItems: 'center',
-                    padding: 24,
-                }}>
-                    <View style={{
-                        backgroundColor: '#FFFFFF',
-                        borderRadius: 20,
-                        padding: 24,
-                        width: '100%',
-                        maxWidth: 400,
-                        shadowColor: '#000',
-                        shadowOffset: { width: 0, height: 20 },
-                        shadowOpacity: 0.3,
-                        shadowRadius: 30,
-                        elevation: 20,
-                    }}>
-                        {/* Header */}
-                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-                            <Text style={{ fontSize: 18, fontWeight: '700', color: '#1E293B' }}>Change Password</Text>
-                            <TouchableOpacity onPress={() => { setPwModalVisible(false); setCurrentPw(''); setNewPw(''); setConfirmPw(''); }}>
-                                <Ionicons name="close" size={24} color="#64748B" />
-                            </TouchableOpacity>
-                        </View>
-
-                        {/* Current Password */}
-                        <Text style={styles.inputLabel}>CURRENT PASSWORD</Text>
-                        <View style={styles.inputRow}>
-                            <Ionicons name="lock-closed-outline" size={18} color="#94A3B8" style={{ marginRight: 8 }} />
-                            <TextInput
-                                style={styles.inputField}
-                                secureTextEntry={!showCurrent}
-                                placeholder="••••••••"
-                                placeholderTextColor="#CBD5E1"
-                                value={currentPw}
-                                onChangeText={setCurrentPw}
-                            />
-                            <TouchableOpacity onPress={() => setShowCurrent(v => !v)}>
-                                <Ionicons name={showCurrent ? 'eye-off-outline' : 'eye-outline'} size={20} color="#94A3B8" />
-                            </TouchableOpacity>
-                        </View>
-
-                        {/* New Password */}
-                        <Text style={styles.inputLabel}>NEW PASSWORD</Text>
-                        <View style={styles.inputRow}>
-                            <Ionicons name="lock-closed-outline" size={18} color="#94A3B8" style={{ marginRight: 8 }} />
-                            <TextInput
-                                style={styles.inputField}
-                                secureTextEntry={!showNew}
-                                placeholder="••••••••"
-                                placeholderTextColor="#CBD5E1"
-                                value={newPw}
-                                onChangeText={setNewPw}
-                            />
-                            <TouchableOpacity onPress={() => setShowNew(v => !v)}>
-                                <Ionicons name={showNew ? 'eye-off-outline' : 'eye-outline'} size={20} color="#94A3B8" />
-                            </TouchableOpacity>
-                        </View>
-
-                        {/* Confirm New Password */}
-                        <Text style={styles.inputLabel}>CONFIRM NEW PASSWORD</Text>
-                        <View style={styles.inputRow}>
-                            <Ionicons name="lock-closed-outline" size={18} color="#94A3B8" style={{ marginRight: 8 }} />
-                            <TextInput
-                                style={styles.inputField}
-                                secureTextEntry={!showConfirm}
-                                placeholder="••••••••"
-                                placeholderTextColor="#CBD5E1"
-                                value={confirmPw}
-                                onChangeText={setConfirmPw}
-                            />
-                            <TouchableOpacity onPress={() => setShowConfirm(v => !v)}>
-                                <Ionicons name={showConfirm ? 'eye-off-outline' : 'eye-outline'} size={20} color="#94A3B8" />
-                            </TouchableOpacity>
-                        </View>
-
-                        {/* Update Button */}
-                        <TouchableOpacity
-                            style={{
-                                backgroundColor: '#2563EB',
-                                borderRadius: 12,
-                                height: 50,
-                                justifyContent: 'center',
-                                alignItems: 'center',
-                                marginTop: 8,
-                            }}
-                            onPress={handleSavePassword}
-                        >
-                            <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '700' }}>Update Password</Text>
-                        </TouchableOpacity>
-                    </View>
-                </View>
-            </Modal>
-
-            {/* ══════════════════════════════════════
                 Emergency Contact Modal
             ══════════════════════════════════════ */}
             <Modal
@@ -643,8 +565,10 @@ export default function ProfileScreen() {
                     }}>
                         {/* Header */}
                         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-                            <Text style={{ fontSize: 18, fontWeight: '700', color: '#1E293B' }}>Set Emergency Contact</Text>
-                            <TouchableOpacity onPress={() => setEcModalVisible(false)}>
+                            <Text style={{ fontSize: 18, fontWeight: '700', color: '#1E293B' }}>
+                                {editingEcIndex !== null ? 'Edit Contact' : 'Set Emergency Contact'}
+                            </Text>
+                            <TouchableOpacity onPress={() => { setEcModalVisible(false); setEditingEcIndex(null); }}>
                                 <Ionicons name="close" size={24} color="#64748B" />
                             </TouchableOpacity>
                         </View>
@@ -1034,7 +958,63 @@ const styles = StyleSheet.create({
     },
     modalConfirmText: { fontSize: 15, fontWeight: '700', color: '#FFFFFF' },
 
-    // Relationship picker
+    // Emergency Contact cards
+    ecCard: {
+        backgroundColor: '#FFFFFF',
+        borderRadius: 16,
+        padding: 18,
+        marginBottom: 14,
+        borderWidth: 1,
+        borderColor: '#F1F5F9',
+        shadowColor: '#000',
+        shadowOpacity: 0.04,
+        shadowRadius: 8,
+        shadowOffset: { width: 0, height: 2 },
+        elevation: 2,
+    },
+    ecCardHeader: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        marginBottom: 10,
+    },
+    ecCardLabel: {
+        fontSize: 10,
+        fontWeight: '800',
+        color: '#94A3B8',
+        letterSpacing: 1,
+    },
+    ecEditBtn: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 4,
+    },
+    ecEditText: {
+        fontSize: 12,
+        fontWeight: '800',
+        color: '#2563EB',
+    },
+    ecName: {
+        fontSize: 16,
+        fontWeight: '800',
+        color: '#1E293B',
+        marginBottom: 2,
+    },
+    ecRelation: {
+        fontSize: 13,
+        color: '#64748B',
+        marginBottom: 10,
+    },
+    ecNumberRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+    },
+    ecNumber: {
+        fontSize: 15,
+        fontWeight: '700',
+        color: '#2563EB',
+    },
     pickerOverlay: {
         flex: 1, backgroundColor: 'rgba(15,23,42,0.5)',
         justifyContent: 'center', alignItems: 'center',

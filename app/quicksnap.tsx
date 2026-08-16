@@ -105,11 +105,11 @@ export default function QuickSnapScreen() {
                 const cityName = locationData?.city || 'LAPU-LAPU CITY';
                 const { data: munData } = await supabase
                     .from('municipality_or_city')
-                    .select('id')
+                    .select('municipality_id')
                     .ilike('name', `%${cityName}%`)
                     .limit(1).maybeSingle();
                 if (munData) {
-                    municipalityId = munData.id;
+                    municipalityId = munData.municipality_id;
                 } else {
                     const { data: liveData } = await supabase
                         .from('live_municipality_weather')
@@ -122,11 +122,7 @@ export default function QuickSnapScreen() {
                 console.warn('⚠️ Municipality lookup failed:', e);
             }
 
-            if (!municipalityId) {
-                Alert.alert('Error', 'Could not determine your location. Try again.');
-                setIsSubmitting(false);
-                return;
-            }
+            // municipalityId may be null if table is empty — column is nullable, report still saves
 
             // 4. Save report to DB with status Pending_AI
             const { data: reportData, error: reportError } = await supabase
@@ -137,6 +133,7 @@ export default function QuickSnapScreen() {
                     description: `URGENT HELP! Quick snap report from ${locationData?.full || locationName}`,
                     image_url: imageUrl,
                     status: 'Pending_AI',
+                    report_type: 'quick_snap',
                     municipality_id: municipalityId,
                     latitude: locationData?.latitude || null,
                     longitude: locationData?.longitude || null,

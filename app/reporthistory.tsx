@@ -75,7 +75,7 @@ export default function ReportHistoryScreen() {
     const [reports, setReports] = useState<Report[]>([]);
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
-    const [filter, setFilter] = useState<'all' | 'pending' | 'verified' | 'resolved'>('all');
+    const [filter, setFilter] = useState<'all' | 'pending' | 'verified' | 'resolved' | 'rejected'>('all');
 
     const fetchReports = async () => {
         try {
@@ -158,6 +158,7 @@ export default function ReportHistoryScreen() {
         if (filter === 'pending') return r.status?.toLowerCase().includes('pending');
         if (filter === 'verified') return r.status?.toLowerCase() === 'verified';
         if (filter === 'resolved') return r.status?.toLowerCase() === 'resolved' || r.status?.toLowerCase() === 'ready_for_lgu';
+        if (filter === 'rejected') return r.status?.toLowerCase() === 'rejected';
         return true;
     });
 
@@ -210,6 +211,7 @@ export default function ReportHistoryScreen() {
         { key: 'pending', label: 'Pending' },
         { key: 'verified', label: 'Verified' },
         { key: 'resolved', label: 'Resolved' },
+        { key: 'rejected', label: 'Rejected' },
     ];
 
     return (

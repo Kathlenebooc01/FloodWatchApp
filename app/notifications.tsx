@@ -66,19 +66,23 @@ const getFullTime = (dateString: string) => {
 };
 
 // Map alert type to icon and color
-const getAlertIcon = (alertType: string) => {
-    const type = (alertType || '').toLowerCase();
-    if (type.includes('evacuation') || type.includes('urgent')) {
+const getAlertIcon = (alertType: string, type?: string) => {
+    const t = (alertType || '').toLowerCase();
+    // User-specific rejection notification
+    if (t.includes('not accepted') || t.includes('rejected') || t.includes('was not')) {
+        return { icon: 'close-circle', color: '#EA580C', bg: '#FED7AA' };
+    }
+    if (t.includes('evacuation') || t.includes('urgent')) {
         return { icon: 'alert-circle', color: '#EF4444', bg: '#FEE2E2' };
-    } else if (type.includes('water') || type.includes('level') || type.includes('flood')) {
+    } else if (t.includes('water') || t.includes('level') || t.includes('flood')) {
         return { icon: 'water', color: '#EF4444', bg: '#FEE2E2' };
-    } else if (type.includes('weather') || type.includes('warning')) {
+    } else if (t.includes('weather') || t.includes('warning')) {
         return { icon: 'warning', color: '#EF4444', bg: '#FEE2E2' };
-    } else if (type.includes('relief') || type.includes('operation')) {
+    } else if (t.includes('relief') || t.includes('operation')) {
         return { icon: 'heart', color: '#10B981', bg: '#ECFDF5' };
-    } else if (type.includes('road') || type.includes('clear')) {
+    } else if (t.includes('road') || t.includes('clear')) {
         return { icon: 'construct', color: '#F59E0B', bg: '#FEF3C7' };
-    } else if (type.includes('advisory') || type.includes('lifted')) {
+    } else if (t.includes('advisory') || t.includes('lifted')) {
         return { icon: 'checkmark-circle', color: '#2563EB', bg: '#EFF6FF' };
     }
     return { icon: 'information-circle', color: '#2563EB', bg: '#EFF6FF' };
@@ -91,15 +95,24 @@ export default function NotificationsScreen() {
     const [modalVisible, setModalVisible] = useState(false);
     const [notifications, setNotifications] = useState<Notification[]>([]);
     const [loading, setLoading] = useState(true);
+    const [deleteTarget, setDeleteTarget] = useState<Notification | null>(null);
     const slideAnim = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
 
-    // Fetch notifications from Supabase
+    // Fetch notifications from Supabase (global alerts + user-specific)
     const fetchNotifications = async () => {
         try {
             setLoading(true);
+
+            const { data: sessionData } = await supabase.auth.getSession();
+            const userId = sessionData?.session?.user?.id;
+
+            // Only fetch notifications targeted to 'user' role
+            // Plus user's own notifications (user_id matches)
             const { data, error } = await supabase
                 .from('notifications')
                 .select('*')
+                .eq('target_role', 'user')
+                .or(userId ? `user_id.is.null,user_id.eq.${userId}` : 'user_id.is.null')
                 .order('created_at', { ascending: false });
 
             if (error) {
@@ -120,8 +133,9 @@ export default function NotificationsScreen() {
 
             // Transform database data to our format
             const transformed: Notification[] = data.map((item: any) => {
-                const alertIcon = getAlertIcon(item.alert_type || item.title);
-                const category = (item.alert_type || '').toLowerCase().includes('relief') || 
+                const alertIcon = getAlertIcon(item.title || '', item.type);
+                const category = item.type === 'Updates' ? 'Updates' :
+                                (item.alert_type || '').toLowerCase().includes('relief') ||
                                 (item.alert_type || '').toLowerCase().includes('operation') ||
                                 (item.alert_type || '').toLowerCase().includes('road') ||
                                 (item.alert_type || '').toLowerCase().includes('advisory') ? 'Updates' : 'Emergency';
@@ -131,7 +145,7 @@ export default function NotificationsScreen() {
                     category: category as 'Emergency' | 'Updates',
                     title: item.title || 'Notification',
                     time: getTimeAgo(item.created_at),
-                    desc: item.description || item.message || 'No description available',
+                    desc: item.message || item.description || 'No description available',
                     location: item.location || 'Cebu',
                     fullTime: getFullTime(item.created_at),
                     icon: alertIcon.icon,
@@ -205,6 +219,15 @@ export default function NotificationsScreen() {
             setModalVisible(false);
             setSelectedNotif(null);
         });
+    };
+
+    // Delete notification
+    const deleteNotif = async (notif: Notification) => {
+        // Remove from local state immediately
+        setNotifications(prev => prev.filter(n => n.id !== notif.id));
+        setDeleteTarget(null);
+        // Delete from DB (only works if user owns it — RLS protected)
+        await supabase.from('notifications').delete().eq('id', notif.id);
     };
 
     // Count unread
@@ -291,6 +314,8 @@ export default function NotificationsScreen() {
                             key={item.id}
                             style={[styles.card, item.unread && styles.cardUnread]}
                             onPress={() => openModal(item)}
+                            onLongPress={() => setDeleteTarget(item)}
+                            delayLongPress={400}
                             activeOpacity={0.7}
                         >
                             <View style={[styles.iconBox, { backgroundColor: item.iconBg }]}>
@@ -363,6 +388,56 @@ export default function NotificationsScreen() {
                             </TouchableOpacity>
                         </ScrollView>
                     </Animated.View>
+                </View>
+            </Modal>
+
+            {/* ── Delete Confirm Modal ── */}
+            <Modal visible={!!deleteTarget} transparent animationType="fade" onRequestClose={() => setDeleteTarget(null)}>
+                <View style={styles.deleteOverlay}>
+                    <View style={styles.deleteSheet}>
+                        <Text style={styles.deleteMsg} numberOfLines={2}>
+                            "{deleteTarget?.title}"
+                        </Text>
+
+                        {/* Mark as Unread */}
+                        <TouchableOpacity
+                            style={styles.markUnreadBtn}
+                            onPress={() => {
+                                if (!deleteTarget) return;
+                                const updated = notifications.map(n =>
+                                    n.id === deleteTarget.id ? { ...n, unread: true } : n
+                                );
+                                setNotifications(updated);
+                                // Remove from read list in storage
+                                AsyncStorage.getItem(STORAGE_KEY).then(stored => {
+                                    const readIds: string[] = stored ? JSON.parse(stored) : [];
+                                    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(readIds.filter(id => id !== deleteTarget.id)));
+                                });
+                                setDeleteTarget(null);
+                            }}
+                            activeOpacity={0.8}
+                        >
+                            <Ionicons name="mail-unread-outline" size={18} color="#2563EB" style={{ marginRight: 8 }} />
+                            <Text style={styles.markUnreadText}>Mark as Unread</Text>
+                        </TouchableOpacity>
+
+                        {/* Delete */}
+                        <TouchableOpacity
+                            style={styles.deleteConfirmBtn}
+                            onPress={() => deleteTarget && deleteNotif(deleteTarget)}
+                            activeOpacity={0.8}
+                        >
+                            <Ionicons name="trash-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+                            <Text style={styles.deleteConfirmText}>Delete</Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                            style={styles.deleteCancelBtn}
+                            onPress={() => setDeleteTarget(null)}
+                        >
+                            <Text style={styles.deleteCancelText}>Cancel</Text>
+                        </TouchableOpacity>
+                    </View>
                 </View>
             </Modal>
         </SafeAreaView>
@@ -449,4 +524,17 @@ const styles = StyleSheet.create({
     primaryBtnText:  { color: 'white', fontSize: 16, fontWeight: '700' },
     secondaryBtn:    { flexDirection: 'row', backgroundColor: '#F8FAFC', paddingVertical: 18, borderRadius: 16, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#F1F5F9' },
     secondaryBtnText:{ color: '#1E293B', fontSize: 16, fontWeight: '700', marginLeft: 10 },
+
+    // Delete / action sheet
+    deleteOverlay:     { flex: 1, backgroundColor: 'rgba(15,23,42,0.6)', justifyContent: 'center', alignItems: 'center', padding: 32 },
+    deleteSheet:       { backgroundColor: '#FFFFFF', borderRadius: 24, padding: 24, width: '100%', alignItems: 'center' },
+    deleteIconCircle:  { width: 60, height: 60, borderRadius: 30, backgroundColor: '#FEE2E2', justifyContent: 'center', alignItems: 'center', marginBottom: 16 },
+    deleteTitle:       { fontSize: 18, fontWeight: '800', color: '#1E293B', marginBottom: 8 },
+    deleteMsg:         { fontSize: 13, color: '#64748B', textAlign: 'center', marginBottom: 20, lineHeight: 18 },
+    markUnreadBtn:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#EFF6FF', width: '100%', height: 50, borderRadius: 14, marginBottom: 10, borderWidth: 1, borderColor: '#BFDBFE' },
+    markUnreadText:    { color: '#2563EB', fontSize: 15, fontWeight: '700' },
+    deleteConfirmBtn:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#EF4444', width: '100%', height: 50, borderRadius: 14, marginBottom: 10 },
+    deleteConfirmText: { color: '#FFFFFF', fontSize: 15, fontWeight: '800' },
+    deleteCancelBtn:   { width: '100%', height: 44, justifyContent: 'center', alignItems: 'center' },
+    deleteCancelText:  { color: '#94A3B8', fontSize: 15, fontWeight: '600' },
 });
