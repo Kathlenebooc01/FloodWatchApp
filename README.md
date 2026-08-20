@@ -1,50 +1,64 @@
-# Welcome to your Expo app 👋
+# FloodWatch Cebu
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+## Project Description / Purpose
 
-## Get started
+FloodWatch Cebu is a localized flood monitoring and emergency response platform designed for flood-prone municipalities in Metro Cebu, including Mandaue, Consolacion, Liloan, and Danao.
 
-1. Install dependencies
+The system allows residents to submit flood reports, photos, water levels, locations, and SOS signals. LGU responders can receive emergency requests and update rescue status, while PDRRMO operators can monitor reports, weather data, and flood maps through the command center.
 
-   ```bash
-   npm install
-   ```
+### Target Users & Roles
 
-2. Start the app
+- **FloodWatch Citizen:** Views flood maps, submits flood reports, receives alerts, and sends SOS signals.
+- **FloodWatch LGU Responder:** Receives SOS requests, updates rescue status, and tracks resources.
+- **FloodWatch PDRRMO Operator:** Monitors weather data, checks flood reports, and coordinates emergency response.
+- **FloodWatch Admin:** Manages user accounts, system access, security, and audit logs.
 
-   ```bash
-   npx expo start
-   ```
+## Setup Instructions
 
-In the output, you'll find options to open the app in a
+### Requirements
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+Before running the project, make sure you have:
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+- Node.js installed
+- npm installed
+- Expo installed
+- A code editor such as VS Code
+- An Android emulator or Expo Go for testing
 
-## Get a fresh project
+### Installation
 
-When you're ready, run:
+1. Clone the repository:
 
 ```bash
-npm run reset-project
+git clone https://github.com/Kathlenebooc01/FloodWatchApp.git
 ```
+## File Structure Explanation
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+| Folder/File | Purpose |
+|---|---|
+| `app/` | Contains the main screens and pages of the application. |
+| `components/` | Contains reusable parts of the app interface. |
+| `constants/` | Contains shared values and settings used by the app. |
+| `hooks/` | Contains reusable functions and React hooks. |
+| `loader/` | Contains loading-related files. |
+| `scripts/` | Contains project scripts. |
+| `supabase/` | Contains files related to the Supabase database and backend. |
+| `utils/` | Contains helper functions used by the system. |
+| `assets/` | Contains images, icons, and other resources. |
+| `package.json` | Contains the project dependencies and commands. |
+| `app.json` | Contains the Expo app settings. |
+| `README.md` | Contains the project information and setup guide. |
 
-## Learn more
+## Contact Information
 
-To learn more about developing your project with Expo, look at the following resources:
+For questions, issues, or concerns about FloodWatch Cebu, please contact:
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+**Contact Person:** Kathlene Inot Booc  
+**Email:** kathlenebooc57@gmail.com
 
-## Join the community
+## License
 
-Join our community of developers creating universal apps.
+FloodWatch Cebu is a capstone project developed by the students of
+Southwestern University PHINMA for academic purposes.
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+© 2026 FloodWatch Cebu Development Team. All rights reserved.
