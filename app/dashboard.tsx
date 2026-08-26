@@ -1,9 +1,11 @@
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
     ActivityIndicator,
     Image,
+    Modal,
     SafeAreaView,
     ScrollView,
     StyleSheet,
@@ -55,6 +57,11 @@ export default function Dashboard() {
         description: 'Loading risk status...',
         updated_at: new Date().toISOString()
     });
+    const [isVerified, setIsVerified]             = useState(false);
+    const [verifyStatus, setVerifyStatus]         = useState<'none' | 'pending' | 'approved'>('none');
+    const [verifyChecked, setVerifyChecked]       = useState(false); // blocks buttons until DB check done
+    const [showNeedVerify, setShowNeedVerify]     = useState(false);
+    const [showOngoing, setShowOngoing]           = useState(false);
 
     // Function to fetch REAL weather data from Open-Meteo API (FREE, no key needed)
     const fetchRealWeatherData = async () => {
@@ -277,9 +284,111 @@ export default function Dashboard() {
             }
         };
 
+        // ── Save profile to DB on first arrival at dashboard ──────────────
+        const saveProfileIfNew = async () => {
+            try {
+                const { data: sessionData } = await supabase.auth.getSession();
+                const user = sessionData?.session?.user;
+                if (!user) return;
+
+                // Check if profile already exists
+                const { data: existing } = await supabase
+                    .from('profiles')
+                    .select('id')
+                    .eq('id', user.id)
+                    .maybeSingle();
+
+                if (existing) {
+                    console.log('✅ Profile already exists, skipping save');
+                    return;
+                }
+
+                // Profile doesn't exist — save it now from AsyncStorage
+                const AsyncStorage = (await import('@react-native-async-storage/async-storage')).default;
+                const stored = await AsyncStorage.getItem('user_profile');
+                const profile = stored ? JSON.parse(stored) : {};
+
+                const fullName = `${profile.firstName || ''} ${profile.lastName || ''}`.trim()
+                    || user.user_metadata?.full_name
+                    || '';
+                const phone = profile.mobile || user.user_metadata?.phone || '';
+
+                const { error } = await supabase.from('profiles').insert({
+                    id:            user.id,
+                    mobile_number: phone,
+                    full_name:     fullName,
+                    role:          'citizen',
+                    is_verified:   false,
+                    created_at:    new Date().toISOString(),
+                });
+
+                if (error) {
+                    console.log('⚠️ Profile save skipped (will retry):', error.code);
+                } else {
+                    console.log('✅ Profile saved to backend on dashboard load');
+                }
+            } catch (e: any) {
+                console.warn('⚠️ saveProfileIfNew error:', e.message);
+            }
+        };
+
         // Run all fetches together on mount
         const runAllFetches = async () => {
+            // ── Check verification status from DB FIRST before anything else ──
+            try {
+                const { data: sessionData } = await supabase.auth.getSession();
+                const userId = sessionData?.session?.user?.id;
+
+                if (userId) {
+                    const { data: verRow } = await supabase
+                        .from('id_verification')
+                        .select('status')
+                        .eq('user_id', userId)
+                        .order('submitted_at', { ascending: false })
+                        .limit(1)
+                        .maybeSingle();
+
+                    if (verRow?.status === 'approved') {
+                        setIsVerified(true);
+                        setVerifyStatus('approved');
+                        await AsyncStorage.setItem('identity_verified', 'true');
+                        await AsyncStorage.removeItem(`verify_notif_sent_${userId}`); // reset for future
+                    } else if (verRow?.status === 'pending') {
+                        setIsVerified(false);
+                        setVerifyStatus('pending');
+                        await AsyncStorage.setItem('identity_verified', 'pending');
+
+                        // Send "ongoing" notification only once (check if already sent)
+                        const alreadyNotified = await AsyncStorage.getItem(`verify_notif_sent_${userId}`);
+                        if (!alreadyNotified) {
+                            await supabase.from('notifications').insert({
+                                user_id:     userId,
+                                title:       'ID Verification In Progress',
+                                message:     'Your ID is currently being verified. Please wait — you will be notified once the verification is complete.',
+                                type:        'Updates',
+                                is_read:     false,
+                                target_role: 'user',
+                                created_at:  new Date().toISOString(),
+                            });
+                            await AsyncStorage.setItem(`verify_notif_sent_${userId}`, 'true');
+                            console.log('✅ Verification ongoing notification sent');
+                        }
+                    } else {
+                        setIsVerified(false);
+                        setVerifyStatus('none');
+                        await AsyncStorage.removeItem('identity_verified');
+                    }
+                }
+            } catch (e) {
+                const local = await AsyncStorage.getItem('identity_verified');
+                if (local === 'true') { setIsVerified(true); setVerifyStatus('approved'); }
+                else if (local === 'pending') { setVerifyStatus('pending'); }
+            } finally {
+                setVerifyChecked(true); // unlock buttons NOW after check is done
+            }
+
             await Promise.all([
+                saveProfileIfNew(),
                 fetchLocation(),
                 fetchNews(),
                 fetchRealWeatherData(),
@@ -382,7 +491,20 @@ export default function Dashboard() {
                 </View>
 
                 {/* Check Report Status */}
-                <TouchableOpacity style={styles.statusRow}>
+                <TouchableOpacity
+                    style={styles.statusRow}
+                    onPress={() => {
+                        if (!verifyChecked) return; // wait for DB check
+                        if (isVerified) {
+                            router.push('/report' as any);
+                        } else if (verifyStatus === 'pending') {
+                            setShowOngoing(true);
+                        } else {
+                            setShowNeedVerify(true);
+                        }
+                    }}
+                    activeOpacity={0.7}
+                >
                     <View style={styles.statusIconBox}>
                         <Ionicons name="document-text-outline" size={20} color="#2563EB" />
                     </View>
@@ -479,7 +601,16 @@ export default function Dashboard() {
                 <TouchableOpacity
                     style={styles.incidentCard}
                     activeOpacity={0.7}
-                    onPress={() => router.push('/report')}
+                    onPress={() => {
+                        if (!verifyChecked) return; // wait for DB check
+                        if (isVerified) {
+                            router.push('/report');
+                        } else if (verifyStatus === 'pending') {
+                            setShowOngoing(true);
+                        } else {
+                            setShowNeedVerify(true);
+                        }
+                    }}
                 >
                     <View style={styles.incidentIconBox}>
                         <Ionicons name="megaphone-outline" size={22} color="#2563EB" />
@@ -540,6 +671,59 @@ export default function Dashboard() {
 
             {/* Persistent Bottom Navbar */}
             <Navbar />
+
+            {/* Modal 1: Not yet verified */}
+            <Modal visible={showNeedVerify} transparent animationType="fade" onRequestClose={() => setShowNeedVerify(false)}>
+                <View style={{ flex: 1, backgroundColor: 'rgba(15,23,42,0.7)', justifyContent: 'center', alignItems: 'center', padding: 28 }}>
+                    <View style={{ backgroundColor: '#FFFFFF', borderRadius: 28, padding: 28, width: '100%', alignItems: 'center' }}>
+                        <View style={{ width: 70, height: 70, borderRadius: 35, backgroundColor: '#EFF6FF', justifyContent: 'center', alignItems: 'center', marginBottom: 18 }}>
+                            <Ionicons name="shield-checkmark-outline" size={36} color="#2563EB" />
+                        </View>
+                        <Text style={{ fontSize: 20, fontWeight: '800', color: '#1E293B', marginBottom: 10, textAlign: 'center' }}>
+                            Verification Required
+                        </Text>
+                        <Text style={{ fontSize: 14, color: '#64748B', textAlign: 'center', lineHeight: 22, marginBottom: 28 }}>
+                            You need to complete identity verification before you can submit reports. This helps ensure the accuracy and credibility of incident reports.
+                        </Text>
+                        <TouchableOpacity
+                            style={{ backgroundColor: '#2563EB', width: '100%', height: 52, borderRadius: 14, justifyContent: 'center', alignItems: 'center', marginBottom: 12 }}
+                            activeOpacity={0.8}
+                            onPress={() => { setShowNeedVerify(false); router.push({ pathname: '/identify', params: { from: 'dashboard' } } as any); }}
+                        >
+                            <Text style={{ color: '#FFFFFF', fontSize: 16, fontWeight: '700' }}>Verify Now</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                            style={{ width: '100%', height: 48, justifyContent: 'center', alignItems: 'center' }}
+                            onPress={() => setShowNeedVerify(false)}
+                        >
+                            <Text style={{ color: '#94A3B8', fontSize: 15, fontWeight: '600' }}>Maybe Later</Text>
+                        </TouchableOpacity>
+                    </View>
+                </View>
+            </Modal>
+
+            {/* Modal 2: Verification ongoing */}
+            <Modal visible={showOngoing} transparent animationType="fade" onRequestClose={() => setShowOngoing(false)}>
+                <View style={{ flex: 1, backgroundColor: 'rgba(15,23,42,0.7)', justifyContent: 'center', alignItems: 'center', padding: 28 }}>
+                    <View style={{ backgroundColor: '#FFFFFF', borderRadius: 28, padding: 28, width: '100%', alignItems: 'center' }}>
+                        <View style={{ width: 70, height: 70, borderRadius: 35, backgroundColor: '#FEF3C7', justifyContent: 'center', alignItems: 'center', marginBottom: 18 }}>
+                            <Ionicons name="time-outline" size={36} color="#D97706" />
+                        </View>
+                        <Text style={{ fontSize: 20, fontWeight: '800', color: '#1E293B', marginBottom: 10, textAlign: 'center' }}>
+                            Verification Ongoing
+                        </Text>
+                        <Text style={{ fontSize: 14, color: '#64748B', textAlign: 'center', lineHeight: 22, marginBottom: 28 }}>
+                            Your identity verification is currently being processed. You will be notified once it is completed.
+                        </Text>
+                        <TouchableOpacity
+                            style={{ backgroundColor: '#D97706', width: '100%', height: 52, borderRadius: 14, justifyContent: 'center', alignItems: 'center' }}
+                            onPress={() => setShowOngoing(false)}
+                        >
+                            <Text style={{ color: '#FFFFFF', fontSize: 16, fontWeight: '700' }}>OK, Got it</Text>
+                        </TouchableOpacity>
+                    </View>
+                </View>
+            </Modal>
         </SafeAreaView>
     );
 }

@@ -53,55 +53,62 @@ Deno.serve(async (req) => {
     }
 
     // Create or update user in auth
-    const email = `${phone}@floodwatch.local`;
-    const password = Math.random().toString(36).slice(-12); // Random password
+    const email    = `${phone}@floodwatch.local`;
+    const password = Math.random().toString(36).slice(-12);
 
     // Check if user exists
-    const { data: { users }, error: listError } = await supabase.auth.admin.listUsers();
+    const { data: { users } } = await supabase.auth.admin.listUsers();
     const existingUser = users?.find(u => u.email === email);
 
     let userId = existingUser?.id;
 
     if (!existingUser) {
-      // Create new user
+      // Create new auth user
       const { data: newUser, error: createError } = await supabase.auth.admin.createUser({
-        email: email,
-        password: password,
+        email,
+        password,
         email_confirm: true,
       });
-
       if (createError) {
         return new Response(JSON.stringify({ error: `Auth error: ${createError.message}` }), {
           status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
-
       userId = newUser.user?.id;
+    } else {
+      // Update password so sign-in works
+      await supabase.auth.admin.updateUserById(existingUser.id, { password });
     }
 
-    // NOW SAVE PROFILE TO DATABASE (ON THE BACKEND)
-    console.log('💾 Backend: Saving profile for user:', userId);
-    const fullName = `${otpRecord.first_name || ''} ${otpRecord.last_name || ''}`.trim();
-    
-    const { data: profileData, error: profileError } = await supabase
+    // Save profile using service role key (bypasses RLS)
+    // Only insert if profile doesn't already exist
+    const { data: existingProfile } = await supabase
       .from('profiles')
-      .insert({
-        id: userId,
-        mobile_number: phone,
-        full_name: fullName,
-        role: 'citizen',
-        is_verified: true,
-        created_at: new Date().toISOString(),
-      })
-      .select();
+      .select('id')
+      .eq('id', userId)
+      .maybeSingle();
 
-    if (profileError) {
-      console.error('❌ Backend profile insert failed:', profileError);
-      console.error('Error code:', profileError.code);
-      console.error('Error message:', profileError.message);
-      // Continue anyway - don't fail the whole request
+    if (!existingProfile) {
+      const fullName = `${otpRecord.first_name || ''} ${otpRecord.last_name || ''}`.trim();
+      const { error: profileError } = await supabase
+        .from('profiles')
+        .insert({
+          id:            userId,
+          mobile_number: phone,
+          full_name:     fullName,
+          role:          'citizen',
+          is_verified:   false,
+          created_at:    new Date().toISOString(),
+        });
+
+      if (profileError) {
+        console.error('❌ Profile insert failed:', profileError.message);
+        // Don't fail the whole request — user can still log in
+      } else {
+        console.log('✅ Profile saved for user:', userId);
+      }
     } else {
-      console.log('✅ Backend profile saved successfully!', profileData);
+      console.log('✅ Profile already exists for user:', userId);
     }
 
     // Delete used OTP
@@ -109,12 +116,11 @@ Deno.serve(async (req) => {
 
     return new Response(JSON.stringify({
       success: true,
-      email: email,
-      password: password,
+      email,
+      password,
       firstName: otpRecord.first_name,
-      lastName: otpRecord.last_name,
-      userId: userId,
-      profileSaved: !profileError,
+      lastName:  otpRecord.last_name,
+      userId,
     }), {
       status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });

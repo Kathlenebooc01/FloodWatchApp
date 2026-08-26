@@ -1,7 +1,11 @@
 import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as ImagePicker from 'expo-image-picker';
 import { Stack, useRouter } from 'expo-router';
 import React, { useState } from 'react';
 import {
+    ActivityIndicator,
+    Alert,
     SafeAreaView,
     ScrollView,
     StyleSheet,
@@ -10,43 +14,216 @@ import {
     View
 } from 'react-native';
 
+import { supabase } from '@/utils/supabase';
+
+const SUPABASE_URL = 'https://xncciaozzxoqbesfxpww.supabase.co';
+const ANON_KEY     = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhuY2NpYW96enhvcWJlc2Z4cHd3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIzNDgyMzQsImV4cCI6MjA4NzkyNDIzNH0.im6QTwjVyryj4y0fvcloH4qw-Rj5PPftDYhk4sKtymI';
+
 const DOCUMENT_TYPES = [
     'Philippine Passport',
+    "Driver's License",
+    'PhilSys National ID',
+    'PhilSys Step 1 Slip (Paper)',
+    'SSS UMID Card',
+    "Voter's ID",
+    'Postal ID',
+    'PRC ID',
+    'Barangay ID',
+];
+
+// IDs that require BOTH front and back photo
+const NEEDS_BACK = [
     "Driver's License",
     'PhilSys National ID',
     'SSS UMID Card',
     "Voter's ID",
     'Postal ID',
     'PRC ID',
+    'Barangay ID',
 ];
+
+// Front only: Philippine Passport, PhilSys Step 1 Slip (Paper)
+
+// IDs that only need the front (single page / booklet)
+// Philippine Passport, PhilSys Step 1 Slip (Paper) — front only
 
 export default function IdentityVerification() {
     const router = useRouter();
+    const { from } = useLocalSearchParams<{ from?: string }>();
+    const fromDashboard = from === 'dashboard';
     const [selectedDocType, setSelectedDocType] = useState('');
-    const [showDropdown, setShowDropdown] = useState(false);
+    const [showDropdown, setShowDropdown]       = useState(false);
+    const [frontUri, setFrontUri]               = useState<string | null>(null);
+    const [backUri, setBackUri]                 = useState<string | null>(null);
+    const [submitting, setSubmitting]           = useState(false);
 
-    // FIX: This now correctly directs to the permission-setup screen
-    const handleVerifySubmit = () => {
-        router.push('/permission-setup' as any);
+    const needsBack = NEEDS_BACK.includes(selectedDocType);
+
+    const takePhoto = async (side: 'front' | 'back') => {
+        const { status } = await ImagePicker.requestCameraPermissionsAsync();
+        if (status !== 'granted') {
+            Alert.alert('Permission Needed', 'Please allow camera access to take a photo of your ID.');
+            return;
+        }
+        const result = await ImagePicker.launchCameraAsync({
+            allowsEditing: true,
+            quality: 0.8,
+        });
+        if (!result.canceled) {
+            if (side === 'front') setFrontUri(result.assets[0].uri);
+            else setBackUri(result.assets[0].uri);
+        }
+    };
+
+    // Upload one image to storage, return public URL
+    const uploadPhoto = async (uri: string, fileName: string, token: string): Promise<string | null> => {
+        try {
+            const blob = await (await fetch(uri)).blob();
+            const resp = await fetch(
+                `${SUPABASE_URL}/storage/v1/object/incident-reports/${fileName}`,
+                {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'image/jpeg',
+                        'x-upsert': 'true',
+                    },
+                    body: blob,
+                }
+            );
+            return resp.ok
+                ? `${SUPABASE_URL}/storage/v1/object/public/incident-reports/${fileName}`
+                : null;
+        } catch { return null; }
+    };
+
+    // Convert local URI to base64
+    const toBase64 = async (uri: string): Promise<string> => {
+        const resp  = await fetch(uri);
+        const buf   = await resp.arrayBuffer();
+        const uint8 = new Uint8Array(buf);
+        let binary  = '';
+        for (let i = 0; i < uint8.length; i += 8192) {
+            binary += String.fromCharCode(...uint8.slice(i, i + 8192));
+        }
+        return btoa(binary);
+    };
+
+    const handleVerifySubmit = async () => {
+        if (!selectedDocType) {
+            Alert.alert('Required', 'Please select a document type.');
+            return;
+        }
+        if (!frontUri) {
+            Alert.alert('Required', 'Please take a photo of the front of your ID.');
+            return;
+        }
+        if (needsBack && !backUri) {
+            Alert.alert('Required', `Please take a photo of the back of your ${selectedDocType}.`);
+            return;
+        }
+
+        setSubmitting(true);
+        try {
+            const { data: sessionData } = await supabase.auth.getSession();
+            const userId = sessionData?.session?.user?.id;
+            const token  = sessionData?.session?.access_token || '';
+            if (!userId) { Alert.alert('Error', 'Not logged in.'); setSubmitting(false); return; }
+
+            // Upload front
+            const frontUrl = await uploadPhoto(
+                frontUri,
+                `id_front_${userId}_${Date.now()}.jpg`,
+                token
+            );
+
+            // Upload back (if required)
+            let backUrl: string | null = null;
+            if (needsBack && backUri) {
+                backUrl = await uploadPhoto(
+                    backUri,
+                    `id_back_${userId}_${Date.now()}.jpg`,
+                    token
+                );
+            }
+
+            // Insert into id_verification
+            const { data: verData, error } = await supabase
+                .from('id_verification')
+                .insert({
+                    user_id:      userId,
+                    id_type:      selectedDocType,
+                    id_image_url: frontUrl,
+                    selfie_url:   backUrl,   // using selfie_url column for back image
+                    status:       'pending',
+                    submitted_at: new Date().toISOString(),
+                })
+                .select('id_verification_id')
+                .single();
+
+            if (error) {
+                console.error('❌ id_verification insert failed:', error.message);
+            } else {
+                console.log('✅ ID submitted:', verData?.id_verification_id);
+
+                // AI validates in background — result comes as a notification
+                if (verData?.id_verification_id) {
+                    toBase64(frontUri).then(base64 => {
+                        return fetch(`${SUPABASE_URL}/functions/v1/validate-id-image`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${ANON_KEY}`,
+                            },
+                            body: JSON.stringify({
+                                imageBase64:    base64,
+                                idType:         selectedDocType,
+                                verificationId: verData.id_verification_id,
+                            }),
+                        });
+                    })
+                    .then(r => r.json())
+                    .then(res => console.log('✅ AI ID validation done:', res.status))
+                    .catch(e => console.warn('⚠️ AI ID validation failed:', e.message));
+                }
+            }
+
+            await AsyncStorage.setItem('identity_verified', 'pending');
+
+            Alert.alert(
+                'ID Submitted!',
+                'Your ID is being reviewed. You will receive a notification once it is verified.',
+                [{ text: 'OK', onPress: () => {
+                    if (fromDashboard) {
+                        router.replace('/dashboard' as any);
+                    } else {
+                        router.push('/permission-setup' as any);
+                    }
+                }}]
+            );
+            setSubmitting(false);
+
+        } catch (e: any) {
+            console.warn('⚠️ Submit error:', e.message);
+            if (fromDashboard) {
+                router.replace('/dashboard' as any);
+            } else {
+                router.push('/permission-setup' as any);
+            }
+        } finally {
+            setSubmitting(false);
+        }
     };
 
     return (
         <SafeAreaView style={styles.safeArea}>
             <Stack.Screen options={{ headerShown: false }} />
+            <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
 
-            <ScrollView
-                contentContainerStyle={styles.scrollContent}
-                showsVerticalScrollIndicator={false}
-            >
-                {/* Back Button */}
-                <TouchableOpacity
-                    style={styles.backButton}
-                    onPress={() => router.back()}
-                >
+                <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
                     <Ionicons name="chevron-back" size={28} color="#1A202C" />
                 </TouchableOpacity>
 
-                {/* Verification Icon Header */}
                 <View style={styles.iconContainer}>
                     <View style={styles.iconCircle}>
                         <View style={styles.blueBox}>
@@ -60,13 +237,10 @@ export default function IdentityVerification() {
                     Please provide a valid government-issued ID to verify your residency and enhance report credibility.
                 </Text>
 
-                {/* Main White Card */}
                 <View style={styles.card}>
+                    {/* Document type picker */}
                     <Text style={styles.sectionLabel}>SELECT DOCUMENT TYPE</Text>
-                    <TouchableOpacity
-                        style={styles.dropdown}
-                        onPress={() => setShowDropdown(!showDropdown)}
-                    >
+                    <TouchableOpacity style={styles.dropdown} onPress={() => setShowDropdown(!showDropdown)}>
                         <Text style={selectedDocType ? styles.dropdownTextSelected : styles.dropdownText}>
                             {selectedDocType || 'Choose government ID'}
                         </Text>
@@ -78,13 +252,13 @@ export default function IdentityVerification() {
                             {DOCUMENT_TYPES.map((type, index) => (
                                 <TouchableOpacity
                                     key={index}
-                                    style={[
-                                        styles.dropdownItem,
-                                        index < DOCUMENT_TYPES.length - 1 && styles.dropdownItemBorder,
-                                    ]}
+                                    style={[styles.dropdownItem, index < DOCUMENT_TYPES.length - 1 && styles.dropdownItemBorder]}
                                     onPress={() => {
                                         setSelectedDocType(type);
                                         setShowDropdown(false);
+                                        // Reset photos if doc type changes
+                                        setFrontUri(null);
+                                        setBackUri(null);
                                     }}
                                 >
                                     <Text style={styles.dropdownItemText}>{type}</Text>
@@ -93,33 +267,79 @@ export default function IdentityVerification() {
                         </View>
                     )}
 
-                    <Text style={[styles.sectionLabel, { marginTop: 24 }]}>UPLOAD ID PHOTO</Text>
-                    <TouchableOpacity style={styles.uploadArea}>
-                        <View style={styles.uploadIconCircle}>
-                            <Ionicons name="cloud-upload-outline" size={24} color="#2563EB" />
-                        </View>
-                        <Text style={styles.uploadTitle}>Tap to capture or upload</Text>
-                        <Text style={styles.uploadSubtitle}>PNG, JPG, or PDF (max 5MB)</Text>
-                    </TouchableOpacity>
+                    {/* FRONT photo */}
+                    {selectedDocType !== '' && (
+                        <>
+                            <Text style={[styles.sectionLabel, { marginTop: 24 }]}>
+                                {needsBack ? 'FRONT OF ID' : 'PHOTO OF ID'}
+                            </Text>
+                            <TouchableOpacity style={styles.uploadArea} onPress={() => takePhoto('front')}>
+                                <View style={[styles.uploadIconCircle, frontUri && styles.uploadIconDone]}>
+                                    <Ionicons
+                                        name={frontUri ? 'checkmark-circle' : 'camera-outline'}
+                                        size={24}
+                                        color={frontUri ? '#10B981' : '#2563EB'}
+                                    />
+                                </View>
+                                <Text style={styles.uploadTitle}>
+                                    {frontUri
+                                        ? 'Front photo taken ✓'
+                                        : needsBack ? 'Tap to take front photo' : 'Tap to take photo'}
+                                </Text>
+                                <Text style={styles.uploadSubtitle}>Camera only</Text>
+                            </TouchableOpacity>
+                        </>
+                    )}
 
-                    {/* Blue Info Box */}
+                    {/* BACK photo — only for IDs that need it */}
+                    {needsBack && (
+                        <>
+                            <Text style={[styles.sectionLabel, { marginTop: 20 }]}>BACK OF ID</Text>
+                            <TouchableOpacity style={styles.uploadArea} onPress={() => takePhoto('back')}>
+                                <View style={[styles.uploadIconCircle, backUri && styles.uploadIconDone]}>
+                                    <Ionicons
+                                        name={backUri ? 'checkmark-circle' : 'camera-outline'}
+                                        size={24}
+                                        color={backUri ? '#10B981' : '#2563EB'}
+                                    />
+                                </View>
+                                <Text style={styles.uploadTitle}>
+                                    {backUri ? 'Back photo taken ✓' : 'Tap to take back photo'}
+                                </Text>
+                                <Text style={styles.uploadSubtitle}>Camera only</Text>
+                            </TouchableOpacity>
+                        </>
+                    )}
+
                     <View style={styles.infoTip}>
                         <Ionicons name="information-circle-outline" size={20} color="#2563EB" style={{ marginRight: 10 }} />
                         <Text style={styles.infoText}>
-                            Ensure all four corners of the ID are visible. Avoid glare from lights and ensure text is readable.
+                            Take a clear photo of your ID. Ensure all corners are visible, no glare, and text is readable.
                         </Text>
                     </View>
                 </View>
 
-                {/* Submit Button */}
-                <TouchableOpacity style={styles.submitButton} onPress={handleVerifySubmit}>
-                    <Text style={styles.submitButtonText}>Verify & Submit</Text>
+                <TouchableOpacity
+                    style={[styles.submitButton, (!selectedDocType || submitting) && { opacity: 0.5 }]}
+                    onPress={handleVerifySubmit}
+                    disabled={!selectedDocType || submitting}
+                >
+                    {submitting
+                        ? <ActivityIndicator color="#FFFFFF" />
+                        : <Text style={styles.submitButtonText}>Verify & Submit</Text>
+                    }
                 </TouchableOpacity>
 
-                {/* Skip Button - Also leads to permission setup */}
-                <TouchableOpacity onPress={() => router.push('/permission-setup' as any)}>
+                <TouchableOpacity onPress={() => {
+                    if (fromDashboard) {
+                        router.replace('/dashboard' as any);
+                    } else {
+                        router.push('/permission-setup' as any);
+                    }
+                }}>
                     <Text style={styles.skipText}>Skip for now</Text>
                 </TouchableOpacity>
+
             </ScrollView>
         </SafeAreaView>
     );
@@ -143,31 +363,25 @@ const styles = StyleSheet.create({
     dropdown: {
         flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
         backgroundColor: '#F8FAFC', borderRadius: 14, borderWidth: 1, borderColor: '#E2E8F0',
-        paddingHorizontal: 16, height: 56
+        paddingHorizontal: 16, height: 56,
     },
     dropdownText: { fontSize: 15, color: '#94A3B8' },
     dropdownTextSelected: { fontSize: 15, color: '#0F172A', fontWeight: '600' },
-    dropdownMenu: {
-        backgroundColor: '#FFFFFF',
-        borderRadius: 12,
-        borderWidth: 1,
-        borderColor: '#E2E8F0',
-        marginTop: 5,
-        overflow: 'hidden'
-    },
+    dropdownMenu: { backgroundColor: '#FFFFFF', borderRadius: 12, borderWidth: 1, borderColor: '#E2E8F0', marginTop: 5, overflow: 'hidden' },
     dropdownItem: { padding: 16 },
     dropdownItemBorder: { borderBottomWidth: 1, borderBottomColor: '#F1F5F9' },
     dropdownItemText: { fontSize: 14, color: '#334155' },
     uploadArea: {
         borderWidth: 1.5, borderColor: '#E2E8F0', borderStyle: 'dashed', borderRadius: 20,
-        paddingVertical: 40, alignItems: 'center', backgroundColor: '#F8FAFC'
+        paddingVertical: 35, alignItems: 'center', backgroundColor: '#F8FAFC',
     },
-    uploadIconCircle: { width: 48, height: 48, borderRadius: 24, backgroundColor: '#EFF6FF', justifyContent: 'center', alignItems: 'center', marginBottom: 12 },
-    uploadTitle: { fontSize: 16, fontWeight: '700', color: '#0F172A', marginBottom: 4 },
+    uploadIconCircle: { width: 48, height: 48, borderRadius: 24, backgroundColor: '#EFF6FF', justifyContent: 'center', alignItems: 'center', marginBottom: 10 },
+    uploadIconDone:   { backgroundColor: '#ECFDF5' },
+    uploadTitle: { fontSize: 15, fontWeight: '700', color: '#0F172A', marginBottom: 4 },
     uploadSubtitle: { fontSize: 12, color: '#94A3B8' },
-    infoTip: { flexDirection: 'row', alignItems: 'center', marginTop: 25, backgroundColor: '#EFF6FF', borderRadius: 16, padding: 16 },
+    infoTip: { flexDirection: 'row', alignItems: 'center', marginTop: 20, backgroundColor: '#EFF6FF', borderRadius: 16, padding: 14 },
     infoText: { flex: 1, fontSize: 12, color: '#2563EB', fontWeight: '500', lineHeight: 18 },
     submitButton: { backgroundColor: '#2563EB', borderRadius: 16, height: 58, justifyContent: 'center', alignItems: 'center', marginBottom: 20 },
     submitButtonText: { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
-    skipText: { textAlign: 'center', color: '#2563EB', fontWeight: '700', fontSize: 14 }
+    skipText: { textAlign: 'center', color: '#2563EB', fontWeight: '700', fontSize: 14 },
 });
