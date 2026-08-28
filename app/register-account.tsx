@@ -36,13 +36,13 @@ export default function RegisterAccount() {
     // Validation errors
     const firstNameError  = touchedFirst  && firstName.trim().length === 0  ? 'First name is required.' : '';
     const lastNameError   = touchedLast   && lastName.trim().length === 0   ? 'Last name is required.' : '';
-    const mobileError     = touchedMobile && mobileNumber.trim().length < 9 ? 'Enter a valid 10-digit mobile number.' : '';
+    const mobileError     = touchedMobile && mobileNumber.trim().length < 10 ? 'Enter a valid 10-digit mobile number.' : '';
 
     // Button only enabled when ALL fields valid AND checkbox checked
     const isFormValid =
         firstName.trim().length > 0 &&
         lastName.trim().length > 0 &&
-        mobileNumber.trim().length >= 9 &&
+        mobileNumber.trim().length >= 10 &&
         agreed;
 
     const handleRegister = async () => {
@@ -59,7 +59,7 @@ export default function RegisterAccount() {
             Alert.alert('Required', 'Please enter your last name.');
             return;
         }
-        if (mobileNumber.trim().length < 9) {
+        if (mobileNumber.trim().length < 10) {
             Alert.alert('Required', 'Please enter a valid mobile number.');
             return;
         }
@@ -223,7 +223,7 @@ export default function RegisterAccount() {
                                 onChangeText={setMobileNumber}
                                 onBlur={() => setTouchedMobile(true)}
                                 keyboardType="phone-pad"
-                                maxLength={11}
+                                maxLength={10}
                             />
                         </View>
                         {mobileError ? <Text style={styles.errorText}>{mobileError}</Text> : null}

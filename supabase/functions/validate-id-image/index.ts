@@ -48,33 +48,43 @@ Deno.serve(async (req) => {
                     },
                   },
                   {
-                    text: `You are an ID verification AI for FloodWatch Cebu, a disaster monitoring app in the Philippines.
+                    text: `You are an ID verification expert for FloodWatch Cebu, a Philippine government disaster monitoring app.
 
-Analyze this image and determine if it is a valid Philippine government-issued ID.
+Your job is to verify if the submitted image is a real, valid Philippine government-issued ID.
 
 The user selected document type: "${idType || 'Not specified'}"
 
-Check for:
-1. Is this clearly a Philippine government ID (passport, driver's license, PhilSys, UMID, voter's ID, postal ID, PRC ID, etc.)?
-2. Is the ID photo clearly visible and readable?
-3. Does the ID look authentic (not a photo of a screen, not blurry, not cropped badly)?
-4. Is the name and other text on the ID readable?
+Carefully examine the image and score it:
 
-Respond ONLY in this exact JSON format:
+SCORING GUIDE for confidence_score (0 to 100):
+- 95-100: Clearly a genuine Philippine gov ID, all text readable, photo visible, no tampering
+- 85-94: Looks like a real ID but slightly blurry or partially obscured
+- 70-84: Probably an ID but quality is poor or some details unclear  
+- 50-69: Uncertain — could be an ID but too many issues
+- 0-49: Not an ID, fake, screenshot, selfie, or unreadable
+
+APPROVE only if confidence_score >= 90.
+REJECT if confidence_score < 90.
+
+Respond ONLY in this exact JSON format with no other text:
 {
   "ai_is_valid": true or false,
-  "ai_confidence_score": 0.0 to 1.0,
-  "ai_insight": "brief explanation in 1-2 sentences",
+  "confidence_score": integer from 0 to 100,
+  "ai_insight": "one sentence describing what you see",
   "status": "approved" or "rejected"
 }
 
-Set ai_is_valid to false and status to rejected if:
-- The image is NOT an ID (selfie, random photo, screenshot, etc.)
-- The ID is too blurry or unreadable
-- The ID appears fake or digitally altered
-- It's a photo of a phone screen showing an ID
+Examples of what to REJECT:
+- Selfies or photos of people without an ID
+- Random objects, food, scenery
+- Screenshots of an ID on a phone screen
+- IDs that are too blurry to read
+- Clearly fake or edited IDs
 
-Set ai_is_valid to true and status to approved if it looks like a genuine, readable Philippine government ID.`,
+Examples of what to APPROVE:
+- Clear photo of PhilSys ID, Driver's License, Passport, UMID, Voter's ID, PRC ID, etc.
+- ID text is readable, photo on ID is visible
+- All 4 corners of the ID are visible`,
                   },
                 ],
               }],
@@ -94,8 +104,25 @@ Set ai_is_valid to true and status to approved if it looks like a genuine, reada
 
         const jsonMatch = rawText.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
-          result = JSON.parse(jsonMatch[0]);
-          console.log(`✅ ID validation via ${model}:`, result);
+          const parsed = JSON.parse(jsonMatch[0]);
+
+          // Normalize confidence to 0-100 integer
+          let confidence = parsed.confidence_score ?? parsed.ai_confidence_score ?? 0;
+          if (confidence <= 1.0 && confidence > 0) confidence = Math.round(confidence * 100); // convert 0.0-1.0 to 0-100
+          confidence = Math.round(confidence);
+
+          // Enforce 90% threshold — auto reject if below
+          const meetsThreshold = confidence >= 90;
+          const finalStatus = meetsThreshold && parsed.ai_is_valid ? 'approved' : 'rejected';
+
+          result = {
+            ai_is_valid:         meetsThreshold && parsed.ai_is_valid,
+            ai_confidence_score: confidence / 100, // store as 0.0-1.0 in DB
+            ai_insight:          parsed.ai_insight || 'No insight provided.',
+            status:              finalStatus,
+          };
+
+          console.log(`✅ ID validation via ${model}: confidence=${confidence}%, status=${finalStatus}`);
           break;
         }
       } catch (e: any) {

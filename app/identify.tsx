@@ -1,11 +1,12 @@
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
-import { Stack, useRouter } from 'expo-router';
+import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
+    Modal,
     SafeAreaView,
     ScrollView,
     StyleSheet,
@@ -35,14 +36,13 @@ const DOCUMENT_TYPES = [
 const NEEDS_BACK = [
     "Driver's License",
     'PhilSys National ID',
+    'PhilSys Step 1 Slip (Paper)',
     'SSS UMID Card',
     "Voter's ID",
     'Postal ID',
     'PRC ID',
     'Barangay ID',
 ];
-
-// Front only: Philippine Passport, PhilSys Step 1 Slip (Paper)
 
 // IDs that only need the front (single page / booklet)
 // Philippine Passport, PhilSys Step 1 Slip (Paper) — front only
@@ -55,7 +55,10 @@ export default function IdentityVerification() {
     const [showDropdown, setShowDropdown]       = useState(false);
     const [frontUri, setFrontUri]               = useState<string | null>(null);
     const [backUri, setBackUri]                 = useState<string | null>(null);
+    const [showPhotoAlert, setShowPhotoAlert]   = useState(false);
+    const [photoAlertMsg, setPhotoAlertMsg]     = useState('');
     const [submitting, setSubmitting]           = useState(false);
+    const [showSuccessModal, setShowSuccessModal] = useState(false);
 
     const needsBack = NEEDS_BACK.includes(selectedDocType);
 
@@ -111,15 +114,18 @@ export default function IdentityVerification() {
 
     const handleVerifySubmit = async () => {
         if (!selectedDocType) {
-            Alert.alert('Required', 'Please select a document type.');
+            setPhotoAlertMsg('Please select a document type.');
+            setShowPhotoAlert(true);
             return;
         }
         if (!frontUri) {
-            Alert.alert('Required', 'Please take a photo of the front of your ID.');
+            setPhotoAlertMsg('Please take a photo of the front of your ID.');
+            setShowPhotoAlert(true);
             return;
         }
         if (needsBack && !backUri) {
-            Alert.alert('Required', `Please take a photo of the back of your ${selectedDocType}.`);
+            setPhotoAlertMsg(`Please take a photo of the back of your ${selectedDocType}.`);
+            setShowPhotoAlert(true);
             return;
         }
 
@@ -190,18 +196,7 @@ export default function IdentityVerification() {
 
             await AsyncStorage.setItem('identity_verified', 'pending');
 
-            Alert.alert(
-                'ID Submitted!',
-                'Your ID is being reviewed. You will receive a notification once it is verified.',
-                [{ text: 'OK', onPress: () => {
-                    if (fromDashboard) {
-                        router.replace('/dashboard' as any);
-                    } else {
-                        router.push('/permission-setup' as any);
-                    }
-                }}]
-            );
-            setSubmitting(false);
+            setShowSuccessModal(true);
 
         } catch (e: any) {
             console.warn('⚠️ Submit error:', e.message);
@@ -320,9 +315,9 @@ export default function IdentityVerification() {
                 </View>
 
                 <TouchableOpacity
-                    style={[styles.submitButton, (!selectedDocType || submitting) && { opacity: 0.5 }]}
+                    style={[styles.submitButton, (!selectedDocType || !frontUri || (needsBack && !backUri) || submitting) && { opacity: 0.5 }]}
                     onPress={handleVerifySubmit}
-                    disabled={!selectedDocType || submitting}
+                    disabled={!selectedDocType || !frontUri || (needsBack && !backUri) || submitting}
                 >
                     {submitting
                         ? <ActivityIndicator color="#FFFFFF" />
@@ -341,6 +336,65 @@ export default function IdentityVerification() {
                 </TouchableOpacity>
 
             </ScrollView>
+
+            {/* ── Missing Photo Modal ── */}
+            <Modal visible={showPhotoAlert} transparent animationType="fade" onRequestClose={() => setShowPhotoAlert(false)}>
+                <View style={styles.alertOverlay}>
+                    <View style={styles.alertCard}>
+                        <View style={styles.alertIconCircle}>
+                            <Ionicons name="camera-outline" size={34} color="#2563EB" />
+                        </View>
+                        <Text style={styles.alertTitle}>Photo Required</Text>
+                        <Text style={styles.alertMsg}>{photoAlertMsg}</Text>
+                        <TouchableOpacity
+                            style={styles.alertBtn}
+                            onPress={() => setShowPhotoAlert(false)}
+                            activeOpacity={0.8}
+                        >
+                            <Text style={styles.alertBtnText}>Got it</Text>
+                        </TouchableOpacity>
+                    </View>
+                </View>
+            </Modal>
+
+            {/* ── ID Submitted Success Modal ── */}
+            <Modal visible={showSuccessModal} transparent animationType="fade" onRequestClose={() => {}}>
+                <View style={styles.alertOverlay}>
+                    <View style={styles.alertCard}>
+                        {/* Animated checkmark circle */}
+                        <View style={styles.successIconCircle}>
+                            <Ionicons name="checkmark-done" size={40} color="#FFFFFF" />
+                        </View>
+
+                        <Text style={styles.successTitle}>ID Submitted!</Text>
+                        <Text style={styles.alertMsg}>
+                            Your ID is currently being reviewed. You will receive a notification once the verification is complete.
+                        </Text>
+
+                        {/* Divider with info */}
+                        <View style={styles.successInfoRow}>
+                            <Ionicons name="notifications-outline" size={16} color="#2563EB" />
+                            <Text style={styles.successInfoText}>We'll notify you when it's done</Text>
+                        </View>
+
+                        <TouchableOpacity
+                            style={styles.alertBtn}
+                            onPress={() => {
+                                setShowSuccessModal(false);
+                                if (fromDashboard) {
+                                    router.replace('/dashboard' as any);
+                                } else {
+                                    router.push('/permission-setup' as any);
+                                }
+                            }}
+                            activeOpacity={0.8}
+                        >
+                            <Text style={styles.alertBtnText}>Continue</Text>
+                        </TouchableOpacity>
+                    </View>
+                </View>
+            </Modal>
+
         </SafeAreaView>
     );
 }
@@ -384,4 +438,19 @@ const styles = StyleSheet.create({
     submitButton: { backgroundColor: '#2563EB', borderRadius: 16, height: 58, justifyContent: 'center', alignItems: 'center', marginBottom: 20 },
     submitButtonText: { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
     skipText: { textAlign: 'center', color: '#2563EB', fontWeight: '700', fontSize: 14 },
+
+    // Missing photo modal
+    alertOverlay:    { flex: 1, backgroundColor: 'rgba(15,23,42,0.75)', justifyContent: 'center', alignItems: 'center', padding: 28 },
+    alertCard:       { backgroundColor: '#FFFFFF', borderRadius: 28, padding: 30, width: '100%', alignItems: 'center', shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 20, shadowOffset: { width: 0, height: 8 }, elevation: 10 },
+    alertIconCircle: { width: 72, height: 72, borderRadius: 36, backgroundColor: '#EFF6FF', justifyContent: 'center', alignItems: 'center', marginBottom: 18 },
+    alertTitle:      { fontSize: 20, fontWeight: '800', color: '#1E293B', marginBottom: 10, textAlign: 'center' },
+    alertMsg:        { fontSize: 14, color: '#64748B', textAlign: 'center', lineHeight: 22, marginBottom: 28 },
+    alertBtn:        { backgroundColor: '#2563EB', width: '100%', height: 52, borderRadius: 14, justifyContent: 'center', alignItems: 'center' },
+    alertBtnText:    { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
+
+    // Success modal extras
+    successIconCircle: { width: 80, height: 80, borderRadius: 40, backgroundColor: '#10B981', justifyContent: 'center', alignItems: 'center', marginBottom: 20 },
+    successTitle:      { fontSize: 22, fontWeight: '900', color: '#1E293B', marginBottom: 10, textAlign: 'center' },
+    successInfoRow:    { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#EFF6FF', borderRadius: 12, paddingHorizontal: 16, paddingVertical: 10, marginBottom: 24, width: '100%', justifyContent: 'center' },
+    successInfoText:   { fontSize: 13, color: '#2563EB', fontWeight: '600' },
 });

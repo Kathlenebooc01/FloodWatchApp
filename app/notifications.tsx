@@ -68,24 +68,37 @@ const getFullTime = (dateString: string) => {
 // Map alert type to icon and color
 const getAlertIcon = (alertType: string, type?: string) => {
     const t = (alertType || '').toLowerCase();
-    // User-specific rejection notification
-    if (t.includes('not accepted') || t.includes('rejected') || t.includes('was not')) {
-        return { icon: 'close-circle', color: '#EA580C', bg: '#FED7AA' };
+
+    // ID Verification results
+    if (t.includes('verified') || t.includes('complete') || t.includes('approved') || t.includes('resolved')) {
+        return { icon: 'shield-checkmark', color: '#059669', bg: '#D1FAE5', accent: '#10B981' };
     }
+    if (t.includes('failed') || t.includes('not accepted') || t.includes('rejected') || t.includes('was not')) {
+        return { icon: 'shield-outline', color: '#DC2626', bg: '#FEE2E2', accent: '#EF4444' };
+    }
+    if (t.includes('progress') || t.includes('ongoing') || t.includes('pending') || t.includes('review')) {
+        return { icon: 'time', color: '#D97706', bg: '#FEF3C7', accent: '#F59E0B' };
+    }
+    // Emergency / flood
     if (t.includes('evacuation') || t.includes('urgent')) {
-        return { icon: 'alert-circle', color: '#EF4444', bg: '#FEE2E2' };
-    } else if (t.includes('water') || t.includes('level') || t.includes('flood')) {
-        return { icon: 'water', color: '#EF4444', bg: '#FEE2E2' };
-    } else if (t.includes('weather') || t.includes('warning')) {
-        return { icon: 'warning', color: '#EF4444', bg: '#FEE2E2' };
-    } else if (t.includes('relief') || t.includes('operation')) {
-        return { icon: 'heart', color: '#10B981', bg: '#ECFDF5' };
-    } else if (t.includes('road') || t.includes('clear')) {
-        return { icon: 'construct', color: '#F59E0B', bg: '#FEF3C7' };
-    } else if (t.includes('advisory') || t.includes('lifted')) {
-        return { icon: 'checkmark-circle', color: '#2563EB', bg: '#EFF6FF' };
+        return { icon: 'alert-circle', color: '#DC2626', bg: '#FEE2E2', accent: '#EF4444' };
     }
-    return { icon: 'information-circle', color: '#2563EB', bg: '#EFF6FF' };
+    if (t.includes('water') || t.includes('level') || t.includes('flood')) {
+        return { icon: 'water', color: '#DC2626', bg: '#FEE2E2', accent: '#EF4444' };
+    }
+    if (t.includes('weather') || t.includes('warning')) {
+        return { icon: 'warning', color: '#D97706', bg: '#FEF3C7', accent: '#F59E0B' };
+    }
+    if (t.includes('relief') || t.includes('operation')) {
+        return { icon: 'heart', color: '#059669', bg: '#D1FAE5', accent: '#10B981' };
+    }
+    if (t.includes('road') || t.includes('clear') || t.includes('construct')) {
+        return { icon: 'construct', color: '#D97706', bg: '#FEF3C7', accent: '#F59E0B' };
+    }
+    if (t.includes('advisory') || t.includes('lifted')) {
+        return { icon: 'checkmark-circle', color: '#2563EB', bg: '#EFF6FF', accent: '#2563EB' };
+    }
+    return { icon: 'notifications', color: '#2563EB', bg: '#EFF6FF', accent: '#2563EB' };
 };
 
 export default function NotificationsScreen() {
@@ -151,6 +164,7 @@ export default function NotificationsScreen() {
                     icon: alertIcon.icon,
                     iconColor: alertIcon.color,
                     iconBg: alertIcon.bg,
+                    accent: (alertIcon as any).accent || alertIcon.color,
                     unread: !readIds.includes(item.id),
                 };
             });
@@ -310,25 +324,27 @@ export default function NotificationsScreen() {
                     </View>
                 ) : (
                     filtered.map((item) => (
-                        <TouchableOpacity
-                            key={item.id}
-                            style={[styles.card, item.unread && styles.cardUnread]}
-                            onPress={() => openModal(item)}
-                            onLongPress={() => setDeleteTarget(item)}
-                            delayLongPress={400}
-                            activeOpacity={0.7}
-                        >
-                            <View style={[styles.iconBox, { backgroundColor: item.iconBg }]}>
-                                <Ionicons name={item.icon as any} size={22} color={item.iconColor} />
+        <TouchableOpacity
+                        key={item.id}
+                        style={[styles.card, item.unread && styles.cardUnread]}
+                        onPress={() => openModal(item)}
+                        onLongPress={() => setDeleteTarget(item)}
+                        delayLongPress={400}
+                        activeOpacity={0.7}
+                    >
+                        {/* Left accent bar */}
+                        <View style={[styles.cardAccent, { backgroundColor: (item as any).accent || item.iconColor }]} />
+
+                        <View style={[styles.iconBox, { backgroundColor: item.iconBg }]}>
+                            <Ionicons name={item.icon as any} size={24} color={item.iconColor} />
+                        </View>
+
+                        <View style={styles.cardContent}>
+                            <View style={styles.cardRow}>
+                                <Text style={styles.cardTitle} numberOfLines={1}>{item.title}</Text>
+                                <Text style={styles.cardTime}>{item.time}</Text>
                             </View>
-                            <View style={styles.cardContent}>
-                                <View style={styles.cardRow}>
-                                    <Text style={styles.cardTitle} numberOfLines={1}>{item.title}</Text>
-                                    <View style={styles.timeBox}>
-                                        <Text style={styles.cardTime}>{item.time}</Text>
-                                        {item.unread && <View style={styles.dot} />}
-                                    </View>
-                                </View>
+                            <View style={styles.cardMetaRow}>
                                 <View style={[
                                     styles.categoryPill,
                                     item.category === 'Emergency' ? styles.pillEmergency : styles.pillUpdate,
@@ -340,9 +356,11 @@ export default function NotificationsScreen() {
                                         {item.category.toUpperCase()}
                                     </Text>
                                 </View>
-                                <Text style={styles.cardDesc} numberOfLines={2}>{item.desc}</Text>
+                                {item.unread && <View style={[styles.dot, { backgroundColor: (item as any).accent || '#2563EB' }]} />}
                             </View>
-                        </TouchableOpacity>
+                            <Text style={styles.cardDesc} numberOfLines={2}>{item.desc}</Text>
+                        </View>
+                    </TouchableOpacity>
                     ))
                 )}
             </ScrollView>
@@ -480,16 +498,31 @@ const styles = StyleSheet.create({
     emptyText:  { fontSize: 15, color: '#CBD5E1', fontWeight: '600', marginTop: 12 },
 
     // Cards
-    card:       { flexDirection: 'row', backgroundColor: '#F8FAFC', borderRadius: 18, padding: 16, marginBottom: 12, borderWidth: 1, borderColor: '#F1F5F9' },
+    card: {
+        flexDirection: 'row',
+        backgroundColor: '#FFFFFF',
+        borderRadius: 20,
+        marginBottom: 12,
+        borderWidth: 1,
+        borderColor: '#F1F5F9',
+        overflow: 'hidden',
+        shadowColor: '#000',
+        shadowOpacity: 0.04,
+        shadowRadius: 10,
+        shadowOffset: { width: 0, height: 3 },
+        elevation: 2,
+    },
     cardUnread: { backgroundColor: '#FAFBFF', borderColor: '#DBEAFE' },
-    iconBox:    { width: 50, height: 50, borderRadius: 25, justifyContent: 'center', alignItems: 'center' },
-    cardContent:{ flex: 1, marginLeft: 12 },
-    cardRow:    { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
-    cardTitle:  { fontSize: 15, fontWeight: '700', color: '#1E293B', flex: 1, marginRight: 8 },
-    timeBox:    { flexDirection: 'row', alignItems: 'center' },
-    cardTime:   { fontSize: 11, color: '#94A3B8' },
-    dot:        { width: 8, height: 8, borderRadius: 4, backgroundColor: '#2563EB', marginLeft: 6 },
-    cardDesc:   { fontSize: 13, color: '#64748B', marginTop: 6, lineHeight: 19 },
+    cardAccent: { width: 4 },
+    iconBox: { width: 52, height: 52, borderRadius: 26, justifyContent: 'center', alignItems: 'center', margin: 16, marginRight: 12, flexShrink: 0 },
+    cardContent: { flex: 1, paddingVertical: 14, paddingRight: 16 },
+    cardRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 },
+    cardTitle: { fontSize: 14, fontWeight: '800', color: '#0F172A', flex: 1, marginRight: 8, lineHeight: 19 },
+    cardTime: { fontSize: 11, color: '#94A3B8', fontWeight: '500', marginTop: 1 },
+    cardMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 },
+    dot: { width: 7, height: 7, borderRadius: 4 },
+    cardDesc: { fontSize: 13, color: '#64748B', lineHeight: 19 },
+    timeBox: { flexDirection: 'row', alignItems: 'center' },
 
     // Category pills
     categoryPill:        { alignSelf: 'flex-start', paddingHorizontal: 7, paddingVertical: 2, borderRadius: 5, marginBottom: 5 },
