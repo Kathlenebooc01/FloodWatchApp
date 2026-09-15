@@ -238,7 +238,7 @@ export default function ProfileScreen() {
             mediaTypes: ImagePicker.MediaTypeOptions.Images,
             allowsEditing: true,
             aspect: [1, 1],
-            quality: 0.8,
+            quality: 0.2, // Ensures file size is in KB
         });
         if (!result.canceled) {
             const uri = result.assets[0].uri;
@@ -266,17 +266,22 @@ export default function ProfileScreen() {
     interface EmergencyContact { name: string; relation: string; number: string; }
     const [emergencyContacts, setEmergencyContacts] = useState<EmergencyContact[]>([]);
 
-    // Load saved contacts from AsyncStorage
+    // Load saved contacts from AsyncStorage when profileId is ready
     useEffect(() => {
-        AsyncStorage.getItem('emergency_contacts')
+        if (!profileId) return;
+        AsyncStorage.getItem(`emergency_contacts_${profileId}`)
             .then(raw => { if (raw) setEmergencyContacts(JSON.parse(raw)); })
             .catch(() => {});
-    }, []);
+    }, [profileId]);
 
     // ── Sign Out modal ──
     const [signOutModalVisible, setSignOutModalVisible] = useState(false);
 
     const handleSaveEmergency = async () => {
+        if (!profileId) {
+            Alert.alert('Error', 'Please wait for your profile to load.');
+            return;
+        }
         if (!ecName.trim() || !ecNumber.trim()) {
             Alert.alert('Incomplete', 'Please enter a name and contact number.');
             return;
@@ -302,7 +307,7 @@ export default function ProfileScreen() {
                 updated = [...emergencyContacts, newContact];
             }
 
-            await AsyncStorage.setItem('emergency_contacts', JSON.stringify(updated));
+            await AsyncStorage.setItem(`emergency_contacts_${profileId}`, JSON.stringify(updated));
             setEmergencyContacts(updated);
             setEcModalVisible(false);
             setEcName(''); setEcRelation(''); setEcNumber('');

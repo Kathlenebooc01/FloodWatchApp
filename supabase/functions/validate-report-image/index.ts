@@ -1,4 +1,4 @@
-
+// @ts-nocheck
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const corsHeaders = {
@@ -20,7 +20,21 @@ Deno.serve(async (req) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
     );
 
-    const geminiApiKey = Deno.env.get('GEMINI_API_KEY');
+    let geminiApiKey = Deno.env.get('GEMINI_API_KEY');
+    if (!geminiApiKey) {
+      const AI_API_ID = '4ac8efb6-5922-4be0-a1a7-8eff5887845f';
+      try {
+        const { data: apiRow } = await supabase
+          .from('api_monitoring')
+          .select('*')
+          .eq('api_id', AI_API_ID)
+          .maybeSingle();
+        geminiApiKey = apiRow?.api_key || apiRow?.key || apiRow?.secret;
+      } catch (keyErr: any) {
+        console.warn('⚠️ Could not fetch key from api_monitoring:', keyErr.message);
+      }
+    }
+    
     if (!geminiApiKey) {
       throw new Error('GEMINI_API_KEY not set');
     }
@@ -48,7 +62,7 @@ Deno.serve(async (req) => {
 
     // Try main model first, fallback to backup
     let geminiResponse = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${geminiApiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -92,9 +106,9 @@ If the image is NOT a hazard (e.g. selfie, food, random objects, clear weather, 
 
     // Fallback to backup model if main fails
     if (!geminiResponse.ok) {
-      console.warn('⚠️ Main model failed, trying backup model...');
+      console.warn('⚠️ Main model failed, trying backup model gemini-1.5-flash...');
       geminiResponse = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${geminiApiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -139,6 +153,7 @@ If the image is NOT a hazard (e.g. selfie, food, random objects, clear weather, 
 
     if (!geminiResponse.ok) {
       const errText = await geminiResponse.text();
+      console.error('❌ Both models failed. Gemini API error:', errText);
       throw new Error(`Gemini API error: ${errText}`);
     }
 

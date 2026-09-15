@@ -61,7 +61,7 @@ export default function ModerateReportScreen() {
         const result = await ImagePicker.launchImageLibraryAsync({
             mediaTypes: ImagePicker.MediaTypeOptions.Images,
             allowsMultipleSelection: true,
-            quality: 0.7,
+            quality: 0.2, // Ensures file size is in KB
         });
         if (!result.canceled) {
             const newUris = result.assets.map(a => a.uri);

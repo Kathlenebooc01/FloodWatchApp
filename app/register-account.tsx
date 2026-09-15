@@ -1,9 +1,10 @@
 import { supabase } from '@/utils/supabase';
 import { useRouter } from 'expo-router';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
+    Animated,
     Image,
     KeyboardAvoidingView,
     Modal,
@@ -17,6 +18,41 @@ import {
     View
 } from 'react-native';
 
+// Animated pressable link — scales down on press, springs back on release
+function AnimatedLink({ children, onPress, style }: { children: React.ReactNode; onPress: () => void; style?: any }) {
+    const scale = useRef(new Animated.Value(1)).current;
+
+    const handlePressIn = () => {
+        Animated.spring(scale, {
+            toValue: 0.88,
+            useNativeDriver: true,
+            speed: 50,
+            bounciness: 0,
+        }).start();
+    };
+
+    const handlePressOut = () => {
+        Animated.spring(scale, {
+            toValue: 1,
+            useNativeDriver: true,
+            speed: 20,
+            bounciness: 8,
+        }).start();
+    };
+
+    return (
+        <Animated.Text
+            style={[style, { transform: [{ scale }] }]}
+            onPress={onPress}
+            onPressIn={handlePressIn}
+            onPressOut={handlePressOut}
+            suppressHighlighting
+        >
+            {children}
+        </Animated.Text>
+    );
+}
+
 export default function RegisterAccount() {
     const router    = useRouter();
     const scrollRef = useRef<ScrollView>(null);
@@ -27,6 +63,48 @@ export default function RegisterAccount() {
     const [agreed, setAgreed]             = useState(false);
     const [loading, setLoading]           = useState(false);
     const [policyModal, setPolicyModal]   = useState<'sms' | 'privacy' | null>(null);
+    const [sheetVisible, setSheetVisible] = useState(false);
+
+    // Smooth bottom-sheet animation values
+    const slideAnim   = useRef(new Animated.Value(600)).current;  // starts off-screen
+    const backdropAnim = useRef(new Animated.Value(0)).current;
+
+    const openSheet = (type: 'sms' | 'privacy') => {
+        setPolicyModal(type);
+        setSheetVisible(true);
+        Animated.parallel([
+            Animated.timing(slideAnim, {
+                toValue: 0,
+                duration: 380,
+                easing: (t) => 1 - Math.pow(1 - t, 3), // easeOutCubic
+                useNativeDriver: true,
+            }),
+            Animated.timing(backdropAnim, {
+                toValue: 1,
+                duration: 300,
+                useNativeDriver: true,
+            }),
+        ]).start();
+    };
+
+    const closeSheet = () => {
+        Animated.parallel([
+            Animated.timing(slideAnim, {
+                toValue: 600,
+                duration: 280,
+                easing: (t) => t * t, // easeInQuad
+                useNativeDriver: true,
+            }),
+            Animated.timing(backdropAnim, {
+                toValue: 0,
+                duration: 250,
+                useNativeDriver: true,
+            }),
+        ]).start(() => {
+            setSheetVisible(false);
+            setPolicyModal(null);
+        });
+    };
 
     // Touched states — show error only after user has interacted with that field
     const [touchedFirst, setTouchedFirst]   = useState(false);
@@ -240,8 +318,8 @@ export default function RegisterAccount() {
                         </TouchableOpacity>
                         <Text style={styles.agreementText}>
                             I agree to receive SMS alerts and acknowledge the{' '}
-                            <Text style={styles.link} onPress={() => setPolicyModal('sms')}>SMS Policy</Text> and{' '}
-                            <Text style={styles.link} onPress={() => setPolicyModal('privacy')}>Privacy Terms</Text>.
+                            <AnimatedLink onPress={() => openSheet('sms')} style={styles.link}>SMS Policy</AnimatedLink> and{' '}
+                            <AnimatedLink onPress={() => openSheet('privacy')} style={styles.link}>Privacy Terms</AnimatedLink>.
                         </Text>
                     </View>
 
@@ -268,100 +346,107 @@ export default function RegisterAccount() {
                 </ScrollView>
             </KeyboardAvoidingView>
 
-            {/* ── SMS Policy / Privacy Terms Modal ── */}
-            <Modal visible={!!policyModal} transparent animationType="slide" onRequestClose={() => setPolicyModal(null)}>
-                <View style={styles.policyOverlay}>
-                    <View style={styles.policySheet}>
-                        {/* Header */}
-                        <View style={styles.policyHeader}>
-                            <Text style={styles.policyTitle}>
-                                {policyModal === 'sms' ? 'SMS Policy' : 'Privacy Terms'}
-                            </Text>
-                            <TouchableOpacity onPress={() => setPolicyModal(null)} style={styles.policyClose}>
-                                <Text style={styles.policyCloseText}>✕</Text>
-                            </TouchableOpacity>
-                        </View>
+            {/* ── SMS Policy / Privacy Terms Smooth Bottom Sheet ── */}
+            <Modal visible={sheetVisible} transparent animationType="none" onRequestClose={closeSheet}>
+                {/* Animated backdrop */}
+                <Animated.View style={[styles.policyOverlay, { opacity: backdropAnim }]}>
+                    <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={closeSheet} />
+                </Animated.View>
 
-                        <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 16 }}>
-                            {policyModal === 'sms' ? (
-                                <View>
-                                    <Text style={styles.policySection}>1. Purpose of SMS Alerts</Text>
-                                    <Text style={styles.policyBody}>
-                                        FloodWatch Cebu, operated by the Provincial Disaster Risk Reduction and Management Office (PDRRMO) of Cebu, uses SMS messaging to send real-time flood alerts, emergency notifications, OTP verification codes, and updates related to your submitted incident reports.
-                                    </Text>
+                {/* Animated sheet */}
+                <Animated.View style={[styles.policySheet, { transform: [{ translateY: slideAnim }] }]}>
+                    {/* Handle bar */}
+                    <View style={styles.handleBar} />
 
-                                    <Text style={styles.policySection}>2. Message Frequency</Text>
-                                    <Text style={styles.policyBody}>
-                                        You may receive SMS messages at any time, particularly during active weather events, flood warnings, or when your report status is updated. Message frequency varies based on alert levels and your activity in the app.
-                                    </Text>
-
-                                    <Text style={styles.policySection}>3. Message & Data Rates</Text>
-                                    <Text style={styles.policyBody}>
-                                        Standard messaging rates from your mobile carrier may apply. FloodWatch Cebu does not charge additional fees for SMS alerts.
-                                    </Text>
-
-                                    <Text style={styles.policySection}>4. Opt-Out</Text>
-                                    <Text style={styles.policyBody}>
-                                        You may opt out of non-emergency SMS alerts by updating your notification preferences in the app settings. Emergency alerts related to life-threatening flood situations may still be sent as required by PDRRMO protocols.
-                                    </Text>
-
-                                    <Text style={styles.policySection}>5. Contact</Text>
-                                    <Text style={styles.policyBody}>
-                                        For questions regarding SMS alerts, contact the PDRRMO Cebu at pdrrmo@cebu.gov.ph or call the PDRRMO hotline.
-                                    </Text>
-                                </View>
-                            ) : (
-                                <View>
-                                    <Text style={styles.policySection}>1. Data We Collect</Text>
-                                    <Text style={styles.policyBody}>
-                                        FloodWatch Cebu collects your full name, mobile number, location data (GPS coordinates), submitted incident reports, and uploaded photos. This data is used solely for disaster monitoring and emergency response coordination by PDRRMO Cebu.
-                                    </Text>
-
-                                    <Text style={styles.policySection}>2. How We Use Your Data</Text>
-                                    <Text style={styles.policyBody}>
-                                        Your information is used to:{'\n'}
-                                        • Verify your identity via OTP{'\n'}
-                                        • Send you relevant flood alerts and updates{'\n'}
-                                        • Process and validate incident reports{'\n'}
-                                        • Coordinate emergency response with local government units (LGUs){'\n'}
-                                        • Improve the accuracy of flood monitoring systems
-                                    </Text>
-
-                                    <Text style={styles.policySection}>3. Data Sharing</Text>
-                                    <Text style={styles.policyBody}>
-                                        Your data may be shared with PDRRMO Cebu, local barangay officials, and authorized government emergency responders. We do not sell or share your personal data with third-party commercial entities.
-                                    </Text>
-
-                                    <Text style={styles.policySection}>4. Data Retention</Text>
-                                    <Text style={styles.policyBody}>
-                                        Your personal data is retained for as long as your account is active or as required by government data retention policies. You may request deletion of your account by contacting PDRRMO Cebu directly.
-                                    </Text>
-
-                                    <Text style={styles.policySection}>5. Security</Text>
-                                    <Text style={styles.policyBody}>
-                                        All data is stored securely using industry-standard encryption. Access is restricted to authorized PDRRMO personnel only.
-                                    </Text>
-
-                                    <Text style={styles.policySection}>6. Your Rights</Text>
-                                    <Text style={styles.policyBody}>
-                                        Under the Data Privacy Act of 2012 (Republic Act 10173), you have the right to access, correct, and request deletion of your personal data. Contact PDRRMO Cebu at pdrrmo@cebu.gov.ph to exercise these rights.
-                                    </Text>
-
-                                    <Text style={styles.policySection}>7. Contact</Text>
-                                    <Text style={styles.policyBody}>
-                                        Provincial Disaster Risk Reduction and Management Office (PDRRMO){'\n'}
-                                        Province of Cebu, Philippines{'\n'}
-                                        Email: pdrrmo@cebu.gov.ph
-                                    </Text>
-                                </View>
-                            )}
-                        </ScrollView>
-
-                        <TouchableOpacity style={styles.policyAgreeBtn} onPress={() => setPolicyModal(null)}>
-                            <Text style={styles.policyAgreeBtnText}>I Understand</Text>
+                    {/* Header */}
+                    <View style={styles.policyHeader}>
+                        <Text style={styles.policyTitle}>
+                            {policyModal === 'sms' ? 'SMS Policy' : 'Privacy Terms'}
+                        </Text>
+                        <TouchableOpacity onPress={closeSheet} style={styles.policyClose}>
+                            <Text style={styles.policyCloseText}>✕</Text>
                         </TouchableOpacity>
                     </View>
-                </View>
+
+                    <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 16 }}>
+                        {policyModal === 'sms' ? (
+                            <View>
+                                <Text style={styles.policySection}>1. Purpose of SMS Alerts</Text>
+                                <Text style={styles.policyBody}>
+                                    FloodWatch Cebu, operated by the Provincial Disaster Risk Reduction and Management Office (PDRRMO) of Cebu, uses SMS messaging to send real-time flood alerts, emergency notifications, OTP verification codes, and updates related to your submitted incident reports.
+                                </Text>
+
+                                <Text style={styles.policySection}>2. Message Frequency</Text>
+                                <Text style={styles.policyBody}>
+                                    You may receive SMS messages at any time, particularly during active weather events, flood warnings, or when your report status is updated. Message frequency varies based on alert levels and your activity in the app.
+                                </Text>
+
+                                <Text style={styles.policySection}>3. Message & Data Rates</Text>
+                                <Text style={styles.policyBody}>
+                                    Standard messaging rates from your mobile carrier may apply. FloodWatch Cebu does not charge additional fees for SMS alerts.
+                                </Text>
+
+                                <Text style={styles.policySection}>4. Opt-Out</Text>
+                                <Text style={styles.policyBody}>
+                                    You may opt out of non-emergency SMS alerts by updating your notification preferences in the app settings. Emergency alerts related to life-threatening flood situations may still be sent as required by PDRRMO protocols.
+                                </Text>
+
+                                <Text style={styles.policySection}>5. Contact</Text>
+                                <Text style={styles.policyBody}>
+                                    For questions regarding SMS alerts, contact the PDRRMO Cebu at pdrrmo@cebu.gov.ph or call the PDRRMO hotline.
+                                </Text>
+                            </View>
+                        ) : (
+                            <View>
+                                <Text style={styles.policySection}>1. Data We Collect</Text>
+                                <Text style={styles.policyBody}>
+                                    FloodWatch Cebu collects your full name, mobile number, location data (GPS coordinates), submitted incident reports, and uploaded photos. This data is used solely for disaster monitoring and emergency response coordination by PDRRMO Cebu.
+                                </Text>
+
+                                <Text style={styles.policySection}>2. How We Use Your Data</Text>
+                                <Text style={styles.policyBody}>
+                                    Your information is used to:{'\n'}
+                                    • Verify your identity via OTP{'\n'}
+                                    • Send you relevant flood alerts and updates{'\n'}
+                                    • Process and validate incident reports{'\n'}
+                                    • Coordinate emergency response with local government units (LGUs){'\n'}
+                                    • Improve the accuracy of flood monitoring systems
+                                </Text>
+
+                                <Text style={styles.policySection}>3. Data Sharing</Text>
+                                <Text style={styles.policyBody}>
+                                    Your data may be shared with PDRRMO Cebu, local barangay officials, and authorized government emergency responders. We do not sell or share your personal data with third-party commercial entities.
+                                </Text>
+
+                                <Text style={styles.policySection}>4. Data Retention</Text>
+                                <Text style={styles.policyBody}>
+                                    Your personal data is retained for as long as your account is active or as required by government data retention policies. You may request deletion of your account by contacting PDRRMO Cebu directly.
+                                </Text>
+
+                                <Text style={styles.policySection}>5. Security</Text>
+                                <Text style={styles.policyBody}>
+                                    All data is stored securely using industry-standard encryption. Access is restricted to authorized PDRRMO personnel only.
+                                </Text>
+
+                                <Text style={styles.policySection}>6. Your Rights</Text>
+                                <Text style={styles.policyBody}>
+                                    Under the Data Privacy Act of 2012 (Republic Act 10173), you have the right to access, correct, and request deletion of your personal data. Contact PDRRMO Cebu at pdrrmo@cebu.gov.ph to exercise these rights.
+                                </Text>
+
+                                <Text style={styles.policySection}>7. Contact</Text>
+                                <Text style={styles.policyBody}>
+                                    Provincial Disaster Risk Reduction and Management Office (PDRRMO){'\n'}
+                                    Province of Cebu, Philippines{'\n'}
+                                    Email: pdrrmo@cebu.gov.ph
+                                </Text>
+                            </View>
+                        )}
+                    </ScrollView>
+
+                    <TouchableOpacity style={styles.policyAgreeBtn} onPress={closeSheet}>
+                        <Text style={styles.policyAgreeBtnText}>I Understand</Text>
+                    </TouchableOpacity>
+                </Animated.View>
             </Modal>
         </SafeAreaView>
     );
@@ -434,8 +519,21 @@ const styles = StyleSheet.create({
     signInLink:      { fontSize: 14, color: '#2563EB', fontWeight: '700' },
 
     // Policy modal
-    policyOverlay:     { flex: 1, backgroundColor: 'rgba(15,23,42,0.6)', justifyContent: 'flex-end' },
-    policySheet:       { backgroundColor: '#FFFFFF', borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 24, paddingBottom: 36, height: '80%' },
+    policyOverlay: {
+        position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+        backgroundColor: 'rgba(15,23,42,0.6)',
+    },
+    policySheet: {
+        position: 'absolute', left: 0, right: 0, bottom: 0,
+        backgroundColor: '#FFFFFF',
+        borderTopLeftRadius: 28, borderTopRightRadius: 28,
+        padding: 24, paddingBottom: 36, height: '80%',
+    },
+    handleBar: {
+        width: 40, height: 4, borderRadius: 2,
+        backgroundColor: '#CBD5E0',
+        alignSelf: 'center', marginBottom: 16,
+    },
     policyHeader:      { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
     policyTitle:       { fontSize: 18, fontWeight: '800', color: '#1E293B' },
     policyClose:       { width: 32, height: 32, borderRadius: 16, backgroundColor: '#F1F5F9', justifyContent: 'center', alignItems: 'center' },

@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const corsHeaders = {
@@ -5,30 +6,160 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+function decodeBase64ToUint8Array(base64: string): Uint8Array {
+  const clean = base64.replace(/^data:image\/[a-zA-Z0-9.+]+;base64,/, '').trim();
+  const binaryString = atob(clean);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }
 
   try {
-    const { imageBase64, idType, verificationId } = await req.json();
-
-    if (!imageBase64) {
-      return new Response(JSON.stringify({ error: 'No image provided' }), {
-        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
-    }
-
-    const geminiApiKey = Deno.env.get('GEMINI_API_KEY');
-    if (!geminiApiKey) throw new Error('GEMINI_API_KEY not set');
+    const { imageBase64, backBase64, imageUrl, idType, verificationId, userId } = await req.json();
 
     const supabase = createClient(
       Deno.env.get('SUPABASE_URL')!,
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
     );
 
-    // Try main model, fallback to lite
-    const models = ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+    // 1. Ensure front image is in Supabase Storage and we have a valid public URL
+    let finalImageUrl = imageUrl || null;
+    let base64Data = imageBase64 || '';
+
+    // If imageUrl was passed without base64, fetch it server-side to get base64 for Gemini
+    if (imageUrl && !base64Data) {
+      try {
+        console.log('📥 Fetching image from URL:', imageUrl);
+        const imgResp = await fetch(imageUrl);
+        if (imgResp.ok) {
+          const arrayBuf = await imgResp.arrayBuffer();
+          const uint8 = new Uint8Array(arrayBuf);
+          let binary = '';
+          const chunkSize = 8192;
+          for (let i = 0; i < uint8.length; i += chunkSize) {
+            binary += String.fromCharCode(...uint8.slice(i, i + chunkSize));
+          }
+          base64Data = btoa(binary);
+          console.log(`✅ Fetched image from URL, length: ${base64Data.length}`);
+        }
+      } catch (fErr: any) {
+        console.warn('⚠️ Failed to fetch imageUrl:', fErr.message);
+      }
+    }
+
+    // If base64Data is available, ensure it is stored in Supabase storage so admin can view it
+    if (base64Data) {
+      try {
+        const frontBytes = decodeBase64ToUint8Array(base64Data);
+        const fileName = `id_front_${verificationId || Date.now()}_${Date.now()}.jpg`;
+        const { error: upErr } = await supabase
+          .storage
+          .from('incident-reports')
+          .upload(fileName, frontBytes, {
+            contentType: 'image/jpeg',
+            upsert: true,
+          });
+
+        if (!upErr) {
+          const { data: pubData } = supabase
+            .storage
+            .from('incident-reports')
+            .getPublicUrl(fileName);
+          finalImageUrl = pubData.publicUrl;
+          console.log('✅ Front image stored successfully:', finalImageUrl);
+        } else {
+          console.warn('⚠️ Supabase storage front upload error:', upErr.message);
+        }
+      } catch (upEx: any) {
+        console.warn('⚠️ Server storage front upload exception:', upEx.message);
+      }
+    }
+
+    // 2. Upload back image if provided
+    let finalBackUrl: string | null = null;
+    if (backBase64) {
+      try {
+        const backBytes = decodeBase64ToUint8Array(backBase64);
+        const backFileName = `id_back_${verificationId || Date.now()}_${Date.now()}.jpg`;
+        const { error: backUpErr } = await supabase
+          .storage
+          .from('incident-reports')
+          .upload(backFileName, backBytes, {
+            contentType: 'image/jpeg',
+            upsert: true,
+          });
+
+        if (!backUpErr) {
+          const { data: backPubData } = supabase
+            .storage
+            .from('incident-reports')
+            .getPublicUrl(backFileName);
+          finalBackUrl = backPubData.publicUrl;
+          console.log('✅ Back image stored successfully:', finalBackUrl);
+        } else {
+          console.warn('⚠️ Supabase storage back upload error:', backUpErr.message);
+        }
+      } catch (backEx: any) {
+        console.warn('⚠️ Server storage back upload exception:', backEx.message);
+      }
+    }
+
+    // 3. Immediately persist image URLs to database so admin sees the photo right away
+    if (verificationId && (finalImageUrl || finalBackUrl)) {
+      const urlUpdate: any = {};
+      if (finalImageUrl) urlUpdate.id_image_url = finalImageUrl;
+      if (finalBackUrl)  urlUpdate.selfie_url   = finalBackUrl;
+      const { error: urlErr } = await supabase
+        .from('id_verification')
+        .update(urlUpdate)
+        .eq('id_verification_id', verificationId);
+
+      if (urlErr) {
+        console.warn('⚠️ Failed to update image URLs in id_verification:', urlErr.message);
+      } else {
+        console.log('✅ Updated id_verification with image URLs:', urlUpdate);
+      }
+    }
+
+    if (!base64Data) {
+      return new Response(JSON.stringify({
+        error: 'No image provided or image could not be fetched',
+        finalImageUrl,
+      }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    const AI_API_ID = '4ac8efb6-5922-4be0-a1a7-8eff5887845f';
+
+    let geminiApiKey = Deno.env.get('GEMINI_API_KEY');
+    if (!geminiApiKey) {
+      try {
+        const { data: apiRow } = await supabase
+          .from('api_monitoring')
+          .select('*')
+          .eq('api_id', AI_API_ID)
+          .maybeSingle();
+        geminiApiKey = apiRow?.api_key || apiRow?.key || apiRow?.secret;
+      } catch (keyErr: any) {
+        console.warn('⚠️ Could not fetch key from api_monitoring:', keyErr.message);
+      }
+    }
+    if (!geminiApiKey) throw new Error('GEMINI_API_KEY not set');
+
+    const cleanBase64 = base64Data.replace(/^data:image\/[a-zA-Z0-9.+]+;base64,/, '').trim();
+
+    // 4. Send to Gemini AI for identification and confidence analysis
+    const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.5-flash-lite'];
     let result: any = null;
 
     for (const model of models) {
@@ -44,7 +175,7 @@ Deno.serve(async (req) => {
                   {
                     inlineData: {
                       mimeType: 'image/jpeg',
-                      data: imageBase64,
+                      data: cleanBase64,
                     },
                   },
                   {
@@ -82,7 +213,7 @@ Examples of what to REJECT:
 - Clearly fake or edited IDs
 
 Examples of what to APPROVE:
-- Clear photo of PhilSys ID, Driver's License, Passport, UMID, Voter's ID, PRC ID, etc.
+- Clear photo of PhilSys ID, Driver's License, Passport, UMID, Voter's ID, PRC ID, PhilSys Step 1 Slip, Barangay ID, etc.
 - ID text is readable, photo on ID is visible
 - All 4 corners of the ID are visible`,
                   },
@@ -94,7 +225,8 @@ Examples of what to APPROVE:
         );
 
         if (!resp.ok) {
-          console.warn(`⚠️ ${model} failed:`, resp.status);
+          const errText = await resp.text();
+          console.warn(`⚠️ ${model} failed with status ${resp.status}:`, errText);
           continue;
         }
 
@@ -106,18 +238,17 @@ Examples of what to APPROVE:
         if (jsonMatch) {
           const parsed = JSON.parse(jsonMatch[0]);
 
-          // Normalize confidence to 0-100 integer
           let confidence = parsed.confidence_score ?? parsed.ai_confidence_score ?? 0;
-          if (confidence <= 1.0 && confidence > 0) confidence = Math.round(confidence * 100); // convert 0.0-1.0 to 0-100
-          confidence = Math.round(confidence);
+          
+          // Ensure confidence is between 0 and 100
+          confidence = Math.max(0, Math.min(100, Math.round(confidence)));
 
-          // Enforce 90% threshold — auto reject if below
           const meetsThreshold = confidence >= 90;
           const finalStatus = meetsThreshold && parsed.ai_is_valid ? 'approved' : 'rejected';
 
           result = {
             ai_is_valid:         meetsThreshold && parsed.ai_is_valid,
-            ai_confidence_score: confidence / 100, // store as 0.0-1.0 in DB
+            ai_confidence_score: confidence, // store as integer 0-100
             ai_insight:          parsed.ai_insight || 'No insight provided.',
             status:              finalStatus,
           };
@@ -131,7 +262,6 @@ Examples of what to APPROVE:
       }
     }
 
-    // Default if AI fails
     if (!result) {
       result = {
         ai_is_valid: false,
@@ -141,62 +271,81 @@ Examples of what to APPROVE:
       };
     }
 
-    // Update id_verification record if verificationId provided
+    // 5. Update id_verification with AI analysis
     if (verificationId) {
+      const updateData: any = {
+        ai_is_valid:         result.ai_is_valid,
+        ai_confidence_score: result.ai_confidence_score,
+        ai_insight:          result.ai_insight,
+        status:              result.status,
+      };
+      if (finalImageUrl) updateData.id_image_url = finalImageUrl;
+      if (finalBackUrl)  updateData.selfie_url   = finalBackUrl;
+
       const { error: updateError } = await supabase
         .from('id_verification')
-        .update({
-          ai_is_valid:        result.ai_is_valid,
-          ai_confidence_score: result.ai_confidence_score,
-          ai_insight:         result.ai_insight,
-          status:             result.status,
-        })
+        .update(updateData)
         .eq('id_verification_id', verificationId);
 
       if (updateError) {
-        console.error('❌ Update failed:', updateError.message);
+        console.error('❌ id_verification update failed:', updateError.message);
       } else {
         console.log('✅ id_verification updated:', result.status);
 
-        // If approved, also update profiles.is_verified = true
-        if (result.status === 'approved' || result.status === 'rejected') {
+        // Fetch user_id if not supplied
+        let targetUserId = userId;
+        if (!targetUserId) {
           const { data: verRow } = await supabase
             .from('id_verification')
             .select('user_id')
             .eq('id_verification_id', verificationId)
             .maybeSingle();
+          targetUserId = verRow?.user_id;
+        }
 
-          if (verRow?.user_id) {
-            // Update profile if approved
-            if (result.status === 'approved') {
-              await supabase
-                .from('profiles')
-                .update({ is_verified: true })
-                .eq('id', verRow.user_id);
-              console.log('✅ profiles.is_verified set to true for user:', verRow.user_id);
-            }
-
-            // Send notification to user
-            const title   = result.status === 'approved'
-              ? '✅ ID Verification Complete'
-              : '❌ ID Verification Failed';
-            const message = result.status === 'approved'
-              ? 'Your identity has been successfully verified. You can now submit flood incident reports.'
-              : 'Your ID could not be verified. Please make sure your ID is clear, all corners are visible, and try again.';
-
-            await supabase.from('notifications').insert({
-              user_id:     verRow.user_id,
-              title,
-              message,
-              type:        'Updates',
-              is_read:     false,
-              target_role: 'user',
-              created_at:  new Date().toISOString(),
-            });
-            console.log('✅ Notification sent for ID verification:', result.status);
+        if (targetUserId) {
+          if (result.status === 'approved') {
+            await supabase
+              .from('profiles')
+              .update({ is_verified: true })
+              .eq('id', targetUserId);
+            console.log('✅ profiles.is_verified set to true for user:', targetUserId);
           }
+
+          const title   = result.status === 'approved'
+            ? '✅ ID Verification Complete'
+            : '❌ ID Verification Failed';
+          const message = result.status === 'approved'
+            ? 'Your identity has been successfully verified. You can now submit flood incident reports.'
+            : 'Your ID could not be verified. Please make sure your ID is clear, all corners are visible, and try again.';
+
+          await supabase.from('notifications').insert({
+            user_id:     targetUserId,
+            title,
+            message,
+            type:        'Updates',
+            is_read:     false,
+            target_role: 'user',
+            created_at:  new Date().toISOString(),
+          });
+          console.log('✅ Notification sent for ID verification status:', result.status);
         }
       }
+    }
+
+    // Update api_monitoring table for AI API tracking
+    try {
+      await supabase
+        .from('api_monitoring')
+        .update({
+          api_status: result?.ai_confidence_score !== undefined ? 'active' : 'error',
+          last_call_at: new Date().toISOString(),
+          error_message: result?.ai_confidence_score !== undefined ? null : 'Failed to parse AI response',
+        })
+        .eq('api_id', AI_API_ID);
+      console.log('✅ api_monitoring updated for AI ID:', AI_API_ID);
+    } catch (monErr: any) {
+      console.warn('⚠️ api_monitoring update error:', monErr.message);
     }
 
     return new Response(JSON.stringify({
@@ -205,12 +354,29 @@ Examples of what to APPROVE:
       ai_confidence_score: result.ai_confidence_score,
       ai_insight:          result.ai_insight,
       status:              result.status,
+      imageUrl:            finalImageUrl,
     }), {
       status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
 
   } catch (err: any) {
     console.error('❌ validate-id-image error:', err.message);
+
+    try {
+      const supabase = createClient(
+        Deno.env.get('SUPABASE_URL')!,
+        Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+      );
+      await supabase
+        .from('api_monitoring')
+        .update({
+          api_status: 'error',
+          last_call_at: new Date().toISOString(),
+          error_message: err.message,
+        })
+        .eq('api_id', '4ac8efb6-5922-4be0-a1a7-8eff5887845f');
+    } catch (_) {}
+
     return new Response(JSON.stringify({
       success:     false,
       error:       err.message,

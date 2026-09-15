@@ -29,6 +29,8 @@ export default function QuickSnapScreen() {
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [successModalVisible, setSuccessModalVisible] = useState(false);
 
+    const [invalidModalVisible, setInvalidModalVisible] = useState(false);
+
     useEffect(() => {
         (async () => {
             try {
@@ -45,6 +47,7 @@ export default function QuickSnapScreen() {
         if (cameraRef.current) {
             const photo = await cameraRef.current.takePictureAsync({
                 mirror: facing === 'front',
+                quality: 0.2, // Ensures file size is in KB
             });
             if (photo) {
                 setCapturedImage(photo.uri);
@@ -66,18 +69,67 @@ export default function QuickSnapScreen() {
             // 1. Get current user
             const { data: sessionData } = await supabase.auth.getSession();
             const userId = sessionData?.session?.user?.id;
+            const token = sessionData?.session?.access_token || '';
             if (!userId) {
                 Alert.alert('Not logged in', 'Please log in to submit a report.');
                 setIsSubmitting(false);
                 return;
             }
 
-            // 2. Upload image
+            // 2. Pre-validate image with AI BEFORE uploading or saving
+            let aiHazardType = 'Flood';
+            
+            try {
+                const imgResp = await fetch(capturedImage);
+                const arrBuf = await imgResp.arrayBuffer();
+                const uint8 = new Uint8Array(arrBuf);
+                let binary = '';
+                uint8.forEach(b => binary += String.fromCharCode(b));
+                const base64 = btoa(binary);
+
+                const aiResp = await fetch(
+                    'https://xncciaozzxoqbesfxpww.supabase.co/functions/v1/validate-report-image',
+                    {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`,
+                        },
+                        body: JSON.stringify({ imageBase64: base64 }), // No reportId yet
+                    }
+                );
+                
+                if (aiResp.ok) {
+                    const aiResult = await aiResp.json();
+                    
+                    // IF AI EXPLICITLY SAYS IT IS INVALID OR IF IT CRASHED
+                    if (!aiResult.success || aiResult.is_valid === false) {
+                        setIsSubmitting(false);
+                        setInvalidModalVisible(true);
+                        return; // 🛑 STRICT STOP: Do not save to DB!
+                    }
+
+                    // If it is valid, proceed
+                    if (aiResult.hazard_type) {
+                        aiHazardType = aiResult.hazard_type;
+                    }
+                } else {
+                    // Server returned 500 or error
+                    setIsSubmitting(false);
+                    Alert.alert('AI Error', 'Could not reach AI server. Please try again.');
+                    return; // 🛑 STRICT STOP
+                }
+            } catch (e: any) {
+                setIsSubmitting(false);
+                Alert.alert('AI Error', 'Failed to validate photo with AI. Please check your internet and try again.');
+                return; // 🛑 STRICT STOP
+            }
+
+            // 3. Upload image
             let imageUrl: string | null = null;
             try {
                 const fileName = `quicksnap_${userId}_${Date.now()}.jpg`;
                 const SUPABASE_URL = 'https://xncciaozzxoqbesfxpww.supabase.co';
-                const token = sessionData?.session?.access_token || '';
                 const imgResp = await fetch(capturedImage);
                 const blob = await imgResp.blob();
                 const uploadResp = await fetch(
@@ -99,7 +151,7 @@ export default function QuickSnapScreen() {
                 console.warn('⚠️ Upload failed:', e);
             }
 
-            // 3. Get municipality
+            // 4. Get municipality
             let municipalityId: string | null = null;
             try {
                 const cityName = locationData?.city || 'LAPU-LAPU CITY';
@@ -122,14 +174,12 @@ export default function QuickSnapScreen() {
                 console.warn('⚠️ Municipality lookup failed:', e);
             }
 
-            // municipalityId may be null if table is empty — column is nullable, report still saves
-
-            // 4. Save report to DB with status Pending_AI
+            // 5. Save report to DB with status Pending_AI (already AI validated)
             const { data: reportData, error: reportError } = await supabase
                 .from('incident_report')
                 .insert({
                     user_id: userId,
-                    hazard_type: 'Flood',
+                    hazard_type: aiHazardType !== 'None' ? aiHazardType : 'Flood',
                     description: `URGENT HELP! Quick snap report from ${locationData?.full || locationName}`,
                     image_url: imageUrl,
                     status: 'Pending_AI',
@@ -152,45 +202,9 @@ export default function QuickSnapScreen() {
             const reportId = reportData.report_id;
             console.log('✅ Report saved:', reportId);
 
-            // Reset submitting state and show modal IMMEDIATELY
+            // Reset submitting state and show modal AFTER everything completes
             setIsSubmitting(false);
             setSuccessModalVisible(true);
-
-            // Store reportId and capturedImage for later AI validation
-            // AI will validate AFTER user closes modal
-            setTimeout(() => {
-                if (!capturedImage) return;
-                
-                console.log('🤖 Starting AI validation in background...');
-                
-                fetch(capturedImage)
-                    .then(imgResp => imgResp.arrayBuffer())
-                    .then(arrBuf => {
-                        const uint8 = new Uint8Array(arrBuf);
-                        let binary = '';
-                        uint8.forEach(b => binary += String.fromCharCode(b));
-                        const base64 = btoa(binary);
-
-                        return fetch(
-                            'https://xncciaozzxoqbesfxpww.supabase.co/functions/v1/validate-report-image',
-                            {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                    'Authorization': `Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhuY2NpYW96enhvcWJlc2Z4cHd3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIzNDgyMzQsImV4cCI6MjA4NzkyNDIzNH0.im6QTwjVyryj4y0fvcloH4qw-Rj5PPftDYhk4sKtymI`,
-                                },
-                                body: JSON.stringify({ imageBase64: base64, reportId: reportId }),
-                            }
-                        );
-                    })
-                    .then(aiResp => aiResp.json())
-                    .then(aiResult => {
-                        console.log('✅ AI validation done:', aiResult);
-                    })
-                    .catch(e => {
-                        console.warn('⚠️ AI validation failed:', e.message);
-                    });
-            }, 2000); // Wait 2 seconds before starting AI - gives user time to close modal
 
         } catch (err: any) {
             console.error('❌ Error:', err);
@@ -292,16 +306,23 @@ export default function QuickSnapScreen() {
 
             {/* Retake / Confirm buttons */}
             <View style={styles.reviewControls}>
-                <TouchableOpacity style={styles.retakeBtn} onPress={handleRetake}>
+                <TouchableOpacity style={styles.retakeBtn} onPress={handleRetake} disabled={isSubmitting}>
                     <Ionicons name="close" size={40} color="white" />
                 </TouchableOpacity>
-                <TouchableOpacity style={styles.confirmBtn} onPress={handleConfirm}>
+                <TouchableOpacity style={styles.confirmBtn} onPress={handleConfirm} disabled={isSubmitting}>
                     {isSubmitting
                         ? <ActivityIndicator color="white" size="large" />
                         : <Ionicons name="checkmark" size={40} color="white" />
                     }
                 </TouchableOpacity>
             </View>
+
+            {isSubmitting && (
+                <View style={styles.loadingOverlay}>
+                    <ActivityIndicator size="large" color="#2563EB" />
+                    <Text style={styles.loadingText}>Processing report...</Text>
+                </View>
+            )}
 
             {/* Success Modal */}
             <Modal 
@@ -313,9 +334,7 @@ export default function QuickSnapScreen() {
                 <TouchableOpacity 
                     activeOpacity={1} 
                     style={styles.modalOverlay}
-                    onPress={() => {
-                        // Tapping overlay does nothing
-                    }}
+                    onPress={() => {}}
                 >
                     <View style={styles.modalCard} onStartShouldSetResponder={() => true}>
                         <View style={styles.modalIconCircle}>
@@ -341,6 +360,40 @@ export default function QuickSnapScreen() {
                             }}
                         >
                             <Text style={styles.doneButtonText}>Done</Text>
+                        </TouchableOpacity>
+                    </View>
+                </TouchableOpacity>
+            </Modal>
+
+            {/* Invalid Photo Modal */}
+            <Modal 
+                visible={invalidModalVisible} 
+                transparent 
+                animationType="fade"
+                statusBarTranslucent
+            >
+                <TouchableOpacity 
+                    activeOpacity={1} 
+                    style={styles.modalOverlay}
+                    onPress={() => {}}
+                >
+                    <View style={styles.modalCard} onStartShouldSetResponder={() => true}>
+                        <View style={[styles.modalIconCircle, { backgroundColor: '#FEE2E2' }]}>
+                            <Ionicons name="alert-circle" size={60} color="#EF4444" />
+                        </View>
+                        <Text style={styles.modalTitle}>Invalid Photo</Text>
+                        <Text style={[styles.modalSubtitle, { marginBottom: 25 }]}>
+                            Please take another photo. It seems like there is no hazard visible in the image.
+                        </Text>
+                        <TouchableOpacity
+                            style={[styles.doneButton, { backgroundColor: '#EF4444', shadowColor: '#EF4444' }]}
+                            activeOpacity={0.8}
+                            onPress={() => {
+                                setInvalidModalVisible(false);
+                                handleRetake();
+                            }}
+                        >
+                            <Text style={styles.doneButtonText}>Retake Photo</Text>
                         </TouchableOpacity>
                     </View>
                 </TouchableOpacity>

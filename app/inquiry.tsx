@@ -87,9 +87,9 @@ export default function GeneralInquiryScreen() {
             return;
         }
         const result = await ImagePicker.launchImageLibraryAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions.All,
-            allowsEditing: true,
-            quality: 0.8,
+            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+            allowsMultipleSelection: true,
+            quality: 0.2, // Ensures file size is in KB
         });
         if (!result.canceled) setAttachment(result.assets[0].uri);
     };

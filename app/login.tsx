@@ -9,6 +9,7 @@ import {
     KeyboardAvoidingView,
     Platform,
     SafeAreaView,
+    ScrollView,
     StyleSheet,
     Text,
     TextInput,
@@ -107,8 +108,12 @@ export default function LoginScreen() {
                 behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
                 style={styles.flex}
             >
-                <View style={styles.outer}>
-
+                <ScrollView
+                    contentContainerStyle={styles.scroll}
+                    keyboardShouldPersistTaps="handled"
+                    showsVerticalScrollIndicator={false}
+                    bounces={false}
+                >
                     {/* ── Center content ── */}
                     <View style={styles.center}>
                         <Image
@@ -159,9 +164,17 @@ export default function LoginScreen() {
                                 <Text style={styles.registerLink}>Register</Text>
                             </TouchableOpacity>
                         </View>
+
+                        <TouchableOpacity
+                            style={styles.lguBtn}
+                            onPress={() => router.push('/lgu_login' as any)}
+                            activeOpacity={0.75}
+                        >
+                            <Text style={styles.lguBtnText}>Log In to LGU</Text>
+                        </TouchableOpacity>
                     </View>
 
-                    {/* ── Footer pinned to bottom ── */}
+                    {/* ── Footer at bottom of scroll ── */}
                     <View style={styles.footer}>
                         <Text style={styles.footerMain}>OFFICIAL GOVERNMENT APPLICATION</Text>
                         <View style={styles.footerLinks}>
@@ -172,20 +185,18 @@ export default function LoginScreen() {
                             <Text style={styles.footerLink}>SUPPORT</Text>
                         </View>
                     </View>
-
-                </View>
+                </ScrollView>
             </KeyboardAvoidingView>
         </SafeAreaView>
     );
 }
 
 const styles = StyleSheet.create({
-    safe:  { flex: 1, backgroundColor: '#FFFFFF' },
-    flex:  { flex: 1 },
-    outer: {
-        flex: 1,
+    safe: { flex: 1, backgroundColor: '#FFFFFF' },
+    flex: { flex: 1 },
+    scroll: {
+        flexGrow: 1,
         paddingHorizontal: 32,
-        justifyContent: 'space-between',
         paddingBottom: 24,
     },
 
@@ -194,6 +205,9 @@ const styles = StyleSheet.create({
         flex: 1,
         justifyContent: 'center',
         alignItems: 'center',
+        paddingTop: 60,
+        paddingBottom: 32,
+        minHeight: 500,
     },
 
     logo:     { width: 110, height: 110, marginBottom: 16 },
@@ -231,6 +245,9 @@ const styles = StyleSheet.create({
     registerRow:  { flexDirection: 'row', alignItems: 'center' },
     registerText: { fontSize: 14, color: '#64748B' },
     registerLink: { fontSize: 14, color: '#2563EB', fontWeight: '700' },
+
+    lguBtn: { marginTop: 12, paddingVertical: 4 },
+    lguBtnText: { fontSize: 14, color: '#2563EB', fontWeight: '700', textAlign: 'center' },
 
     footer:      { alignItems: 'center', paddingTop: 16 },
     footerMain:  { fontSize: 10, color: '#94A3B8', fontWeight: '600', letterSpacing: 1.2, marginBottom: 6 },
