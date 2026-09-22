@@ -2,10 +2,12 @@ import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
+import { supabase } from '@/utils/supabase';
 import {
     ActivityIndicator,
     Alert,
     KeyboardAvoidingView,
+    Modal,
     Platform,
     SafeAreaView,
     ScrollView,
@@ -22,19 +24,77 @@ export default function LguLoginScreen() {
     const [password, setPassword] = useState('');
     const [showPassword, setShowPassword] = useState(false);
     const [loading, setLoading] = useState(false);
+    const [errorModalVisible, setErrorModalVisible] = useState(false);
+    const [errorMessage, setErrorMessage] = useState('');
 
     const handleSignIn = async () => {
         if (!email.trim() || !password.trim()) {
-            Alert.alert('Missing Fields', 'Please enter your email and password.');
+            setErrorMessage('Please enter your email and password.');
+            setErrorModalVisible(true);
             return;
         }
         setLoading(true);
         try {
-            // TODO: connect LGU auth here
-            await new Promise(resolve => setTimeout(resolve, 1200));
-            Alert.alert('Access Denied', 'Invalid credentials. Please try again.');
+            // Sign in using Supabase auth
+            const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+                email: email.trim(),
+                password,
+            });
+
+            if (authError) throw new Error(authError.message);
+
+            if (!authData.session?.user) {
+                throw new Error('No user session found after login.');
+            }
+
+            // Verify if the user has a profile
+            const { data: profile, error: profileError } = await supabase
+                .from('profiles')
+                .select('role')
+                .eq('id', authData.session.user.id)
+                .maybeSingle();
+
+            if (profileError) {
+                console.error("Profile check error:", profileError);
+            }
+
+            // Since only LGUs use email/password (citizens use phone OTP), 
+            // anyone who successfully authenticates here is an LGU.
+            // If they don't have a profile or their role isn't lgu, let's fix it safely.
+            if (!profile) {
+                // Profile doesn't exist at all, create it with all required fields
+                const { error: insertError } = await supabase.from('profiles').insert({
+                    id: authData.session.user.id,
+                    role: 'lgu_headmaster',
+                    email: email.trim(),
+                    full_name: 'LGU Officer', // Required by database NOT NULL constraint
+                    created_at: new Date().toISOString(),
+                });
+                
+                if (insertError) {
+                    console.error("Failed to insert LGU profile:", insertError);
+                }
+            } else if (profile.role?.toLowerCase() !== 'lgu_headmaster' && profile.role?.toLowerCase() !== 'admin') {
+                // Profile exists but role is not correct, update just the role
+                const { error: updateError } = await supabase
+                    .from('profiles')
+                    .update({ role: 'lgu_headmaster' })
+                    .eq('id', authData.session.user.id);
+                    
+                if (updateError) {
+                    console.error("Failed to update LGU role:", updateError);
+                }
+            }
+
+            // Success, save session type locally just in case
+            const AsyncStorage = (await import('@react-native-async-storage/async-storage')).default;
+            await AsyncStorage.setItem('userRole', 'lgu_headmaster');
+            
+            // Proceed to dashboard
+            router.replace('/dashboard' as any);
         } catch (err: any) {
-            Alert.alert('Error', err.message || 'Sign-in failed.');
+            setErrorMessage(err.message || 'Sign-in failed.');
+            setErrorModalVisible(true);
         } finally {
             setLoading(false);
         }
@@ -167,6 +227,32 @@ export default function LguLoginScreen() {
                     </Text>
                 </ScrollView>
             </KeyboardAvoidingView>
+
+            {/* ── CUSTOM ERROR MODAL ── */}
+            <Modal
+                visible={errorModalVisible}
+                transparent
+                animationType="fade"
+                onRequestClose={() => setErrorModalVisible(false)}
+            >
+                <View style={s.modalOverlay}>
+                    <View style={s.modalContainer}>
+                        <View style={s.modalIconCircle}>
+                            <Ionicons name="close-circle-outline" size={44} color="#EF4444" />
+                        </View>
+                        <Text style={s.modalTitle}>Access Denied</Text>
+                        <Text style={s.modalMessage}>{errorMessage}</Text>
+                        
+                        <TouchableOpacity
+                            style={s.modalBtn}
+                            onPress={() => setErrorModalVisible(false)}
+                            activeOpacity={0.8}
+                        >
+                            <Text style={s.modalBtnText}>Dismiss</Text>
+                        </TouchableOpacity>
+                    </View>
+                </View>
+            </Modal>
         </SafeAreaView>
     );
 }
@@ -314,5 +400,62 @@ const s = StyleSheet.create({
         fontSize: 9, fontWeight: '600',
         color: '#94A3B8', letterSpacing: 1,
         textAlign: 'center',
+    },
+
+    // Modal
+    modalOverlay: {
+        flex: 1,
+        backgroundColor: 'rgba(15, 23, 42, 0.65)',
+        justifyContent: 'center',
+        alignItems: 'center',
+        padding: 24,
+    },
+    modalContainer: {
+        width: '100%',
+        backgroundColor: '#FFFFFF',
+        borderRadius: 24,
+        padding: 32,
+        alignItems: 'center',
+        shadowColor: '#000',
+        shadowOpacity: 0.1,
+        shadowRadius: 20,
+        shadowOffset: { width: 0, height: 10 },
+        elevation: 10,
+    },
+    modalIconCircle: {
+        width: 72,
+        height: 72,
+        borderRadius: 36,
+        backgroundColor: '#FEE2E2',
+        justifyContent: 'center',
+        alignItems: 'center',
+        marginBottom: 20,
+    },
+    modalTitle: {
+        fontSize: 22,
+        fontWeight: '800',
+        color: '#0F172A',
+        marginBottom: 12,
+        textAlign: 'center',
+    },
+    modalMessage: {
+        fontSize: 15,
+        color: '#64748B',
+        textAlign: 'center',
+        lineHeight: 22,
+        marginBottom: 32,
+    },
+    modalBtn: {
+        width: '100%',
+        height: 54,
+        backgroundColor: '#1E293B',
+        borderRadius: 16,
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    modalBtnText: {
+        color: '#FFFFFF',
+        fontSize: 16,
+        fontWeight: '700',
     },
 });

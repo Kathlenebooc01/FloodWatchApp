@@ -14,6 +14,7 @@ export default function Navbar() {
     const [verifyChecked, setVerifyChecked]   = useState(false);
     const [showNeedVerify, setShowNeedVerify] = useState(false);
     const [showOngoing, setShowOngoing]       = useState(false);
+    const [userRole, setUserRole]             = useState<string>('citizen');
 
     // Check verification status every time the screen changes
     useEffect(() => {
@@ -31,6 +32,17 @@ export default function Navbar() {
                     .order('submitted_at', { ascending: false })
                     .limit(1)
                     .maybeSingle();
+
+                // Check profile role
+                const { data: profile } = await supabase
+                    .from('profiles')
+                    .select('role')
+                    .eq('id', userId)
+                    .maybeSingle();
+
+                if (profile?.role) {
+                    setUserRole(profile.role.toLowerCase());
+                }
 
                 if (data?.status === 'approved') {
                     setIsVerified(true);
@@ -61,7 +73,9 @@ export default function Navbar() {
 
     const handleReportPress = () => {
         if (!verifyChecked) return; // wait for DB check
-        if (isVerified) {
+        if (userRole === 'lgu_headmaster' || userRole === 'admin') {
+            router.push('/lgu-report' as any);
+        } else if (isVerified) {
             router.push('/report' as any);
         } else if (verifyStatus === 'pending') {
             setShowOngoing(true);

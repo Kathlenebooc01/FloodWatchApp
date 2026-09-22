@@ -62,83 +62,34 @@ export default function Dashboard() {
     const [verifyChecked, setVerifyChecked]       = useState(false); // blocks buttons until DB check done
     const [showNeedVerify, setShowNeedVerify]     = useState(false);
     const [showOngoing, setShowOngoing]           = useState(false);
+    const [userRole, setUserRole]                 = useState<string>('citizen'); // default, will be overridden
 
-    // Function to fetch REAL weather data from Open-Meteo API (FREE, no key needed)
+    // Function to fetch weather data from your backend
     const fetchRealWeatherData = async () => {
         try {
-            // Get current location with defaults - don't wait too long
-            let latitude = 10.3157; // Lapu-Lapu default
-            let longitude = 123.8854; // Lapu-Lapu default
+            console.log('🌤️ Fetching weather from backend (weather_telemetry)...');
             
-            try {
-                const addr = await Promise.race([
-                    getCurrentFullAddress(),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error('Location timeout')), 2000))
-                ]) as any;
-                latitude = addr.latitude || latitude;
-                longitude = addr.longitude || longitude;
-                console.log('📍 Got location:', latitude, longitude);
-            } catch (locErr) {
-                console.log('⚠️ Location failed, using defaults:', latitude, longitude);
+            const { data, error } = await supabase
+                .from('weather_telemetry')
+                .select('temperature, weather_condition, rainfall_mm')
+                .order('fetched_at', { ascending: false })
+                .limit(1)
+                .single();
+            
+            if (error) {
+                throw error;
             }
             
-            console.log('🌤️ Fetching real weather from Open-Meteo API for:', latitude, longitude);
-            
-            // Use FREE Open-Meteo API with actual precipitation data
-            const response = await Promise.race([
-                fetch(`https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,weather_code,precipitation,rain,precipitation_probability&hourly=precipitation_probability&temperature_unit=celsius&timezone=auto`),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('Weather API timeout')), 10000))
-            ]) as any;
-            
-            if (!response.ok) {
-                throw new Error(`API returned ${response.status}: ${response.statusText}`);
-            }
-            
-            const data = await response.json();
-            console.log('✅ Real weather data from Open-Meteo API:', data.current);
-            
-            if (data.current) {
-                const temp = Math.round(data.current.temperature_2m * 10) / 10;
-                
-                // Use actual precipitation probability from hourly (current hour)
-                let precipProb = 0;
-                if (data.hourly?.precipitation_probability?.length > 0) {
-                    // Get current hour index
-                    const now = new Date();
-                    const hourIndex = now.getHours();
-                    precipProb = data.hourly.precipitation_probability[hourIndex] || 0;
-                }
-                
-                // Convert WMO weather code to condition string
-                const weatherCode = data.current.weather_code;
-                let condition = 'Cloudy';
-                if (weatherCode === 0) condition = 'Clear Sky';
-                else if (weatherCode === 1) condition = 'Mostly Clear';
-                else if (weatherCode === 2) condition = 'Partly Cloudy';
-                else if (weatherCode === 3) condition = 'Overcast';
-                else if (weatherCode >= 45 && weatherCode <= 48) condition = 'Foggy';
-                else if (weatherCode >= 51 && weatherCode <= 55) condition = 'Light Drizzle';
-                else if (weatherCode >= 56 && weatherCode <= 57) condition = 'Freezing Drizzle';
-                else if (weatherCode >= 61 && weatherCode <= 63) condition = 'Rain';
-                else if (weatherCode === 65) condition = 'Heavy Rain';
-                else if (weatherCode >= 71 && weatherCode <= 77) condition = 'Snow';
-                else if (weatherCode >= 80 && weatherCode <= 81) condition = 'Rain Showers';
-                else if (weatherCode === 82) condition = 'Heavy Showers';
-                else if (weatherCode >= 85 && weatherCode <= 86) condition = 'Snow Showers';
-                else if (weatherCode >= 95 && weatherCode <= 99) condition = 'Thunderstorm';
-                
+            if (data) {
                 setWeather({
-                    temperature: temp,
-                    condition: condition,
-                    precipitation: precipProb
+                    temperature: data.temperature || 0,
+                    condition: data.weather_condition || 'Cloudy',
+                    precipitation: data.rainfall_mm || 0
                 });
-                console.log('✅ Weather updated:', { temp, condition, precipProb });
-            } else {
-                console.log('❌ Invalid API response structure');
-                throw new Error('Invalid API response');
+                console.log('✅ Weather updated from backend:', data);
             }
         } catch (err: any) {
-            console.error('❌ Real weather fetch FAILED:', err?.message);
+            console.error('❌ Backend weather fetch FAILED:', err?.message);
             // Show error state
             setWeather({
                 temperature: 0,
@@ -180,30 +131,28 @@ export default function Dashboard() {
             // Get today's total precipitation forecast
             const todayPrecip = data.daily?.precipitation_sum?.[0] || 0;
 
-            // Determine risk level based on REAL current conditions
+            // Determine risk level based on REAL current conditions (primarily rainfall for flood risk)
             let riskLevel = 'Info';
             let alertLevel = 0;
             let description = '';
 
-            // Risk is based ONLY on current actual rainfall and weather code - NOT forecast
-            if (rainfall > 30 || weatherCode >= 95) {
+            // Flood risk should depend heavily on precipitation (rainfall in mm)
+            if (rainfall >= 15) {
                 riskLevel = 'High';
                 alertLevel = 3;
-                description = `Heavy rainfall detected. Rain: ${rainfall}mm, Wind: ${windSpeed.toFixed(1)} km/h. Avoid flood-prone areas and stay indoors.`;
-            } else if (rainfall > 10 || (weatherCode >= 80 && weatherCode <= 94)) {
+                description = `Heavy rainfall detected. Rain: ${rainfall.toFixed(1)}mm, Wind: ${windSpeed.toFixed(1)} km/h. High risk of flooding. Avoid flood-prone areas.`;
+            } else if (rainfall >= 5) {
                 riskLevel = 'Moderate';
                 alertLevel = 2;
-                description = `Moderate rain activity. Rain: ${rainfall}mm, Wind: ${windSpeed.toFixed(1)} km/h. Stay alert and monitor updates.`;
-            } else if (rainfall > 2 || (weatherCode >= 61 && weatherCode <= 79)) {
-                // Only Low if it is meaningfully raining - more than light drizzle
+                description = `Moderate rainfall. Rain: ${rainfall.toFixed(1)}mm, Wind: ${windSpeed.toFixed(1)} km/h. Moderate flood risk. Stay alert and monitor updates.`;
+            } else if (rainfall >= 0.5) {
                 riskLevel = 'Low';
                 alertLevel = 1;
-                description = `Light rain in your area. Rain: ${rainfall}mm, Wind: ${windSpeed.toFixed(1)} km/h. Conditions are manageable.`;
+                description = `Light rain in your area. Rain: ${rainfall.toFixed(1)}mm, Wind: ${windSpeed.toFixed(1)} km/h. Low flood risk.`;
             } else {
-                // No rain at all = Info, no alert
                 riskLevel = 'Info';
                 alertLevel = 0;
-                description = `No flood risk. ${weatherCode === 0 ? 'Clear sky' : weatherCode <= 2 ? 'Mostly clear' : 'Partly cloudy'} conditions. Wind: ${windSpeed.toFixed(1)} km/h. All clear in your area.`;
+                description = `No immediate flood risk. ${weatherCode === 0 ? 'Clear sky' : weatherCode <= 3 ? 'Cloudy/Clear' : 'Minimal to no rain'}. Wind: ${windSpeed.toFixed(1)} km/h.`;
             }
 
             setRiskStatus({
@@ -294,11 +243,12 @@ export default function Dashboard() {
                 // Check if profile already exists
                 const { data: existing } = await supabase
                     .from('profiles')
-                    .select('id')
+                    .select('id, role')
                     .eq('id', user.id)
                     .maybeSingle();
 
                 if (existing) {
+                    if (existing.role) setUserRole(existing.role.toLowerCase());
                     console.log('✅ Profile already exists, skipping save');
                     return;
                 }
@@ -383,8 +333,6 @@ export default function Dashboard() {
                 const local = await AsyncStorage.getItem('identity_verified');
                 if (local === 'true') { setIsVerified(true); setVerifyStatus('approved'); }
                 else if (local === 'pending') { setVerifyStatus('pending'); }
-            } finally {
-                setVerifyChecked(true); // unlock buttons NOW after check is done
             }
 
             await Promise.all([
@@ -394,6 +342,10 @@ export default function Dashboard() {
                 fetchRealWeatherData(),
                 fetchRiskStatus(),
             ]);
+            
+            // Only unlock the report buttons AFTER the profile (userRole) has been fetched.
+            // This prevents LGU users from being accidentally treated as citizens if they click too fast.
+            setVerifyChecked(true); 
             setWeatherLoading(false);
         };
 
@@ -486,16 +438,17 @@ export default function Dashboard() {
                     <MaterialCommunityIcons name={getWeatherIcon().name as any} size={48} color="#2563EB" />
                     <View style={{ alignItems: 'flex-end' }}>
                         <Text style={styles.precipLabel}>PRECIPITATION</Text>
-                        <Text style={styles.precipValue}>{weather.precipitation}%</Text>
+                        <Text style={styles.precipValue}>{weather.precipitation}mm</Text>
                     </View>
                 </View>
 
-                {/* Check Report Status */}
                 <TouchableOpacity
                     style={styles.statusRow}
                     onPress={() => {
                         if (!verifyChecked) return; // wait for DB check
-                        if (isVerified) {
+                        if (userRole === 'lgu_headmaster' || userRole === 'admin') {
+                            router.push('/lgu-report' as any);
+                        } else if (isVerified) {
                             router.push('/report' as any);
                         } else if (verifyStatus === 'pending') {
                             setShowOngoing(true);
@@ -603,7 +556,9 @@ export default function Dashboard() {
                     activeOpacity={0.7}
                     onPress={() => {
                         if (!verifyChecked) return; // wait for DB check
-                        if (isVerified) {
+                        if (userRole === 'lgu_headmaster' || userRole === 'admin') {
+                            router.push('/lgu-report' as any);
+                        } else if (isVerified) {
                             router.push('/report');
                         } else if (verifyStatus === 'pending') {
                             setShowOngoing(true);

@@ -1,5 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
-import React, { useState } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import React, { useState, useEffect } from 'react';
+import { useFocusEffect } from 'expo-router';
 import {
     Linking,
     Platform,
@@ -43,6 +45,36 @@ const REGIONAL_AGENCIES = [
 
 export default function HotlineScreen() {
     const [searchQuery, setSearchQuery] = useState('');
+    const [customHotlines, setCustomHotlines] = useState<any[]>([]);
+
+    const loadCustomHotlines = async () => {
+        try {
+            // Only load custom hotlines for specific LGU accounts
+            const profileStr = await AsyncStorage.getItem('user_profile');
+            if (profileStr) {
+                const profile = JSON.parse(profileStr);
+                if (profile.role === 'lgu_headmaster' && profile.id) {
+                    const stored = await AsyncStorage.getItem(`custom_hotlines_${profile.id}`);
+                    if (stored) {
+                        setCustomHotlines(JSON.parse(stored));
+                    } else {
+                        setCustomHotlines([]);
+                    }
+                    return;
+                }
+            }
+            // Fallback / Citizen: clear custom hotlines
+            setCustomHotlines([]);
+        } catch (err) {
+            console.error('Failed to load custom hotlines', err);
+        }
+    };
+
+    useFocusEffect(
+        React.useCallback(() => {
+            loadCustomHotlines();
+        }, [])
+    );
 
     const makeCall = (number: string) => {
         const cleanNumber = number.replace(/[^0-9]/g, '');
@@ -105,6 +137,31 @@ export default function HotlineScreen() {
                         </TouchableOpacity>
                     </View>
                 ))}
+
+                {/* CUSTOM HOTLINES */}
+                {customHotlines.length > 0 && (
+                    <>
+                        <Text style={[styles.sectionLabel, { marginTop: 20 }]}>CUSTOM HOTLINES</Text>
+                        {customHotlines.filter(agency =>
+                            agency.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                            agency.service.toLowerCase().includes(searchQuery.toLowerCase())
+                        ).map((agency, index) => (
+                            <View key={`custom-${index}`} style={styles.agencyCard}>
+                                <View style={styles.agencyTextContent}>
+                                    <Text style={styles.agencyName}>{agency.name}</Text>
+                                    <Text style={styles.agencyService}>{agency.service}</Text>
+                                    <Text style={styles.agencyNumber}>{agency.number}</Text>
+                                </View>
+                                <TouchableOpacity
+                                    style={[styles.agencyCallButton, { backgroundColor: '#10B981' }]} // Green to differentiate
+                                    onPress={() => makeCall(agency.number)}
+                                >
+                                    <Ionicons name="call" size={20} color="white" />
+                                </TouchableOpacity>
+                            </View>
+                        ))}
+                    </>
+                )}
 
                 {/* Spacer so content doesn't get hidden behind the floating Navbar */}
                 <View style={{ height: 100 }} />

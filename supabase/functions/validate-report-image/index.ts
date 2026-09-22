@@ -34,7 +34,7 @@ Deno.serve(async (req) => {
         console.warn('⚠️ Could not fetch key from api_monitoring:', keyErr.message);
       }
     }
-    
+
     if (!geminiApiKey) {
       throw new Error('GEMINI_API_KEY not set');
     }
@@ -216,13 +216,13 @@ If the image is NOT a hazard (e.g. selfie, food, random objects, clear weather, 
         const { error: notifError } = await supabase
           .from('notifications')
           .insert({
-            user_id:     reportRow.user_id,
-            title:       `Your ${reportLabel} was not accepted`,
-            message:     `We reviewed your ${reportLabel.toLowerCase()} and could not verify it as a valid flood or hazard incident. Reason: ${result.reason || 'Image does not show a hazard'}. Please submit a clearer photo if the situation is real.`,
-            type:        'Updates',
-            is_read:     false,
+            user_id: reportRow.user_id,
+            title: `Your ${reportLabel} was not accepted`,
+            message: `We reviewed your ${reportLabel.toLowerCase()} and could not verify it as a valid flood or hazard incident. Reason: ${result.reason || 'Image does not show a hazard'}. Please submit a clearer photo if the situation is real.`,
+            type: 'Updates',
+            is_read: false,
             target_role: 'user',
-            created_at:  new Date().toISOString(),
+            created_at: new Date().toISOString(),
           });
 
         if (notifError) {

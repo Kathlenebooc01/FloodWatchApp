@@ -11,11 +11,11 @@ export default function RootLayout() {
         const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
             if (event === 'SIGNED_OUT' || !session) {
                 router.replace('/login' as any);
-            } else if (event === 'SIGNED_IN' && session) {
-                router.replace('/dashboard' as any);
             }
+            // We intentionally do NOT redirect on SIGNED_IN here to allow login screens
+            // to perform their own profile checks and custom routing without being interrupted.
         });
-        return () => subscription.unsubscribe();
+        return () => subscription?.unsubscribe();
     }, []);
 
     return (
@@ -33,6 +33,7 @@ export default function RootLayout() {
 
                 {/* Auth flow */}
                 <Stack.Screen name="login" />
+                <Stack.Screen name="lgu_login" />
                 <Stack.Screen name="verify-login" />
                 <Stack.Screen name="register-account" />
                 <Stack.Screen name="verification-code" />
@@ -51,6 +52,10 @@ export default function RootLayout() {
                 <Stack.Screen name="moderate" />
                 <Stack.Screen name="inquiry" />
                 <Stack.Screen name="localreports" />
+                <Stack.Screen name="lgu-report" />
+                <Stack.Screen name="situational-lgu" />
+                <Stack.Screen name="logistics-lgu" />
+                <Stack.Screen name="incident-lgu" />
                 <Stack.Screen name="reporthistory" />
                 <Stack.Screen name="notifications" />
                 <Stack.Screen name="modal" />

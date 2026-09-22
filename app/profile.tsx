@@ -49,6 +49,7 @@ export default function ProfileScreen() {
     const [lastName, setLastName]   = useState('');
     const [mobile, setMobile]       = useState('');
     const [profilePhoto, setProfilePhoto] = useState<string | null>(null);
+    const [userRole, setUserRole] = useState('');
     const [profileLoading, setProfileLoading] = useState(true);
 
     // ── Live location ──
@@ -70,6 +71,7 @@ export default function ProfileScreen() {
                         setLastName(profile.lastName || '');
                         setMobile(profile.mobile || '');
                         setProfilePhoto(profile.photo || null);
+                        setUserRole(profile.role || '');
                         setProfileLoading(false); // Stop loading immediately
                         console.log('⚡ Loaded profile from cache (instant)');
                     }
@@ -114,13 +116,16 @@ export default function ProfileScreen() {
                     setLastName(lname || userMeta?.last_name || '');
                     setMobile(data.mobile_number || userMeta?.phone || '');
                     setProfilePhoto(data.avatar_url || null);
+                    setUserRole(data.role || userMeta?.role || '');
                     
                     // Update AsyncStorage with fresh data
                     await AsyncStorage.setItem('user_profile', JSON.stringify({
+                        id: data.id,
                         firstName: data.first_name,
                         lastName: data.last_name,
                         mobile: data.mobile_number,
                         photo: data.avatar_url,
+                        role: data.role || userMeta?.role || '',
                     }));
                     console.log('💾 Updated AsyncStorage with DB data');
                 } else {
@@ -148,12 +153,14 @@ export default function ProfileScreen() {
                             setLastName(lname || '');
                             setMobile(phoneData.mobile_number || '');
                             setProfilePhoto(phoneData.avatar_url || null);
+                            setUserRole(phoneData.role || userMeta?.role || '');
                         } else {
                             // No profile in DB, use metadata
                             console.log('ℹ️ Using metadata fallback');
                             setFirstName(userMeta?.first_name || '');
                             setLastName(userMeta?.last_name || '');
                             setMobile(userMeta?.phone || '');
+                            setUserRole(userMeta?.role || '');
                         }
                     } else {
                         // Fallback: use metadata directly
@@ -161,6 +168,7 @@ export default function ProfileScreen() {
                         setFirstName(userMeta?.first_name || '');
                         setLastName(userMeta?.last_name || '');
                         setMobile(userMeta?.phone || '');
+                        setUserRole(userMeta?.role || '');
                     }
                 }
             } catch (err) {
@@ -247,6 +255,46 @@ export default function ProfileScreen() {
             if (profileId) {
                 await supabase.from('profiles').update({ avatar_url: uri }).eq('id', profileId);
             }
+        }
+    };
+
+    // ── Hotline Modal ──
+    const [hotlineModalVisible, setHotlineModalVisible] = useState(false);
+    const [hotlineName, setHotlineName] = useState('');
+    const [hotlineService, setHotlineService] = useState('');
+    const [hotlineNumber, setHotlineNumber] = useState('');
+    const [savingHotline, setSavingHotline] = useState(false);
+
+    const handleSaveHotline = async () => {
+        if (!hotlineName.trim() || !hotlineNumber.trim()) {
+            Alert.alert('Incomplete', 'Please enter the agency name and number.');
+            return;
+        }
+        setSavingHotline(true);
+        try {
+            const newHotline = {
+                name: hotlineName.trim(),
+                service: hotlineService.trim() || 'Custom Added Hotline',
+                number: hotlineNumber.trim(),
+            };
+            
+            const storageKey = profileId ? `custom_hotlines_${profileId}` : 'custom_hotlines';
+            const stored = await AsyncStorage.getItem(storageKey);
+            const parsed = stored ? JSON.parse(stored) : [];
+            parsed.push(newHotline);
+            await AsyncStorage.setItem(storageKey, JSON.stringify(parsed));
+            
+            setHotlineModalVisible(false);
+            setHotlineName('');
+            setHotlineService('');
+            setHotlineNumber('');
+            
+            // Navigate to hotline
+            router.push('/hotline' as any);
+        } catch (err) {
+            console.error('Failed to save hotline', err);
+        } finally {
+            setSavingHotline(false);
         }
     };
 
@@ -368,6 +416,13 @@ export default function ProfileScreen() {
                         {profileLoading ? 'Loading...' : `${firstName} ${lastName}`.trim() || 'Your Name'}
                     </Text>
 
+                    {userRole === 'lgu_headmaster' && (
+                        <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: -2, marginBottom: 8 }}>
+                            <Ionicons name="checkmark-circle" size={16} color="#2563EB" />
+                            <Text style={{ marginLeft: 4, color: '#2563EB', fontWeight: '700', fontSize: 13 }}>LGU Operator</Text>
+                        </View>
+                    )}
+
                     {/* Live location under the name */}
                     <View style={styles.locationRow}>
                         <Ionicons name="location-outline" size={13} color="#2563EB" />
@@ -400,14 +455,36 @@ export default function ProfileScreen() {
                 </View>
 
                 {/* ── Buttons ── */}
+                {userRole === 'lgu_headmaster' && (
+                    <TouchableOpacity
+                        style={styles.primaryBtn}
+                        activeOpacity={0.85}
+                        onPress={() => Alert.alert('Change Password', 'A password reset link will be sent to your email.')}
+                    >
+                        <Ionicons name="lock-closed-outline" size={18} color="#FFFFFF" style={{ marginRight: 10 }} />
+                        <Text style={{ color: '#FFFFFF', fontWeight: '700', fontSize: 15 }}>Change Password</Text>
+                    </TouchableOpacity>
+                )}
+
                 <TouchableOpacity
                     style={styles.secondaryBtn}
                     activeOpacity={0.85}
                     onPress={openAddContact}
                 >
-                    <Ionicons name="people-outline" size={18} color="#2563EB" style={{ marginRight: 10 }} />
+                    <Ionicons name="id-card-outline" size={18} color="#2563EB" style={{ marginRight: 10 }} />
                     <Text style={styles.secondaryBtnText}>Set Emergency Contact</Text>
                 </TouchableOpacity>
+
+                {userRole === 'lgu_headmaster' && (
+                    <TouchableOpacity
+                        style={styles.secondaryBtn}
+                        activeOpacity={0.85}
+                        onPress={() => setHotlineModalVisible(true)}
+                    >
+                        <Ionicons name="call-outline" size={18} color="#2563EB" style={{ marginRight: 10 }} />
+                        <Text style={styles.secondaryBtnText}>Add Hotline Number</Text>
+                    </TouchableOpacity>
+                )}
 
                 {/* ── Emergency Contact Cards ── */}
                 {emergencyContacts.map((contact, index) => (
@@ -724,6 +801,86 @@ export default function ProfileScreen() {
                                 </TouchableOpacity>
                             ))}
                         </ScrollView>
+                    </View>
+                </View>
+            </Modal>
+
+            {/* ══════════════════════════════════════
+                Add Hotline Modal
+            ══════════════════════════════════════ */}
+            <Modal
+                visible={hotlineModalVisible}
+                transparent
+                animationType="fade"
+                onRequestClose={() => setHotlineModalVisible(false)}
+            >
+                <View style={{
+                    flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.5)',
+                    justifyContent: 'center', alignItems: 'center', padding: 24,
+                }}>
+                    <View style={{
+                        backgroundColor: '#FFFFFF', borderRadius: 20, padding: 24,
+                        width: '100%', maxWidth: 400,
+                        shadowColor: '#000', shadowOffset: { width: 0, height: 20 },
+                        shadowOpacity: 0.3, shadowRadius: 30, elevation: 20,
+                    }}>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                            <Text style={{ fontSize: 18, fontWeight: '700', color: '#1E293B' }}>Add Hotline Number</Text>
+                            <TouchableOpacity onPress={() => setHotlineModalVisible(false)}>
+                                <Ionicons name="close" size={24} color="#64748B" />
+                            </TouchableOpacity>
+                        </View>
+
+                        {/* Agency Name */}
+                        <Text style={styles.inputLabel}>AGENCY NAME</Text>
+                        <View style={styles.inputRow}>
+                            <Ionicons name="business-outline" size={18} color="#94A3B8" style={{ marginRight: 8 }} />
+                            <TextInput
+                                style={styles.inputField}
+                                placeholder="e.g. Local Police"
+                                placeholderTextColor="#CBD5E1"
+                                value={hotlineName}
+                                onChangeText={setHotlineName}
+                            />
+                        </View>
+
+                        {/* Service Description */}
+                        <Text style={styles.inputLabel}>SERVICE (OPTIONAL)</Text>
+                        <View style={styles.inputRow}>
+                            <Ionicons name="information-circle-outline" size={18} color="#94A3B8" style={{ marginRight: 8 }} />
+                            <TextInput
+                                style={styles.inputField}
+                                placeholder="e.g. Emergency Response"
+                                placeholderTextColor="#CBD5E1"
+                                value={hotlineService}
+                                onChangeText={setHotlineService}
+                            />
+                        </View>
+
+                        {/* Number */}
+                        <Text style={styles.inputLabel}>HOTLINE NUMBER</Text>
+                        <View style={styles.inputRow}>
+                            <Ionicons name="call-outline" size={18} color="#94A3B8" style={{ marginRight: 8 }} />
+                            <TextInput
+                                style={styles.inputField}
+                                placeholder="e.g. 117 or 09XX XXX XXXX"
+                                placeholderTextColor="#CBD5E1"
+                                keyboardType="phone-pad"
+                                value={hotlineNumber}
+                                onChangeText={setHotlineNumber}
+                            />
+                        </View>
+
+                        <TouchableOpacity
+                            style={{
+                                backgroundColor: '#2563EB', borderRadius: 12, height: 50,
+                                justifyContent: 'center', alignItems: 'center', marginTop: 8,
+                            }}
+                            onPress={handleSaveHotline}
+                            disabled={savingHotline}
+                        >
+                            {savingHotline ? <ActivityIndicator color="#FFFFFF" /> : <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '700' }}>Save Hotline</Text>}
+                        </TouchableOpacity>
                     </View>
                 </View>
             </Modal>
