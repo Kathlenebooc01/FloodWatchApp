@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
     ActivityIndicator,
@@ -12,6 +12,22 @@ import {
     View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { supabase } from '@/utils/supabase';
+
+export interface Allocation {
+    allocation_id: string;
+    request_id: string;
+    quantity_allocated: number;
+    batch: string;
+    expected_return_date: string;
+    approved_by: string;
+    created_at: string;
+    dispatched_at: string;
+    delivered_at: string;
+    returned_at: string;
+    received_at: string;
+    utilities_id: string;
+}
 
 export interface HistoryItem {
     id: string;
@@ -30,20 +46,58 @@ export interface HistoryItem {
 
 export default function LguHistoryScreen() {
     const router = useRouter();
+    const params = useLocalSearchParams();
+    const { openRequest } = params;
     const [history, setHistory] = useState<HistoryItem[]>([]);
     const [loading, setLoading] = useState(true);
     const [selectedItem, setSelectedItem] = useState<HistoryItem | null>(null);
+    const [allocations, setAllocations] = useState<Allocation[]>([]);
+    const [loadingAlloc, setLoadingAlloc] = useState(false);
 
     useEffect(() => {
         const fetchHistory = async () => {
             try {
+                // 1. Fetch Local Situational Reports
                 const data = await AsyncStorage.getItem('lgu_reports_history');
-                if (data) {
-                    const parsed = JSON.parse(data);
-                    // Sort by newest first
-                    parsed.sort((a: HistoryItem, b: HistoryItem) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-                    setHistory(parsed);
+                const localHistory = data ? JSON.parse(data) : [];
+                const localSituational = localHistory.filter((i: any) => i.type === 'situational');
+
+                // 2. Fetch Backend Logistics Requests
+                const { data: { user } } = await supabase.auth.getUser();
+                let backendLogistics: HistoryItem[] = [];
+                if (user) {
+                    const { data: requests, error } = await supabase
+                        .from('resource_requests')
+                        .select('*, resource_request_items(quantity_requested, utilities(name))')
+                        .eq('requested_by', user.id)
+                        .order('created_at', { ascending: false });
+                    
+                    if (!error && requests) {
+                        backendLogistics = requests.map((req: any) => {
+                            const itemsObj: Record<string, number> = {};
+                            req.resource_request_items?.forEach((item: any) => {
+                                if (item.utilities?.name) {
+                                    itemsObj[item.utilities.name] = item.quantity_requested;
+                                }
+                            });
+                            
+                            return {
+                                id: req.request_id,
+                                type: 'logistics',
+                                timestamp: req.created_at,
+                                title: 'Logistics Request',
+                                status: req.status || 'Pending',
+                                desc: req.request_reason,
+                                dropoff: req.drop_off_address || 'Coordinate',
+                                items: itemsObj,
+                            };
+                        });
+                    }
                 }
+
+                const merged = [...localSituational, ...backendLogistics];
+                merged.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+                setHistory(merged);
             } catch (err) {
                 console.error('Failed to load history', err);
             } finally {
@@ -51,7 +105,65 @@ export default function LguHistoryScreen() {
             }
         };
         fetchHistory();
+
+        // ── Real-time listener for auto-refreshing the history list and open modal ──
+        const reqChannel = supabase.channel(`history-requests-updates-${Date.now()}`)
+            .on('postgres_changes' as any, { event: 'UPDATE', schema: 'public', table: 'resource_requests' }, () => {
+                fetchHistory();
+            })
+            .subscribe();
+
+        const allocChannel = supabase.channel(`history-allocations-updates-${Date.now()}`)
+            .on('postgres_changes' as any, { event: '*', schema: 'public', table: 'resource_allocations' }, (payload: any) => {
+                fetchHistory();
+                // If a modal is open, we need to refresh its allocations to show new buttons instantly!
+                if (payload.new && payload.new.request_id) {
+                    setSelectedItem((prev: any) => {
+                        if (prev && prev.id === payload.new.request_id) {
+                            // Re-fetch allocations silently
+                            supabase.from('resource_allocations')
+                                .select('*')
+                                .eq('request_id', prev.id)
+                                .then(({ data }) => {
+                                    if (data) setAllocations(data);
+                                });
+                        }
+                        return prev;
+                    });
+                }
+            })
+            .subscribe();
+
+        return () => {
+            supabase.removeChannel(reqChannel);
+            supabase.removeChannel(allocChannel);
+        };
     }, []);
+
+    // Auto-open modal if navigated from a notification
+    useEffect(() => {
+        if (openRequest && history.length > 0 && !selectedItem) {
+            const item = history.find(i => i.id === openRequest);
+            if (item) {
+                handleSelect(item);
+            }
+        }
+    }, [openRequest, history]);
+
+    const handleSelect = async (item: HistoryItem) => {
+        setSelectedItem(item);
+        if (item.type === 'logistics') {
+            setLoadingAlloc(true);
+            const { data } = await supabase
+                .from('resource_allocations')
+                .select('*')
+                .eq('request_id', item.id);
+            setAllocations(data || []);
+            setLoadingAlloc(false);
+        } else {
+            setAllocations([]);
+        }
+    };
 
     const clearHistory = async () => {
         await AsyncStorage.removeItem('lgu_reports_history');
@@ -61,6 +173,29 @@ export default function LguHistoryScreen() {
     const formatDate = (isoString: string) => {
         const d = new Date(isoString);
         return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    };
+
+    const handleUpdateAllocation = async (allocationId: string, type: 'receive' | 'return') => {
+        try {
+            const updateData: any = {};
+            if (type === 'receive') updateData.received_at = new Date().toISOString();
+            if (type === 'return') updateData.returned_at = new Date().toISOString();
+
+            const { error } = await supabase
+                .from('resource_allocations')
+                .update(updateData)
+                .eq('allocation_id', allocationId);
+
+            if (error) throw error;
+
+            // Optimistically update UI
+            setAllocations(prev => prev.map(a => 
+                a.allocation_id === allocationId ? { ...a, ...updateData } : a
+            ));
+        } catch (e) {
+            console.error("Update failed:", e);
+            alert("Failed to update allocation status.");
+        }
     };
 
     return (
@@ -93,7 +228,7 @@ export default function LguHistoryScreen() {
                             key={item.id} 
                             style={s.historyCard}
                             activeOpacity={0.7}
-                            onPress={() => setSelectedItem(item)}
+                            onPress={() => handleSelect(item)}
                         >
                             <View style={[s.iconCircle, item.type === 'situational' ? s.iconCircleBlue : s.iconCirclePurple]}>
                                 <Ionicons 
@@ -153,18 +288,88 @@ export default function LguHistoryScreen() {
                                     <Text style={s.detailValue}>{selectedItem.status}</Text>
                                 </View>
 
-                                {selectedItem.type === 'logistics' && selectedItem.urgency && (
-                                    <View style={s.detailRow}>
-                                        <Text style={s.detailLabel}>Urgency</Text>
-                                        <Text style={s.detailValue}>{selectedItem.urgency}</Text>
-                                    </View>
-                                )}
+                                {selectedItem.type === 'logistics' && (
+                                    <>
+                                        <View style={{ marginVertical: 16 }}>
+                                            <Text style={[s.detailLabel, { marginBottom: 12 }]}>Allocation Status</Text>
+                                            {loadingAlloc ? (
+                                                <ActivityIndicator color="#2563EB" style={{ marginTop: 10 }} />
+                                            ) : allocations.length > 0 ? (
+                                                allocations.map((alloc, idx) => (
+                                                    <View key={alloc.allocation_id} style={{ backgroundColor: '#F8FAFC', padding: 12, borderRadius: 12, marginBottom: 12 }}>
+                                                        <Text style={{ fontWeight: '800', color: '#1D4ED8', marginBottom: 8 }}>{alloc.batch || `Allocation ${idx + 1}`}</Text>
+                                                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 }}>
+                                                            <Text style={s.detailLabel}>Qty Allocated:</Text>
+                                                            <Text style={s.detailValue}>{alloc.quantity_allocated}</Text>
+                                                        </View>
+                                                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 }}>
+                                                            <Text style={s.detailLabel}>Dispatch Date:</Text>
+                                                            <Text style={s.detailValue}>{alloc.dispatched_at ? formatDate(alloc.dispatched_at) : 'Pending'}</Text>
+                                                        </View>
+                                                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 }}>
+                                                            <Text style={s.detailLabel}>Delivered Date:</Text>
+                                                            <Text style={s.detailValue}>{alloc.delivered_at ? formatDate(alloc.delivered_at) : 'Pending'}</Text>
+                                                        </View>
+                                                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 }}>
+                                                            <Text style={s.detailLabel}>Received Date:</Text>
+                                                            <Text style={s.detailValue}>{alloc.received_at ? formatDate(alloc.received_at) : 'Pending'}</Text>
+                                                        </View>
+                                                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 }}>
+                                                            <Text style={s.detailLabel}>Expected Return:</Text>
+                                                            <Text style={s.detailValue}>{alloc.expected_return_date ? formatDate(alloc.expected_return_date) : 'N/A'}</Text>
+                                                        </View>
+                                                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 12 }}>
+                                                            <Text style={s.detailLabel}>Returned Date:</Text>
+                                                            <Text style={s.detailValue}>{alloc.returned_at ? formatDate(alloc.returned_at) : 'Pending'}</Text>
+                                                        </View>
 
-                                {selectedItem.type === 'logistics' && selectedItem.dropoff && (
-                                    <View style={s.detailRow}>
-                                        <Text style={s.detailLabel}>Drop-off Point</Text>
-                                        <Text style={s.detailValue}>{selectedItem.dropoff}</Text>
-                                    </View>
+                                                        {/* Interactive Action Buttons */}
+                                                        {alloc.returned_at ? (
+                                                            <View style={{ backgroundColor: '#ECFDF5', padding: 10, borderRadius: 8, alignItems: 'center' }}>
+                                                                <Text style={{ color: '#059669', fontWeight: '800', fontSize: 13 }}>Completed / Returned</Text>
+                                                            </View>
+                                                        ) : alloc.received_at ? (
+                                                            <TouchableOpacity 
+                                                                style={{ backgroundColor: '#8B5CF6', padding: 12, borderRadius: 8, alignItems: 'center' }}
+                                                                onPress={() => handleUpdateAllocation(alloc.allocation_id, 'return')}
+                                                                activeOpacity={0.8}
+                                                            >
+                                                                <Text style={{ color: '#FFF', fontWeight: '800', fontSize: 13 }}>Return Items</Text>
+                                                            </TouchableOpacity>
+                                                        ) : alloc.dispatched_at ? (
+                                                            <TouchableOpacity 
+                                                                style={{ backgroundColor: '#2563EB', padding: 12, borderRadius: 8, alignItems: 'center' }}
+                                                                onPress={() => handleUpdateAllocation(alloc.allocation_id, 'receive')}
+                                                                activeOpacity={0.8}
+                                                            >
+                                                                <Text style={{ color: '#FFF', fontWeight: '800', fontSize: 13 }}>Mark as Received</Text>
+                                                            </TouchableOpacity>
+                                                        ) : (
+                                                            <View style={{ backgroundColor: '#F1F5F9', padding: 10, borderRadius: 8, alignItems: 'center' }}>
+                                                                <Text style={{ color: '#94A3B8', fontWeight: '700', fontSize: 12 }}>Pending PDRRMO Dispatch</Text>
+                                                            </View>
+                                                        )}
+                                                    </View>
+                                                ))
+                                            ) : (
+                                                <Text style={{ color: '#64748B', fontStyle: 'italic', fontSize: 13 }}>Pending PDRRMO Allocation</Text>
+                                            )}
+                                        </View>
+
+                                        {selectedItem.urgency && (
+                                            <View style={s.detailRow}>
+                                                <Text style={s.detailLabel}>Urgency</Text>
+                                                <Text style={s.detailValue}>{selectedItem.urgency}</Text>
+                                            </View>
+                                        )}
+
+                                        {selectedItem.dropoff && (
+                                            <View style={s.detailRow}>
+                                                <Text style={s.detailLabel}>Drop-off Point</Text>
+                                                <Text style={s.detailValue}>{selectedItem.dropoff}</Text>
+                                            </View>
+                                        )}
+                                    </>
                                 )}
 
                                 {selectedItem.type === 'situational' && selectedItem.documentName && (

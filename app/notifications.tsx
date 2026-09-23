@@ -179,11 +179,24 @@ export default function NotificationsScreen() {
         }
     };
 
-    // Fetch on mount and refresh every 30 seconds
+    // Fetch on mount and set up real-time subscription
     useEffect(() => {
         fetchNotifications();
-        const interval = setInterval(fetchNotifications, 30000);
-        return () => clearInterval(interval);
+
+        let channel = supabase.channel(`realtime-notifications-${Date.now()}`)
+            .on(
+                'postgres_changes' as any,
+                { event: 'INSERT', schema: 'public', table: 'notifications' },
+                (payload: any) => {
+                    console.log('🔔 New real-time notification received!');
+                    fetchNotifications(); // instantly re-fetch to get new list
+                }
+            )
+            .subscribe();
+
+        return () => {
+            if (channel) supabase.removeChannel(channel);
+        };
     }, []);
 
     // Persist read IDs when notifications change
@@ -387,23 +400,45 @@ export default function NotificationsScreen() {
                         </View>
 
                         <ScrollView showsVerticalScrollIndicator={false}>
-                            <Text style={styles.longDesc}>{selectedNotif?.desc}</Text>
+                            <Text style={styles.longDesc}>
+                                {selectedNotif?.desc.replace(/\[REF:.+?\]/, '').trim()}
+                            </Text>
 
-                            <View style={styles.locationSection}>
-                                <Text style={styles.locLabel}>AFFECTED LOCATION</Text>
-                                <Text style={styles.locText}>
-                                    Radius: 5km around {selectedNotif?.location}
-                                </Text>
-                            </View>
+                            {!selectedNotif?.desc.includes('[REF:') && (
+                                <View style={styles.locationSection}>
+                                    <Text style={styles.locLabel}>AFFECTED LOCATION</Text>
+                                    <Text style={styles.locText}>
+                                        Radius: 5km around {selectedNotif?.location}
+                                    </Text>
+                                </View>
+                            )}
 
-                            <TouchableOpacity style={styles.primaryBtn} onPress={closeModal}>
-                                <Text style={styles.primaryBtnText}>Acknowledge Alert</Text>
-                            </TouchableOpacity>
+                            {selectedNotif?.desc.includes('[REF:') ? (
+                                <TouchableOpacity 
+                                    style={styles.primaryBtn} 
+                                    onPress={() => {
+                                        const match = selectedNotif?.desc.match(/\[REF:(.+?)\]/);
+                                        const refId = match ? match[1] : null;
+                                        closeModal();
+                                        if (refId) {
+                                            router.push({ pathname: '/lgu-history', params: { openRequest: refId } } as any);
+                                        }
+                                    }}
+                                >
+                                    <Text style={styles.primaryBtnText}>View Request Details</Text>
+                                </TouchableOpacity>
+                            ) : (
+                                <>
+                                    <TouchableOpacity style={styles.primaryBtn} onPress={closeModal}>
+                                        <Text style={styles.primaryBtnText}>Acknowledge Alert</Text>
+                                    </TouchableOpacity>
 
-                            <TouchableOpacity style={styles.secondaryBtn}>
-                                <Ionicons name="share-outline" size={20} color="#1E293B" />
-                                <Text style={styles.secondaryBtnText}>Share Warning</Text>
-                            </TouchableOpacity>
+                                    <TouchableOpacity style={styles.secondaryBtn}>
+                                        <Ionicons name="share-outline" size={20} color="#1E293B" />
+                                        <Text style={styles.secondaryBtnText}>Share Warning</Text>
+                                    </TouchableOpacity>
+                                </>
+                            )}
                         </ScrollView>
                     </Animated.View>
                 </View>
@@ -534,7 +569,7 @@ const styles = StyleSheet.create({
 
     // Modal
     overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
-    dimmer:  { ...StyleSheet.absoluteFillObject },
+    dimmer:  { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
     sheet: {
         backgroundColor: 'white',
         borderTopLeftRadius: 35,

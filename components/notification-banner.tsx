@@ -1,9 +1,11 @@
 import { supabase } from '@/utils/supabase';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
     Animated,
+    Alert,
     Modal,
     Platform,
     StyleSheet,
@@ -136,13 +138,108 @@ export default function NotificationBanner() {
 
     useEffect(() => {
         let channel: any = null;
+        let lguChannel: any = null;
         let pollInterval: ReturnType<typeof setInterval> | null = null;
+        let logisticsPoll: ReturnType<typeof setInterval> | null = null;
+
+        const syncLogisticsRequests = async (uid: string) => {
+            try {
+                // Fetch current statuses safely without potentially broken joins
+                const { data: requests, error: requestsError } = await supabase
+                    .from('resource_requests')
+                    .select('request_id, status, created_at')
+                    .eq('requested_by', uid);
+                
+                if (requestsError || !requests) return;
+
+                const requestIds = requests.map(r => r.request_id);
+                let allocMap: Record<string, any> = {};
+
+                if (requestIds.length > 0) {
+                    const { data: allocs } = await supabase
+                        .from('resource_allocations')
+                        .select('request_id, dispatched_at, returned_at')
+                        .in('request_id', requestIds);
+                        
+                    if (allocs) {
+                        allocs.forEach(a => {
+                            allocMap[a.request_id] = a;
+                        });
+                    }
+                }
+
+                const stored = await AsyncStorage.getItem(`logistics_state_${uid}`);
+                const prevState: Record<string, string> = stored ? JSON.parse(stored) : {};
+                const newState: Record<string, string> = {};
+
+                for (const req of requests) {
+                    let stateString = req.status || '';
+                    const alloc = allocMap[req.request_id];
+                    if (alloc) {
+                        if (alloc.returned_at) stateString = 'Returned';
+                        else if (alloc.dispatched_at && !stateString.toLowerCase().includes('transit')) stateString = 'Dispatched';
+                    }
+
+                    newState[req.request_id] = stateString;
+                    const oldState = prevState[req.request_id];
+
+                    // Check if it's recently created (within 24 hours) to allow notifications on first load
+                    const isRecent = (new Date().getTime() - new Date(req.created_at).getTime()) < 24 * 60 * 60 * 1000;
+                    const shouldNotifyIfNew = isRecent && stateString !== 'Pending';
+                    const isTransit = stateString.toLowerCase().includes('transit');
+                    const isReturned = stateString.toLowerCase().includes('return') || stateString === 'Completed';
+
+                    if (oldState !== stateString && (oldState || shouldNotifyIfNew)) {
+                        if (stateString === 'Approved' || stateString === 'Fully_Allocated' || stateString === 'Dispatched' || isTransit || isReturned) {
+                            
+                            let alertType = 'approved';
+                            let title = 'Request Approved';
+                            let message = `Your request has been approved by PDRRMO.`;
+
+                            if (stateString === 'Dispatched') {
+                                alertType = 'Updates';
+                                title = 'Items Dispatched';
+                                message = `Your requested logistics have been dispatched!`;
+                            } else if (isTransit) {
+                                alertType = 'Updates';
+                                title = 'Items In Transit';
+                                message = `Your requested logistics are currently in transit to your location.`;
+                            } else if (isReturned) {
+                                alertType = 'verified';
+                                title = 'Request Completed';
+                                message = `Your logistics request has been successfully returned/completed.`;
+                            } else if (stateString === 'Fully_Allocated') {
+                                title = 'Request Allocated';
+                                message = `PDRRMO has allocated items for your request.`;
+                            }
+
+                            await supabase.from('notifications').insert({
+                                user_id: uid,
+                                target_role: 'user',
+                                type: 'Updates',
+                                title: title,
+                                message: `${message}\n\n[REF:${req.request_id}]`,
+                                is_read: false
+                            });
+                            
+                            // Insert complete
+                        }
+                    }
+                }
+
+                await AsyncStorage.setItem(`logistics_state_${uid}`, JSON.stringify(newState));
+            } catch (e) {
+                console.error(e);
+            }
+        };
 
         const setup = async () => {
             const { data: sessionData } = await supabase.auth.getSession();
             const uid = sessionData?.session?.user?.id;
             if (!uid) return;
             userId.current = uid;
+
+            const { data: profile } = await supabase.from('profiles').select('role').eq('id', uid).single();
 
             channel = supabase
                 .channel(`notif-banner-${uid}`)
@@ -156,13 +253,52 @@ export default function NotificationBanner() {
                 })
                 .subscribe();
 
+            // IMPORTANT: Only setup this real-time listener for LGU accounts! Citizens should not connect.
+            if (profile?.role === 'lgu_headmaster' || profile?.role === 'admin') {
+                syncLogisticsRequests(uid);
+                logisticsPoll = setInterval(() => syncLogisticsRequests(uid), 15000);
+
+                lguChannel = supabase.channel(`lgu-requests-${uid}`)
+                    .on('postgres_changes' as any, {
+                        event: 'UPDATE', schema: 'public', table: 'resource_requests', filter: `requested_by=eq.${uid}`
+                    }, async (payload: any) => {
+                        const newStatus = payload.new.status;
+                        const oldStatus = payload.old?.status || 'Pending';
+
+                        const isTransit = newStatus.toLowerCase().includes('transit');
+                        const isReturned = newStatus.toLowerCase().includes('return') || newStatus === 'Completed';
+
+                        if (newStatus !== oldStatus && (newStatus === 'Approved' || newStatus === 'Fully_Allocated' || newStatus === 'Dispatched' || isTransit || isReturned)) {
+                            // Automatically insert a local notification row for the user's history
+                            // The INSERT event above will instantly catch it and show the banner!
+                            await supabase.from('notifications').insert({
+                                user_id: uid,
+                                target_role: 'user',
+                                type: 'Updates',
+                                title: `Logistics Request ${newStatus}`,
+                                message: `Your logistics request has been marked as ${newStatus} by the PDRRMO.\n\n[REF:${payload.new.request_id}]`,
+                                is_read: false
+                            });
+                            // Update local state to prevent duplicate poll notifications
+                            const stored = await AsyncStorage.getItem(`logistics_state_${uid}`);
+                            if (stored) {
+                                const st = JSON.parse(stored);
+                                st[payload.new.request_id] = newStatus;
+                                await AsyncStorage.setItem(`logistics_state_${uid}`, JSON.stringify(st));
+                            }
+                        }
+                    }).subscribe();
+            }
+
             pollInterval = setInterval(poll, 10000);
         };
 
         setup();
         return () => {
             if (channel) supabase.removeChannel(channel);
+            if (lguChannel) supabase.removeChannel(lguChannel);
             if (pollInterval) clearInterval(pollInterval);
+            if (logisticsPoll) clearInterval(logisticsPoll);
             if (hideTimer.current) clearTimeout(hideTimer.current);
         };
     }, [showBanner, poll]);

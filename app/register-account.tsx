@@ -1,6 +1,8 @@
+import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '@/utils/supabase';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
@@ -57,19 +59,23 @@ export default function RegisterAccount() {
     const router    = useRouter();
     const scrollRef = useRef<ScrollView>(null);
 
-    const [firstName, setFirstName]       = useState('');
-    const [lastName, setLastName]         = useState('');
-    const [mobileNumber, setMobileNumber] = useState('');
-    const [agreed, setAgreed]             = useState(false);
-    const [loading, setLoading]           = useState(false);
-    const [policyModal, setPolicyModal]   = useState<'sms' | 'privacy' | null>(null);
+    const [firstName, setFirstName] = useState('');
+    const [lastName, setLastName]   = useState('');
+    const [email, setEmail]         = useState('');
+    const [password, setPassword]   = useState('');
+    const [showPassword, setShowPassword] = useState(false);
+    const [agreed, setAgreed]       = useState(false);
+    const [loading, setLoading]     = useState(false);
+    
+    // Privacy and Terms Bottom Sheet
+    const [policyModal, setPolicyModal]   = useState<'privacy' | 'terms' | null>(null);
     const [sheetVisible, setSheetVisible] = useState(false);
 
     // Smooth bottom-sheet animation values
     const slideAnim   = useRef(new Animated.Value(600)).current;  // starts off-screen
     const backdropAnim = useRef(new Animated.Value(0)).current;
 
-    const openSheet = (type: 'sms' | 'privacy') => {
+    const openSheet = (type: 'privacy' | 'terms') => {
         setPolicyModal(type);
         setSheetVisible(true);
         Animated.parallel([
@@ -107,123 +113,87 @@ export default function RegisterAccount() {
     };
 
     // Touched states — show error only after user has interacted with that field
-    const [touchedFirst, setTouchedFirst]   = useState(false);
-    const [touchedLast, setTouchedLast]     = useState(false);
-    const [touchedMobile, setTouchedMobile] = useState(false);
+    const [touchedFirst, setTouchedFirst] = useState(false);
+    const [touchedLast, setTouchedLast]   = useState(false);
+    const [touchedEmail, setTouchedEmail] = useState(false);
+    const [touchedPass, setTouchedPass]   = useState(false);
 
     // Validation errors
-    const firstNameError  = touchedFirst  && firstName.trim().length === 0  ? 'First name is required.' : '';
-    const lastNameError   = touchedLast   && lastName.trim().length === 0   ? 'Last name is required.' : '';
-    const mobileError     = touchedMobile && mobileNumber.trim().length < 10 ? 'Enter a valid 10-digit mobile number.' : '';
+    const firstNameError = touchedFirst && firstName.trim().length === 0 ? 'First name is required.' : '';
+    const lastNameError  = touchedLast && lastName.trim().length === 0 ? 'Last name is required.' : '';
+    const emailError     = touchedEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? 'Enter a valid email address.' : '';
+    const passwordError  = touchedPass && password.length < 6 ? 'Password must be at least 6 characters.' : '';
+
+    // Password validations
+    const hasUpperCase = /[A-Z]/.test(password);
+    const hasLowerCase = /[a-z]/.test(password);
+    const hasNumber    = /[0-9]/.test(password);
+    const hasSpecial   = /[^A-Za-z0-9]/.test(password);
+    const hasMinLength = password.length >= 8;
+    const isPasswordValid = hasUpperCase && hasLowerCase && hasNumber && hasSpecial && hasMinLength;
 
     // Button only enabled when ALL fields valid AND checkbox checked
     const isFormValid =
         firstName.trim().length > 0 &&
         lastName.trim().length > 0 &&
-        mobileNumber.trim().length >= 10 &&
+        /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) &&
+        isPasswordValid &&
         agreed;
 
     const handleRegister = async () => {
         // Touch all fields so errors show if still empty
         setTouchedFirst(true);
         setTouchedLast(true);
-        setTouchedMobile(true);
+        setTouchedEmail(true);
+        setTouchedPass(true);
 
-        if (!firstName.trim()) {
-            Alert.alert('Required', 'Please enter your first name.');
-            return;
-        }
-        if (!lastName.trim()) {
-            Alert.alert('Required', 'Please enter your last name.');
-            return;
-        }
-        if (mobileNumber.trim().length < 10) {
-            Alert.alert('Required', 'Please enter a valid mobile number.');
+        if (!firstName.trim() || !lastName.trim() || !email.trim() || !isPasswordValid) {
+            Alert.alert('Required', 'Please properly fill in all fields and ensure the password meets all requirements.');
             return;
         }
         if (!agreed) {
-            Alert.alert('Required', 'Please agree to the SMS Policy and Privacy Terms to continue.');
+            Alert.alert('Required', 'Please agree to the Privacy Policy and Terms of Service to continue.');
             return;
         }
 
         setLoading(true);
         try {
-            // Format: +639XXXXXXXXX — remove leading 0 if present
-            const phone = `+63${mobileNumber.trim().replace(/^0/, '')}`;
-            const fullName = `${firstName.trim()} ${lastName.trim()}`;
-
-            console.log('🔍 Checking if phone number already registered:', phone);
-            
-            // CHECK IF PHONE NUMBER ALREADY EXISTS IN profiles TABLE
-            const { data: existingUser, error: checkError } = await supabase
-                .from('profiles')
-                .select('id, mobile_number')
-                .eq('mobile_number', phone)
-                .single();
-
-            if (checkError && checkError.code !== 'PGRST116') {
-                // PGRST116 means "no rows returned" which is expected for new users
-                console.log('⚠️ Database check info:', checkError.code);
-            }
-
-            if (existingUser) {
-                console.log('⚠️ Phone number already registered:', phone);
-                Alert.alert(
-                    'Number Already Registered',
-                    `The phone number ${phone} is already registered.\n\nPlease go to Sign In to log in with this number.`,
-                    [{ text: 'OK', onPress: () => router.push('/login' as any) }]
-                );
-                setLoading(false);
-                return;
-            }
-
-            console.log('✅ Phone number is new, proceeding with registration');
-
-            // Call Edge Function which sends OTP via Semaphore SMS
-            const response = await fetch(
-                'https://xncciaozzxoqbesfxpww.supabase.co/functions/v1/send-otp',
-                {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhuY2NpYW96enhvcWJlc2Z4cHd3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIzNDgyMzQsImV4cCI6MjA4NzkyNDIzNH0.im6QTwjVyryj4y0fvcloH4qw-Rj5PPftDYhk4sKtymI`,
-                    },
-                    body: JSON.stringify({
-                        phone,
-                        firstName: firstName.trim(),
-                        lastName:  lastName.trim(),
-                    }),
+            const { data, error } = await supabase.auth.signUp({
+                email: email.trim(),
+                password,
+                options: {
+                    data: {
+                        first_name: firstName.trim(),
+                        last_name: lastName.trim(),
+                        full_name: `${firstName.trim()} ${lastName.trim()}`
+                    }
                 }
-            );
-            const result = await response.json();
-            if (!response.ok) throw new Error(result.error || 'Failed to send OTP.');
+            });
 
-            // If Semaphore account is pending, show OTP on screen for testing
-            if (result.test_mode && result.test_otp) {
-                Alert.alert(
-                    '⚠️ Test Mode',
-                    `Semaphore pending.\n\nYour OTP is: ${result.test_otp}\n\nUse this on the next screen.`,
-                    [{ text: 'OK', onPress: () => router.push({
-                        pathname: '/verification-code',
-                        params: { phone, firstName: firstName.trim(), lastName: lastName.trim(), fullName, isRegistering: 'true' },
-                    } as any) }]
-                );
-                return;
+            if (error) {
+                throw error;
             }
 
-            // Navigate to verification screen, passing along name + phone + isRegistering flag
-            router.push({
-                pathname: '/verification-code',
-                params: {
-                    phone,
-                    firstName: firstName.trim(),
-                    lastName:  lastName.trim(),
-                    fullName,
-                    isRegistering: 'true',
-                },
-            } as any);
+            // Save to AsyncStorage
+            await AsyncStorage.setItem('user_profile', JSON.stringify({
+                firstName: firstName.trim(),
+                lastName: lastName.trim(),
+                email: email.trim(),
+            }));
+
+            if (data.session) {
+                // Already logged in (auto-confirm enabled)
+                router.replace('/dashboard' as any);
+            } else {
+                // Email confirmation required
+                router.push({
+                    pathname: '/verification-code',
+                    params: { email: email.trim() }
+                } as any);
+            }
+
         } catch (err: any) {
-            Alert.alert('Registration Failed', err.message || 'Could not send OTP. Please try again.');
+            Alert.alert('Registration Failed', err.message || 'Could not register account. Please try again.');
         } finally {
             setLoading(false);
         }
@@ -261,7 +231,7 @@ export default function RegisterAccount() {
                         <Text style={styles.label}>First Name</Text>
                         <TextInput
                             style={[styles.input, firstNameError ? styles.inputError : null]}
-                            placeholder="Juan"
+                            placeholder="First Name"
                             placeholderTextColor="#A0AEC0"
                             value={firstName}
                             onChangeText={setFirstName}
@@ -276,7 +246,7 @@ export default function RegisterAccount() {
                         <Text style={styles.label}>Last Name</Text>
                         <TextInput
                             style={[styles.input, lastNameError ? styles.inputError : null]}
-                            placeholder="Dela Cruz"
+                            placeholder="Last Name"
                             placeholderTextColor="#A0AEC0"
                             value={lastName}
                             onChangeText={setLastName}
@@ -286,25 +256,69 @@ export default function RegisterAccount() {
                         {lastNameError ? <Text style={styles.errorText}>{lastNameError}</Text> : null}
                     </View>
 
-                    {/* Mobile Number */}
+                    {/* Email */}
                     <View style={styles.fieldContainer}>
-                        <Text style={styles.label}>Mobile Number</Text>
-                        <View style={[styles.mobileRow, mobileError ? styles.mobileRowError : null]}>
-                            <View style={styles.countryBox}>
-                                <Text style={styles.countryCode}>+63</Text>
-                            </View>
+                        <Text style={styles.label}>Email</Text>
+                        <TextInput
+                            style={[styles.input, emailError ? styles.inputError : null]}
+                            placeholder="Email"
+                            placeholderTextColor="#A0AEC0"
+                            value={email}
+                            onChangeText={setEmail}
+                            onBlur={() => setTouchedEmail(true)}
+                            keyboardType="email-address"
+                            autoCapitalize="none"
+                            autoComplete="email"
+                        />
+                        {emailError ? <Text style={styles.errorText}>{emailError}</Text> : null}
+                    </View>
+
+                    {/* Password */}
+                    <View style={styles.fieldContainer}>
+                        <Text style={styles.label}>Password</Text>
+                        <View style={[styles.passwordInputContainer, (touchedPass && !isPasswordValid) ? styles.inputError : null]}>
                             <TextInput
-                                style={styles.mobileInput}
-                                placeholder="912 345 6789"
+                                style={styles.passwordInput}
+                                placeholder="Password"
                                 placeholderTextColor="#A0AEC0"
-                                value={mobileNumber}
-                                onChangeText={setMobileNumber}
-                                onBlur={() => setTouchedMobile(true)}
-                                keyboardType="phone-pad"
-                                maxLength={10}
+                                value={password}
+                                onChangeText={setPassword}
+                                onBlur={() => setTouchedPass(true)}
+                                secureTextEntry={!showPassword}
                             />
+                            <TouchableOpacity
+                                style={styles.eyeIconContainer}
+                                onPress={() => setShowPassword(!showPassword)}
+                                activeOpacity={0.7}
+                            >
+                                <Ionicons
+                                    name={showPassword ? "eye-off-outline" : "eye-outline"}
+                                    size={22}
+                                    color="#64748B"
+                                />
+                            </TouchableOpacity>
                         </View>
-                        {mobileError ? <Text style={styles.errorText}>{mobileError}</Text> : null}
+                        
+                        {/* Password Checklist */}
+                        {password.length > 0 && (
+                            <View style={styles.checklistContainer}>
+                                <Text style={[styles.checklistItem, hasUpperCase ? styles.checklistItemValid : styles.checklistItemInvalid]}>
+                                    {hasUpperCase ? '✓' : '✕'} Uppercase Letter
+                                </Text>
+                                <Text style={[styles.checklistItem, hasLowerCase ? styles.checklistItemValid : styles.checklistItemInvalid]}>
+                                    {hasLowerCase ? '✓' : '✕'} Lowercase Letter
+                                </Text>
+                                <Text style={[styles.checklistItem, hasNumber ? styles.checklistItemValid : styles.checklistItemInvalid]}>
+                                    {hasNumber ? '✓' : '✕'} Number
+                                </Text>
+                                <Text style={[styles.checklistItem, hasSpecial ? styles.checklistItemValid : styles.checklistItemInvalid]}>
+                                    {hasSpecial ? '✓' : '✕'} Special Character
+                                </Text>
+                                <Text style={[styles.checklistItem, hasMinLength ? styles.checklistItemValid : styles.checklistItemInvalid]}>
+                                    {hasMinLength ? '✓' : '✕'} Minimum 8 characters
+                                </Text>
+                            </View>
+                        )}
                     </View>
 
                     {/* Agreement Checkbox */}
@@ -317,9 +331,9 @@ export default function RegisterAccount() {
                             {agreed && <Text style={styles.checkmark}>✓</Text>}
                         </TouchableOpacity>
                         <Text style={styles.agreementText}>
-                            I agree to receive SMS alerts and acknowledge the{' '}
-                            <AnimatedLink onPress={() => openSheet('sms')} style={styles.link}>SMS Policy</AnimatedLink> and{' '}
-                            <AnimatedLink onPress={() => openSheet('privacy')} style={styles.link}>Privacy Terms</AnimatedLink>.
+                            I agree to receive marketing and promotional emails and acknowledge the{' '}
+                            <AnimatedLink onPress={() => openSheet('privacy')} style={styles.link}>Privacy Policy</AnimatedLink> and{' '}
+                            <AnimatedLink onPress={() => openSheet('terms')} style={styles.link}>Terms of Service</AnimatedLink>.
                         </Text>
                     </View>
 
@@ -346,7 +360,7 @@ export default function RegisterAccount() {
                 </ScrollView>
             </KeyboardAvoidingView>
 
-            {/* ── SMS Policy / Privacy Terms Smooth Bottom Sheet ── */}
+            {/* ── Privacy / Terms Bottom Sheet ── */}
             <Modal visible={sheetVisible} transparent animationType="none" onRequestClose={closeSheet}>
                 {/* Animated backdrop */}
                 <Animated.View style={[styles.policyOverlay, { opacity: backdropAnim }]}>
@@ -361,7 +375,7 @@ export default function RegisterAccount() {
                     {/* Header */}
                     <View style={styles.policyHeader}>
                         <Text style={styles.policyTitle}>
-                            {policyModal === 'sms' ? 'SMS Policy' : 'Privacy Terms'}
+                            {policyModal === 'privacy' ? 'Privacy Policy' : 'Terms of Service'}
                         </Text>
                         <TouchableOpacity onPress={closeSheet} style={styles.policyClose}>
                             <Text style={styles.policyCloseText}>✕</Text>
@@ -369,44 +383,17 @@ export default function RegisterAccount() {
                     </View>
 
                     <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 16 }}>
-                        {policyModal === 'sms' ? (
-                            <View>
-                                <Text style={styles.policySection}>1. Purpose of SMS Alerts</Text>
-                                <Text style={styles.policyBody}>
-                                    FloodWatch Cebu, operated by the Provincial Disaster Risk Reduction and Management Office (PDRRMO) of Cebu, uses SMS messaging to send real-time flood alerts, emergency notifications, OTP verification codes, and updates related to your submitted incident reports.
-                                </Text>
-
-                                <Text style={styles.policySection}>2. Message Frequency</Text>
-                                <Text style={styles.policyBody}>
-                                    You may receive SMS messages at any time, particularly during active weather events, flood warnings, or when your report status is updated. Message frequency varies based on alert levels and your activity in the app.
-                                </Text>
-
-                                <Text style={styles.policySection}>3. Message & Data Rates</Text>
-                                <Text style={styles.policyBody}>
-                                    Standard messaging rates from your mobile carrier may apply. FloodWatch Cebu does not charge additional fees for SMS alerts.
-                                </Text>
-
-                                <Text style={styles.policySection}>4. Opt-Out</Text>
-                                <Text style={styles.policyBody}>
-                                    You may opt out of non-emergency SMS alerts by updating your notification preferences in the app settings. Emergency alerts related to life-threatening flood situations may still be sent as required by PDRRMO protocols.
-                                </Text>
-
-                                <Text style={styles.policySection}>5. Contact</Text>
-                                <Text style={styles.policyBody}>
-                                    For questions regarding SMS alerts, contact the PDRRMO Cebu at pdrrmo@cebu.gov.ph or call the PDRRMO hotline.
-                                </Text>
-                            </View>
-                        ) : (
+                        {policyModal === 'privacy' ? (
                             <View>
                                 <Text style={styles.policySection}>1. Data We Collect</Text>
                                 <Text style={styles.policyBody}>
-                                    FloodWatch Cebu collects your full name, mobile number, location data (GPS coordinates), submitted incident reports, and uploaded photos. This data is used solely for disaster monitoring and emergency response coordination by PDRRMO Cebu.
+                                    FloodWatch Cebu collects your full name, email address, location data (GPS coordinates), submitted incident reports, and uploaded photos. This data is used solely for disaster monitoring and emergency response coordination by PDRRMO Cebu.
                                 </Text>
 
                                 <Text style={styles.policySection}>2. How We Use Your Data</Text>
                                 <Text style={styles.policyBody}>
                                     Your information is used to:{'\n'}
-                                    • Verify your identity via OTP{'\n'}
+                                    • Securely log you into the application{'\n'}
                                     • Send you relevant flood alerts and updates{'\n'}
                                     • Process and validate incident reports{'\n'}
                                     • Coordinate emergency response with local government units (LGUs){'\n'}
@@ -417,27 +404,22 @@ export default function RegisterAccount() {
                                 <Text style={styles.policyBody}>
                                     Your data may be shared with PDRRMO Cebu, local barangay officials, and authorized government emergency responders. We do not sell or share your personal data with third-party commercial entities.
                                 </Text>
-
-                                <Text style={styles.policySection}>4. Data Retention</Text>
+                            </View>
+                        ) : (
+                            <View>
+                                <Text style={styles.policySection}>1. Acceptance of Terms</Text>
                                 <Text style={styles.policyBody}>
-                                    Your personal data is retained for as long as your account is active or as required by government data retention policies. You may request deletion of your account by contacting PDRRMO Cebu directly.
+                                    By creating an account, you agree to comply with and be bound by these Terms of Service.
                                 </Text>
 
-                                <Text style={styles.policySection}>5. Security</Text>
+                                <Text style={styles.policySection}>2. User Conduct</Text>
                                 <Text style={styles.policyBody}>
-                                    All data is stored securely using industry-standard encryption. Access is restricted to authorized PDRRMO personnel only.
+                                    You agree to use FloodWatch Cebu responsibly and only for its intended purpose of disaster monitoring and reporting. Submitting false reports or abusing the platform is strictly prohibited and may result in account termination.
                                 </Text>
 
-                                <Text style={styles.policySection}>6. Your Rights</Text>
+                                <Text style={styles.policySection}>3. Account Security</Text>
                                 <Text style={styles.policyBody}>
-                                    Under the Data Privacy Act of 2012 (Republic Act 10173), you have the right to access, correct, and request deletion of your personal data. Contact PDRRMO Cebu at pdrrmo@cebu.gov.ph to exercise these rights.
-                                </Text>
-
-                                <Text style={styles.policySection}>7. Contact</Text>
-                                <Text style={styles.policyBody}>
-                                    Provincial Disaster Risk Reduction and Management Office (PDRRMO){'\n'}
-                                    Province of Cebu, Philippines{'\n'}
-                                    Email: pdrrmo@cebu.gov.ph
+                                    You are responsible for safeguarding your password and any activities or actions under your account. Do not share your account credentials with anyone.
                                 </Text>
                             </View>
                         )}
@@ -472,23 +454,26 @@ const styles = StyleSheet.create({
         paddingHorizontal: 16, height: 52,
         fontSize: 15, color: '#1E293B',
     },
+    passwordInputContainer: {
+        flexDirection: 'row', alignItems: 'center',
+        backgroundColor: '#FFFFFF', borderRadius: 10,
+        borderWidth: 1, borderColor: '#E2E8F0',
+        height: 52,
+    },
+    passwordInput: {
+        flex: 1, paddingHorizontal: 16,
+        fontSize: 15, color: '#1E293B',
+    },
+    eyeIconContainer: {
+        paddingHorizontal: 16, height: '100%', justifyContent: 'center',
+    },
+    checklistContainer: { marginTop: 10, paddingHorizontal: 4 },
+    checklistItem: { fontSize: 13, marginBottom: 4 },
+    checklistItemValid: { color: '#16A34A' },
+    checklistItemInvalid: { color: '#EF4444' },
+
     inputError: { borderColor: '#EF4444', backgroundColor: '#FFF5F5' },
     errorText:  { fontSize: 12, color: '#EF4444', marginTop: 5, marginLeft: 4 },
-
-    mobileRow:      { flexDirection: 'row' },
-    mobileRowError: { },
-    countryBox: {
-        backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#E2E8F0',
-        borderRadius: 10, paddingHorizontal: 14,
-        justifyContent: 'center', marginRight: 8, height: 52,
-    },
-    countryCode: { fontSize: 15, fontWeight: '600', color: '#334155' },
-    mobileInput: {
-        flex: 1, backgroundColor: '#FFFFFF',
-        borderWidth: 1, borderColor: '#E2E8F0',
-        borderRadius: 10, paddingHorizontal: 14,
-        fontSize: 15, color: '#1E293B', height: 52,
-    },
 
     agreementContainer: {
         flexDirection: 'row', alignItems: 'flex-start',
@@ -501,13 +486,13 @@ const styles = StyleSheet.create({
         justifyContent: 'center', alignItems: 'center',
         marginRight: 10, marginTop: 2,
     },
-    checkboxChecked: { backgroundColor: '#2563EB', borderColor: '#2563EB' },
+    checkboxChecked: { backgroundColor: '#0B57D0', borderColor: '#0B57D0' },
     checkmark:       { color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' },
     agreementText:   { flex: 1, fontSize: 13, color: '#64748B', lineHeight: 19 },
-    link:            { color: '#2563EB', fontWeight: '600' },
+    link:            { color: '#0B57D0', fontWeight: '600' },
 
     registerButton: {
-        backgroundColor: '#2563EB', borderRadius: 12,
+        backgroundColor: '#0B57D0', borderRadius: 12,
         height: 54, justifyContent: 'center', alignItems: 'center',
         marginBottom: 20,
     },
@@ -516,7 +501,7 @@ const styles = StyleSheet.create({
 
     signInContainer: { flexDirection: 'row', justifyContent: 'center', marginTop: 4 },
     signInText:      { fontSize: 14, color: '#64748B' },
-    signInLink:      { fontSize: 14, color: '#2563EB', fontWeight: '700' },
+    signInLink:      { fontSize: 14, color: '#0B57D0', fontWeight: '700' },
 
     // Policy modal
     policyOverlay: {
@@ -540,6 +525,6 @@ const styles = StyleSheet.create({
     policyCloseText:   { fontSize: 14, color: '#64748B', fontWeight: '700' },
     policySection:     { fontSize: 13, fontWeight: '800', color: '#1E293B', marginTop: 18, marginBottom: 6 },
     policyBody:        { fontSize: 13, color: '#64748B', lineHeight: 20 },
-    policyAgreeBtn:    { backgroundColor: '#2563EB', height: 52, borderRadius: 14, justifyContent: 'center', alignItems: 'center', marginTop: 20 },
+    policyAgreeBtn:    { backgroundColor: '#0B57D0', height: 52, borderRadius: 14, justifyContent: 'center', alignItems: 'center', marginTop: 20 },
     policyAgreeBtnText:{ color: '#FFFFFF', fontSize: 15, fontWeight: '700' },
 });

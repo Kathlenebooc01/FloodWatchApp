@@ -19,12 +19,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 export default function VerificationCode() {
     const router = useRouter();
 
-    // Receive phone + name passed from register-account
-    const { phone, firstName, lastName } = useLocalSearchParams<{
-        phone: string;
-        firstName: string;
-        lastName: string;
-    }>();
+    // Receive email passed from register-account or login
+    const { email } = useLocalSearchParams<{ email: string }>();
 
     const [code, setCode]       = useState(['', '', '', '', '', '']);
     const [timer, setTimer]     = useState(60);
@@ -42,55 +38,22 @@ export default function VerificationCode() {
     }, [timer]);
 
     const handleVerify = async (token: string) => {
-        if (token.length < 6) return;
+        if (token.length < 6 || !email) return;
         setLoading(true);
         try {
-            console.log('🔍 Verifying OTP for phone:', phone);
+            console.log('🔍 Verifying Email OTP for:', email);
             
-            // Verify OTP via Edge Function
-            const response = await fetch(
-                'https://xncciaozzxoqbesfxpww.supabase.co/functions/v1/verify-otp',
-                {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhuY2NpYW96enhvcWJlc2Z4cHd3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIzNDgyMzQsImV4cCI6MjA4NzkyNDIzNH0.im6QTwjVyryj4y0fvcloH4qw-Rj5PPftDYhk4sKtymI`,
-                    },
-                    body: JSON.stringify({ phone: phone!, otp: token }),
-                }
-            );
-            const result = await response.json();
-            console.log('📥 Verify OTP response:', result);
+            const { data, error } = await supabase.auth.verifyOtp({
+                email: email,
+                token: token,
+                type: 'signup'
+            });
             
-            if (!response.ok) throw new Error(result.error || 'Invalid OTP.');
+            if (error) throw error;
+            
+            console.log('✅ Verify OTP successful! User:', data?.session?.user?.id);
 
-            // Save profile data immediately to AsyncStorage
-            const profileData = {
-                firstName: result.firstName || firstName || '',
-                lastName: result.lastName || lastName || '',
-                mobile: phone || '',
-            };
-            await AsyncStorage.setItem('user_profile', JSON.stringify(profileData));
-            console.log('💾 Saved profile to AsyncStorage:', profileData);
-
-            // Sign in the user
-            if (result.email && result.password) {
-                const { data: sessionData, error: signInError } = await supabase.auth.signInWithPassword({
-                    email: result.email,
-                    password: result.password,
-                });
-                
-                if (signInError) {
-                    console.error('❌ Sign-in error:', signInError);
-                    throw new Error('Failed to sign in: ' + signInError.message);
-                }
-                console.log('✅ Sign-in successful! User:', sessionData?.user?.id);
-            }
-
-            // Profile is already saved by the Edge Function (verify-otp)
-            // No need to save again here
-
-            // Go to identity verification then dashboard
+            // Go to identity verification
             router.replace('/identify' as any);
         } catch (err: any) {
             setErrorMessage(err.message || 'The code you entered is wrong or has expired.');
@@ -123,21 +86,15 @@ export default function VerificationCode() {
     };
 
     const handleResend = async () => {
-        if (timer > 0) return;
+        if (timer > 0 || !email) return;
         try {
-            const response = await fetch(
-                'https://xncciaozzxoqbesfxpww.supabase.co/functions/v1/send-otp',
-                {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhuY2NpYW96enhvcWJlc2Z4cHd3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIzNDgyMzQsImV4cCI6MjA4NzkyNDIzNH0.im6QTwjVyryj4y0fvcloH4qw-Rj5PPftDYhk4sKtymI`,
-                    },
-                    body: JSON.stringify({ phone: phone! }),
-                }
-            );
-            const result = await response.json();
-            if (!response.ok) throw new Error(result.error);
+            const { error } = await supabase.auth.resend({
+                type: 'signup',
+                email: email
+            });
+
+            if (error) throw error;
+
             setTimer(60);
             setCode(['', '', '', '', '', '']);
             inputRefs.current[0]?.focus();
@@ -153,10 +110,23 @@ export default function VerificationCode() {
         return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
     };
 
-    // Mask the phone number for display: +63 9XX •••• XX
-    const maskedPhone = phone
-        ? phone.replace(/(\+63)(\d{3})(\d{4})(\d{2})/, '$1 $2 •••• $4')
-        : '+63 •••• ••••';
+    // Mask the email for display: k************7@gmail.com
+    const maskEmail = (em: string) => {
+        if (!em) return 'k***7@gmail.com';
+        const parts = em.split('@');
+        if (parts.length !== 2) return em;
+        const local = parts[0];
+        const domain = parts[1];
+        
+        if (local.length <= 2) {
+            return `*@${domain}`;
+        }
+        
+        const hiddenPart = '*'.repeat(local.length - 2);
+        return `${local[0]}${hiddenPart}${local[local.length - 1]}@${domain}`;
+    };
+
+    const maskedEmail = maskEmail(email || '');
 
     return (
         <SafeAreaView style={styles.safeArea}>
@@ -174,16 +144,13 @@ export default function VerificationCode() {
                 {/* Icon */}
                 <View style={styles.iconContainer}>
                     <View style={styles.iconCircle}>
-                        <View style={styles.checkOverlay}>
-                            <Text style={styles.checkIcon}>✓</Text>
-                        </View>
+                        <Ionicons name="shield-checkmark-outline" size={34} color="#0B57D0" />
                     </View>
                 </View>
 
                 <Text style={styles.title}>Verification Code</Text>
                 <Text style={styles.subtitle}>
-                    A 6-digit code has been sent to your{'\n'}registered mobile number{' '}
-                    <Text style={styles.boldText}>{maskedPhone}</Text>
+                    A 6-digit code has been sent to your{'\n'}Email <Text style={styles.boldText}>{maskedEmail}</Text>
                 </Text>
 
                 {/* OTP inputs */}
@@ -229,6 +196,7 @@ export default function VerificationCode() {
                 </TouchableOpacity>
 
                 <View style={styles.officialBadge}>
+                    <Ionicons name="shield-half-outline" size={14} color="#A0AEC0" style={{ marginRight: 6 }} />
                     <Text style={styles.officialText}>OFFICIAL GOVERNMENT APPLICATION</Text>
                 </View>
             </View>
@@ -291,7 +259,7 @@ export default function VerificationCode() {
                         {/* Button */}
                         <TouchableOpacity
                             style={{
-                                backgroundColor: '#2563EB',
+                                backgroundColor: '#0B57D0',
                                 borderRadius: 14,
                                 height: 52,
                                 justifyContent: 'center',
@@ -310,55 +278,49 @@ export default function VerificationCode() {
 
 const styles = StyleSheet.create({
     safeArea:  { flex: 1, backgroundColor: '#FFFFFF' },
-    container: { flex: 1, paddingHorizontal: 24 },
+    container: { flex: 1, paddingHorizontal: 28 },
 
     backButton: {
         width: 40, height: 40, justifyContent: 'center',
-        marginTop: Platform.OS === 'ios' ? 0 : 10, marginLeft: -4,
+        marginTop: Platform.OS === 'ios' ? 10 : 20, marginLeft: -8,
     },
-    backIcon: { fontSize: 36, color: '#1A202C', fontWeight: '300' },
+    backIcon: { fontSize: 36, color: '#1A202C', fontWeight: '400' },
 
-    iconContainer: { alignItems: 'center', marginTop: 10, marginBottom: 20 },
+    iconContainer: { alignItems: 'center', marginTop: 30, marginBottom: 24 },
     iconCircle: {
-        width: 72, height: 72, borderRadius: 36,
-        backgroundColor: '#EBF2FF',
+        width: 80, height: 80, borderRadius: 40,
+        backgroundColor: '#F5F8FF',
         justifyContent: 'center', alignItems: 'center',
     },
-    checkOverlay: {
-        width: 36, height: 36, borderRadius: 8,
-        backgroundColor: '#2563EB',
-        justifyContent: 'center', alignItems: 'center',
-    },
-    checkIcon: { color: '#FFFFFF', fontSize: 18, fontWeight: '700' },
 
-    title:    { fontSize: 26, fontWeight: '700', color: '#1A202C', textAlign: 'center', marginBottom: 12 },
-    subtitle: { fontSize: 14, color: '#718096', textAlign: 'center', lineHeight: 22, marginBottom: 32 },
+    title:    { fontSize: 24, fontWeight: '700', color: '#1A202C', textAlign: 'center', marginBottom: 12 },
+    subtitle: { fontSize: 15, color: '#718096', textAlign: 'center', lineHeight: 24, marginBottom: 36 },
     boldText: { fontWeight: '700', color: '#1A202C' },
 
-    codeContainer: { flexDirection: 'row', justifyContent: 'center', gap: 8, marginBottom: 24 },
+    codeContainer: { flexDirection: 'row', justifyContent: 'center', gap: 10, marginBottom: 32 },
     codeBox: {
-        width: 45, height: 52, borderRadius: 12,
-        borderWidth: 1.5, borderColor: '#E2E8F0',
-        backgroundColor: '#F7FAFC',
+        width: 48, height: 54, borderRadius: 8,
+        borderWidth: 1, borderColor: '#E2E8F0',
+        backgroundColor: '#FFFFFF',
         justifyContent: 'center', alignItems: 'center',
     },
-    codeBoxFilled: { borderColor: '#2563EB', backgroundColor: '#EBF2FF' },
-    codeInput:     { fontSize: 20, fontWeight: '600', color: '#1A202C', textAlign: 'center', width: '100%' },
+    codeBoxFilled: { borderColor: '#E2E8F0', backgroundColor: '#FFFFFF' },
+    codeInput:     { fontSize: 20, fontWeight: '500', color: '#1A202C', textAlign: 'center', width: '100%' },
 
-    didntReceive:   { fontSize: 14, color: '#718096', textAlign: 'center', marginBottom: 6 },
-    resendText:     { fontSize: 14, color: '#2563EB', fontWeight: '600', textAlign: 'center' },
+    didntReceive:   { fontSize: 14, color: '#718096', textAlign: 'center', marginBottom: 10 },
+    resendText:     { fontSize: 14, color: '#0B57D0', fontWeight: '700', textAlign: 'center' },
     resendDisabled: { opacity: 0.5 },
 
     spacer: { flex: 1 },
 
     verifyButton: {
-        backgroundColor: '#2563EB', borderRadius: 14,
+        backgroundColor: '#0B57D0', borderRadius: 12,
         height: 54, justifyContent: 'center', alignItems: 'center',
         marginBottom: 24,
     },
     verifyButtonDisabled: { backgroundColor: '#93C5FD' },
     verifyButtonText:     { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
 
-    officialBadge: { alignItems: 'center', marginBottom: 30 },
-    officialText:  { fontSize: 11, color: '#A0AEC0', fontWeight: '600', letterSpacing: 1.5 },
+    officialBadge: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', marginBottom: 36 },
+    officialText:  { fontSize: 11, color: '#A0AEC0', fontWeight: '600', letterSpacing: 1.2 },
 });

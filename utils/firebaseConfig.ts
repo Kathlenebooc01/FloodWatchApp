@@ -2,7 +2,7 @@
 // IMPORTANT: Replace 'YOUR_PROJECT_ID' below with your actual Firebase project ID
 // You can find this in Firebase Console → Project Settings → Project ID
 
-export const FIREBASE_PROJECT_ID = 'YOUR_PROJECT_ID';
+export const FIREBASE_PROJECT_ID = process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID || 'YOUR_PROJECT_ID';
 
 // ========================================
 // INSTRUCTIONS:

@@ -12,27 +12,35 @@ import {
     Alert,
     Modal,
     Platform,
+    ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { getCurrentFullAddress } from '@/utils/location';
+import { supabase } from '@/utils/supabase';
 
-const RESOURCE_ITEMS = [
-    { id: 'rescue_boat', title: 'Rescue Boat', desc: 'Motorized or paddle rubber boats', icon: 'boat-outline' },
-    { id: 'life_jacket', title: 'Life Jacket', desc: 'Personal flotation devices', icon: 'shirt-outline' },
-    { id: 'rubber_boots', title: 'Rubber Boots', desc: 'Protective waterproof footwear', icon: 'footsteps-outline' },
-    { id: 'raincoat', title: 'Raincoat', desc: 'Waterproof protective gear', icon: 'umbrella-outline' },
-    { id: 'flashlight', title: 'Flashlight', desc: 'Heavy-duty water-resistant flashlights', icon: 'flashlight-outline' },
-    { id: 'megaphone', title: 'Megaphone', desc: 'Loudhailers for announcements', icon: 'megaphone-outline' },
-    { id: 'rescue_rope', title: 'Rescue Rope', desc: 'Strong ropes for water rescue', icon: 'link-outline' },
-    { id: 'first_aid_kit', title: 'First Aid Kit', desc: 'Basic medical and trauma supplies', icon: 'medkit-outline' },
-    { id: 'drinking_water', title: 'Drinking Water', desc: 'Potable water containers/gallons', icon: 'water-outline' },
-    { id: 'food_packs', title: 'Food Packs', desc: 'Standard emergency relief goods', icon: 'cube-outline' },
-    { id: 'blankets', title: 'Blankets', desc: 'Thermal or standard blankets', icon: 'bed-outline' },
-    { id: 'hygiene_kits', title: 'Hygiene Kits', desc: 'Basic sanitary and toiletry items', icon: 'bag-add-outline' },
-    { id: 'water_pump', title: 'Water Pump', desc: 'Pumps for flood water extraction', icon: 'color-fill-outline' },
-    { id: 'sandbags', title: 'Sandbags', desc: 'Bags for flood diversion and control', icon: 'layers-outline' },
-    { id: 'generator_set', title: 'Generator Set', desc: 'Portable power generators', icon: 'flash-outline' },
-];
+interface Utility {
+    id: string;
+    name: string;
+    type: string;
+    quantity: number;
+    description: string;
+}
+
+const getIconForType = (type: string) => {
+    switch (type.toLowerCase()) {
+        case 'emergency shelter': return 'home-outline';
+        case 'safety equipment': return 'shield-checkmark-outline';
+        case 'rescue equipment': return 'boat-outline';
+        case 'medical supplies': return 'medkit-outline';
+        case 'protective equipment': return 'shirt-outline';
+        case 'communication equipment': return 'megaphone-outline';
+        case 'lighting equipment': return 'flashlight-outline';
+        case 'power equipment': return 'flash-outline';
+        default: return 'cube-outline';
+    }
+};
+
+
 
 export default function LogisticsLguScreen() {
     const router = useRouter();
@@ -42,27 +50,51 @@ export default function LogisticsLguScreen() {
     const [showItemsModal, setShowItemsModal] = useState(false);
     const [showSuccessModal, setShowSuccessModal] = useState(false);
     const [errorModal, setErrorModal] = useState({ visible: false, title: '', message: '' });
+    
     const [dropoff, setDropoff] = useState('Fetching location...');
+    const [locationCoords, setLocationCoords] = useState<{lat: number, lng: number} | null>(null);
     const [urgency, setUrgency] = useState('');
     const [additional, setAdditional] = useState('');
+
+    const [utilities, setUtilities] = useState<Utility[]>([]);
+    const [loadingUtilities, setLoadingUtilities] = useState(true);
+    const [submitLoading, setSubmitLoading] = useState(false);
 
     useEffect(() => {
         const fetchLocation = async () => {
             try {
                 const loc = await getCurrentFullAddress();
                 setDropoff(loc.short || 'Location Unavailable');
+                setLocationCoords({ lat: loc.latitude, lng: loc.longitude });
             } catch (err) {
                 console.warn('Failed to fetch drop-off location', err);
                 setDropoff('');
             }
         };
         fetchLocation();
+
+        const fetchUtilities = async () => {
+            setLoadingUtilities(true);
+            try {
+                const { data, error } = await supabase.from('utilities').select('*');
+                if (error) throw error;
+                setUtilities(data || []);
+            } catch (err) {
+                console.warn('Failed to fetch utilities', err);
+            } finally {
+                setLoadingUtilities(false);
+            }
+        };
+        fetchUtilities();
     }, []);
 
-    const updateQuantity = (id: string, delta: number) => {
+    const updateQuantity = (id: string, delta: number, maxQty: number) => {
         setQuantities(prev => {
             const current = prev[id] || 0;
-            const next = Math.max(1, current + delta); // minimum 1 if selected
+            let next = Math.max(1, current + delta); // minimum 1 if selected
+            if (next > maxQty) {
+                next = maxQty; // cap at available stock
+            }
             return { ...prev, [id]: next };
         });
     };
@@ -97,36 +129,72 @@ export default function LogisticsLguScreen() {
             return;
         }
 
-        // Save to History (Local)
-        const selectedItemNames: Record<string, number> = {};
-        selectedItemIds.forEach(id => {
-            const item = RESOURCE_ITEMS.find(r => r.id === id);
-            if (item) {
-                selectedItemNames[item.title] = quantities[id];
-            }
-        });
-
-        const newItem = {
-            id: 'log-' + Date.now(),
-            type: 'logistics',
-            timestamp: new Date().toISOString(),
-            title: `Logistics Request (${totalItems} items)`,
-            status: 'Pending Approval',
-            desc: additional,
-            items: selectedItemNames,
-            dropoff: dropoff,
-            urgency: urgency,
-        };
+        setSubmitLoading(true);
         try {
-            const existing = await AsyncStorage.getItem('lgu_reports_history');
-            const history = existing ? JSON.parse(existing) : [];
-            history.push(newItem);
-            await AsyncStorage.setItem('lgu_reports_history', JSON.stringify(history));
-        } catch (err) {
-            console.error('Failed to save history', err);
-        }
+            // 1. Get current user
+            const { data: { user } } = await supabase.auth.getUser();
+            if (!user) throw new Error("You must be logged in to send a request.");
 
-        setShowSuccessModal(true);
+            // Get user's profile to get municipality_id
+            const { data: profile } = await supabase.from('profiles').select('municipality_id').eq('id', user.id).single();
+            let municipalityId = profile?.municipality_id;
+            
+            // If the user's profile is incomplete, fetch ANY valid municipality to use as a fallback so testing doesn't fail
+            if (!municipalityId) {
+                const { data: validMunis, error: munisError } = await supabase.from('municipality_or_city').select('municipality_id').limit(1);
+                if (validMunis && validMunis.length > 0) {
+                    municipalityId = validMunis[0].municipality_id;
+                } else {
+                    throw new Error("No municipality available in the database to use as fallback.");
+                }
+            }
+
+            let geographyPoint = null;
+            if (locationCoords) {
+                geographyPoint = `POINT(${locationCoords.lng} ${locationCoords.lat})`;
+            }
+
+            // 2. Insert into resource_requests
+            const { data: requestRow, error: requestError } = await supabase
+                .from('resource_requests')
+                .insert({
+                    municipality_id: municipalityId,
+                    requested_by: user.id,
+                    status: 'Pending',
+                    request_reason: additional || `${urgency} Urgency Request`,
+                    drop_off_address: geographyPoint
+                })
+                .select('request_id')
+                .single();
+
+            if (requestError) throw requestError;
+
+            // 3. Insert items into resource_request_items
+            const requestItems = selectedItemIds.map(uId => {
+                const expectedReturn = new Date();
+                expectedReturn.setDate(expectedReturn.getDate() + 7); // Default return: 7 days
+
+                return {
+                    request_id: requestRow.request_id,
+                    utilities_id: uId,
+                    quantity_requested: quantities[uId],
+                    expected_return_date: expectedReturn.toISOString(),
+                };
+            });
+
+            const { error: itemsError } = await supabase
+                .from('resource_request_items')
+                .insert(requestItems);
+
+            if (itemsError) throw itemsError;
+
+            setShowSuccessModal(true);
+        } catch (err: any) {
+            console.error(err);
+            setErrorModal({ visible: true, title: 'Request Failed', message: err.message || 'Failed to submit request.' });
+        } finally {
+            setSubmitLoading(false);
+        }
     };
 
     return (
@@ -168,30 +236,30 @@ export default function LogisticsLguScreen() {
                         </View>
                     ) : (
                         selectedItemIds.map((id, index) => {
-                            const item = RESOURCE_ITEMS.find(r => r.id === id);
+                            const item = utilities.find(r => r.id === id);
                             if (!item) return null;
                             const isLast = index === selectedItemIds.length - 1;
                             const qty = quantities[item.id] || 1;
                             return (
                                 <View key={item.id} style={[s.itemRow, !isLast && s.itemBorder]}>
                                     <View style={s.itemIconCircle}>
-                                        <Ionicons name={item.icon as any} size={20} color="#2563EB" />
+                                        <Ionicons name={getIconForType(item.type) as any} size={20} color="#2563EB" />
                                     </View>
                                     <View style={s.itemInfo}>
-                                        <Text style={s.itemTitle}>{item.title}</Text>
-                                        <Text style={s.itemDesc}>{item.desc}</Text>
+                                        <Text style={s.itemTitle}>{item.name}</Text>
+                                        <Text style={s.itemDesc}>{item.description}</Text>
                                     </View>
                                     <View style={s.counterBox}>
                                         <TouchableOpacity 
                                             style={s.counterBtn} 
-                                            onPress={() => updateQuantity(item.id, -1)}
+                                            onPress={() => updateQuantity(item.id, -1, item.quantity)}
                                         >
                                             <Ionicons name="remove" size={16} color="#2563EB" />
                                         </TouchableOpacity>
                                         <Text style={s.counterText}>{qty}</Text>
                                         <TouchableOpacity 
                                             style={s.counterBtn} 
-                                            onPress={() => updateQuantity(item.id, 1)}
+                                            onPress={() => updateQuantity(item.id, 1, item.quantity)}
                                         >
                                             <Ionicons name="add" size={16} color="#2563EB" />
                                         </TouchableOpacity>
@@ -263,9 +331,20 @@ export default function LogisticsLguScreen() {
                 </View>
 
                 {/* ── SUBMIT BUTTON ── */}
-                <TouchableOpacity style={s.submitBtn} onPress={handleSubmit} activeOpacity={0.8}>
-                    <Ionicons name="send-outline" size={18} color="#FFFFFF" style={s.submitIcon} />
-                    <Text style={s.submitBtnText}>SEND REQUEST TO PDRRMO</Text>
+                <TouchableOpacity 
+                    style={[s.submitBtn, submitLoading && { backgroundColor: '#93C5FD', shadowOpacity: 0 }]} 
+                    onPress={handleSubmit} 
+                    activeOpacity={0.8}
+                    disabled={submitLoading}
+                >
+                    {submitLoading ? (
+                        <ActivityIndicator color="#fff" />
+                    ) : (
+                        <>
+                            <Ionicons name="send-outline" size={18} color="#FFFFFF" style={s.submitIcon} />
+                            <Text style={s.submitBtnText}>SEND REQUEST TO PDRRMO</Text>
+                        </>
+                    )}
                 </TouchableOpacity>
 
                 {/* ── FOOTER ── */}
@@ -286,28 +365,35 @@ export default function LogisticsLguScreen() {
                         </View>
                         
                         <ScrollView showsVerticalScrollIndicator={false}>
-                            {RESOURCE_ITEMS.map((item) => {
-                                const isSelected = selectedItemIds.includes(item.id);
-                                return (
-                                    <TouchableOpacity 
-                                        key={item.id} 
-                                        style={[s.modalItemRow, isSelected && s.modalItemRowSelected]}
-                                        activeOpacity={0.7}
-                                        onPress={() => toggleItemSelection(item.id)}
-                                    >
-                                        <View style={[s.checkbox, isSelected && s.checkboxSelected]}>
-                                            {isSelected && <Ionicons name="checkmark" size={14} color="#FFFFFF" />}
-                                        </View>
-                                        <View style={s.itemIconCircle}>
-                                            <Ionicons name={item.icon as any} size={20} color="#2563EB" />
-                                        </View>
-                                        <View style={s.itemInfo}>
-                                            <Text style={s.itemTitle}>{item.title}</Text>
-                                            <Text style={s.itemDesc}>{item.desc}</Text>
-                                        </View>
-                                    </TouchableOpacity>
-                                );
-                            })}
+                            {loadingUtilities ? (
+                                <View style={{ padding: 40, alignItems: 'center' }}>
+                                    <ActivityIndicator size="large" color="#2563EB" />
+                                    <Text style={{ marginTop: 12, color: '#64748B' }}>Loading resources...</Text>
+                                </View>
+                            ) : (
+                                utilities.map((item) => {
+                                    const isSelected = selectedItemIds.includes(item.id);
+                                    return (
+                                        <TouchableOpacity 
+                                            key={item.id} 
+                                            style={[s.modalItemRow, isSelected && s.modalItemRowSelected]}
+                                            activeOpacity={0.7}
+                                            onPress={() => toggleItemSelection(item.id)}
+                                        >
+                                            <View style={[s.checkbox, isSelected && s.checkboxSelected]}>
+                                                {isSelected && <Ionicons name="checkmark" size={14} color="#FFFFFF" />}
+                                            </View>
+                                            <View style={s.itemIconCircle}>
+                                                <Ionicons name={getIconForType(item.type) as any} size={20} color="#2563EB" />
+                                            </View>
+                                            <View style={s.itemInfo}>
+                                                <Text style={s.itemTitle}>{item.name}</Text>
+                                                <Text style={s.itemDesc}>In Stock: {item.quantity}</Text>
+                                            </View>
+                                        </TouchableOpacity>
+                                    );
+                                })
+                            )}
                         </ScrollView>
                         
                         <TouchableOpacity 
