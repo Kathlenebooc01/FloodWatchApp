@@ -1,22 +1,10 @@
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { supabase } from '@/utils/supabase';
-import {
-    ActivityIndicator,
-    Alert,
-    KeyboardAvoidingView,
-    Modal,
-    Platform,
-    SafeAreaView,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
-} from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, TextInput, Image, ActivityIndicator, KeyboardAvoidingView, Platform, Alert, Modal, Animated, Dimensions, StatusBar, Switch, FlatList, RefreshControl, Linking } from 'react-native';
 
 export default function LguLoginScreen() {
     const router = useRouter();
@@ -58,9 +46,11 @@ export default function LguLoginScreen() {
                 console.error("Profile check error:", profileError);
             }
 
-            // Since only LGUs use email/password (citizens use phone OTP), 
-            // anyone who successfully authenticates here is an LGU.
-            // If they don't have a profile or their role isn't lgu, let's fix it safely.
+            if (profile?.role?.toLowerCase() === 'citizen') {
+                await supabase.auth.signOut();
+                throw new Error('Invalid LGU credentials. Please try again.');
+            }
+
             if (!profile) {
                 // Profile doesn't exist at all, create it with all required fields
                 const { error: insertError } = await supabase.from('profiles').insert({
@@ -74,16 +64,6 @@ export default function LguLoginScreen() {
                 if (insertError) {
                     console.error("Failed to insert LGU profile:", insertError);
                 }
-            } else if (profile.role?.toLowerCase() !== 'lgu_headmaster' && profile.role?.toLowerCase() !== 'admin') {
-                // Profile exists but role is not correct, update just the role
-                const { error: updateError } = await supabase
-                    .from('profiles')
-                    .update({ role: 'lgu_headmaster' })
-                    .eq('id', authData.session.user.id);
-                    
-                if (updateError) {
-                    console.error("Failed to update LGU role:", updateError);
-                }
             }
 
             // Success, save session type locally just in case
@@ -93,7 +73,11 @@ export default function LguLoginScreen() {
             // Proceed to dashboard
             router.replace('/dashboard' as any);
         } catch (err: any) {
-            setErrorMessage(err.message || 'Sign-in failed.');
+            let msg = err.message;
+            if (msg.includes('Invalid login credentials') || msg.includes('Invalid LGU credentials')) {
+                msg = 'Invalid LGU credentials. Please try again.';
+            }
+            setErrorMessage(msg || 'Sign-in failed.');
             setErrorModalVisible(true);
         } finally {
             setLoading(false);

@@ -159,7 +159,7 @@ Deno.serve(async (req) => {
     const cleanBase64 = base64Data.replace(/^data:image\/[a-zA-Z0-9.+]+;base64,/, '').trim();
 
     // 4. Send to Gemini AI for identification and confidence analysis
-    const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.5-flash-lite'];
+    const models = ['gemini-3.6-flash'];
     let result: any = null;
 
     for (const model of models) {

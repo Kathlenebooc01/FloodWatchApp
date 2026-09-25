@@ -1,6 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { CameraView, FlashMode, useCameraPermissions } from 'expo-camera';
 import { useRouter } from 'expo-router';
+import * as FileSystem from 'expo-file-system/legacy';
 import React, { useEffect, useRef, useState } from 'react';
 import {
     ActivityIndicator,
@@ -130,22 +131,24 @@ export default function QuickSnapScreen() {
             try {
                 const fileName = `quicksnap_${userId}_${Date.now()}.jpg`;
                 const SUPABASE_URL = 'https://xncciaozzxoqbesfxpww.supabase.co';
-                const imgResp = await fetch(capturedImage);
-                const blob = await imgResp.blob();
-                const uploadResp = await fetch(
-                    `${SUPABASE_URL}/storage/v1/object/incident-reports/${fileName}`,
-                    {
-                        method: 'POST',
-                        headers: {
-                            'Authorization': `Bearer ${token}`,
-                            'Content-Type': 'image/jpeg',
-                            'x-upsert': 'true',
-                        },
-                        body: blob,
-                    }
-                );
-                if (uploadResp.ok) {
+                const ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhuY2NpYW96enhvcWJlc2Z4cHd3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIzNDgyMzQsImV4cCI6MjA4NzkyNDIzNH0.im6QTwjVyryj4y0fvcloH4qw-Rj5PPftDYhk4sKtymI';
+
+                const uploadUrl = `${SUPABASE_URL}/storage/v1/object/incident-reports/${fileName}`;
+                const uploadResult = await FileSystem.uploadAsync(uploadUrl, capturedImage, {
+                    httpMethod: 'POST',
+                    uploadType: (FileSystem as any).FileSystemUploadType?.BINARY_CONTENT ?? 0,
+                    headers: {
+                        'Authorization': `Bearer ${token || ANON_KEY}`,
+                        'apikey': ANON_KEY,
+                        'Content-Type': 'image/jpeg',
+                        'x-upsert': 'true',
+                    },
+                });
+
+                if (uploadResult.status === 200 || uploadResult.status === 201) {
                     imageUrl = `${SUPABASE_URL}/storage/v1/object/public/incident-reports/${fileName}`;
+                } else {
+                    console.warn('Upload failed with status:', uploadResult.status, uploadResult.body);
                 }
             } catch (e) {
                 console.warn('⚠️ Upload failed:', e);

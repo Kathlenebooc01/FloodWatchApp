@@ -44,6 +44,18 @@ export interface HistoryItem {
     documentName?: string;
 }
 
+const formatStatusUI = (status: string) => {
+    if (!status) return 'Unknown';
+    const s = status.toLowerCase();
+    if (s.includes('pending')) return 'Pending';
+    if (s === 'ready_for_lgu') return 'Ready for LGU';
+    if (s === 'in_progress') return 'In Progress';
+    if (s === 'verified') return 'Verified';
+    if (s === 'resolved') return 'Resolved';
+    if (s === 'rejected') return 'Rejected';
+    return status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+};
+
 export default function LguHistoryScreen() {
     const router = useRouter();
     const params = useLocalSearchParams();
@@ -53,6 +65,7 @@ export default function LguHistoryScreen() {
     const [selectedItem, setSelectedItem] = useState<HistoryItem | null>(null);
     const [allocations, setAllocations] = useState<Allocation[]>([]);
     const [loadingAlloc, setLoadingAlloc] = useState(false);
+    const [deleteCandidate, setDeleteCandidate] = useState<HistoryItem | null>(null);
 
     useEffect(() => {
         const fetchHistory = async () => {
@@ -165,9 +178,30 @@ export default function LguHistoryScreen() {
         }
     };
 
-    const clearHistory = async () => {
-        await AsyncStorage.removeItem('lgu_reports_history');
-        setHistory([]);
+    const handleDeleteConfirm = async () => {
+        if (!deleteCandidate) return;
+        
+        if (deleteCandidate.type === 'situational') {
+            const data = await AsyncStorage.getItem('lgu_reports_history');
+            let localHistory = data ? JSON.parse(data) : [];
+            localHistory = localHistory.filter((i: any) => i.id !== deleteCandidate.id);
+            await AsyncStorage.setItem('lgu_reports_history', JSON.stringify(localHistory));
+            
+            setHistory(prev => prev.filter(i => i.id !== deleteCandidate.id));
+        } else if (deleteCandidate.type === 'logistics') {
+            const { error } = await supabase
+                .from('resource_requests')
+                .delete()
+                .eq('request_id', deleteCandidate.id);
+            
+            if (!error) {
+                setHistory(prev => prev.filter(i => i.id !== deleteCandidate.id));
+            } else {
+                alert("Failed to delete request.");
+            }
+        }
+        
+        setDeleteCandidate(null);
     };
 
     const formatDate = (isoString: string) => {
@@ -200,7 +234,6 @@ export default function LguHistoryScreen() {
 
     return (
         <SafeAreaView style={s.safe}>
-            {/* ── HEADER ── */}
             <View style={s.headerNav}>
                 <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                     <Ionicons name="chevron-back" size={24} color="#2563EB" />
@@ -209,9 +242,7 @@ export default function LguHistoryScreen() {
                     <Text style={s.navSubtitle}>LGU COMMAND</Text>
                     <Text style={s.navTitle}>Submission History</Text>
                 </View>
-                <TouchableOpacity onPress={clearHistory} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-                    <Ionicons name="trash-outline" size={20} color="#EF4444" />
-                </TouchableOpacity>
+                <View style={{ width: 20 }} />
             </View>
 
             <ScrollView contentContainerStyle={s.scroll} showsVerticalScrollIndicator={false}>
@@ -229,6 +260,8 @@ export default function LguHistoryScreen() {
                             style={s.historyCard}
                             activeOpacity={0.7}
                             onPress={() => handleSelect(item)}
+                            onLongPress={() => setDeleteCandidate(item)}
+                            delayLongPress={500}
                         >
                             <View style={[s.iconCircle, item.type === 'situational' ? s.iconCircleBlue : s.iconCirclePurple]}>
                                 <Ionicons 
@@ -242,7 +275,7 @@ export default function LguHistoryScreen() {
                                 <Text style={s.cardSubtitle}>{formatDate(item.timestamp)}</Text>
                             </View>
                             <View style={s.badge}>
-                                <Text style={s.badgeText}>{item.status}</Text>
+                                <Text style={s.badgeText}>{formatStatusUI(item.status)}</Text>
                             </View>
                         </TouchableOpacity>
                     ))
@@ -285,7 +318,7 @@ export default function LguHistoryScreen() {
 
                                 <View style={s.detailRow}>
                                     <Text style={s.detailLabel}>Status</Text>
-                                    <Text style={s.detailValue}>{selectedItem.status}</Text>
+                                    <Text style={s.detailValue}>{formatStatusUI(selectedItem.status)}</Text>
                                 </View>
 
                                 {selectedItem.type === 'logistics' && (
@@ -356,14 +389,14 @@ export default function LguHistoryScreen() {
                                             )}
                                         </View>
 
-                                        {selectedItem.urgency && (
+                                        {!!selectedItem.urgency && (
                                             <View style={s.detailRow}>
                                                 <Text style={s.detailLabel}>Urgency</Text>
                                                 <Text style={s.detailValue}>{selectedItem.urgency}</Text>
                                             </View>
                                         )}
 
-                                        {selectedItem.dropoff && (
+                                        {!!selectedItem.dropoff && (
                                             <View style={s.detailRow}>
                                                 <Text style={s.detailLabel}>Drop-off Point</Text>
                                                 <Text style={s.detailValue}>{selectedItem.dropoff}</Text>
@@ -372,7 +405,7 @@ export default function LguHistoryScreen() {
                                     </>
                                 )}
 
-                                {selectedItem.type === 'situational' && selectedItem.documentName && (
+                                {selectedItem.type === 'situational' && !!selectedItem.documentName && (
                                     <View style={s.detailRow}>
                                         <Text style={s.detailLabel}>Attached Document</Text>
                                         <Text style={s.detailValue}>{selectedItem.documentName}</Text>
@@ -386,7 +419,7 @@ export default function LguHistoryScreen() {
                                     </View>
                                 ) : null}
 
-                                {selectedItem.type === 'logistics' && selectedItem.items && (
+                                {selectedItem.type === 'logistics' && !!selectedItem.items && (
                                     <View style={[s.detailRow, { flexDirection: 'column', alignItems: 'flex-start', borderBottomWidth: 0 }]}>
                                         <Text style={[s.detailLabel, { marginBottom: 12 }]}>Requested Items</Text>
                                         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
@@ -410,6 +443,42 @@ export default function LguHistoryScreen() {
                         </View>
                     </View>
                 )}
+            </Modal>
+
+            {/* ── DELETE CONFIRMATION MODAL ── */}
+            <Modal
+                visible={!!deleteCandidate}
+                transparent
+                animationType="fade"
+                onRequestClose={() => setDeleteCandidate(null)}
+            >
+                <View style={s.modalOverlayCenter}>
+                    <View style={[s.modalContainerCenter, { padding: 24, maxWidth: '85%' }]}>
+                        <View style={[s.iconCircle, { backgroundColor: '#FEE2E2', alignSelf: 'center', width: 56, height: 56, borderRadius: 28, marginBottom: 16 }]}>
+                            <Ionicons name="trash" size={28} color="#EF4444" />
+                        </View>
+                        <Text style={[s.modalTitle, { textAlign: 'center' }]}>Delete Item?</Text>
+                        <Text style={[s.modalSubtitle, { textAlign: 'center', marginBottom: 24, fontSize: 14 }]}>
+                            Are you sure you want to delete this record? This action cannot be undone.
+                        </Text>
+                        <View style={{ flexDirection: 'row', gap: 12 }}>
+                            <TouchableOpacity
+                                style={[s.modalBtnCenter, { flex: 1, backgroundColor: '#F1F5F9' }]}
+                                onPress={() => setDeleteCandidate(null)}
+                                activeOpacity={0.8}
+                            >
+                                <Text style={s.modalBtnTextCenter}>Cancel</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                                style={[s.modalBtnCenter, { flex: 1, backgroundColor: '#EF4444' }]}
+                                onPress={handleDeleteConfirm}
+                                activeOpacity={0.8}
+                            >
+                                <Text style={[s.modalBtnTextCenter, { color: '#FFFFFF' }]}>Delete</Text>
+                            </TouchableOpacity>
+                        </View>
+                    </View>
+                </View>
             </Modal>
         </SafeAreaView>
     );

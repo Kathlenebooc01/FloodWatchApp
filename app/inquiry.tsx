@@ -1,5 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system/legacy';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
@@ -87,7 +88,7 @@ export default function GeneralInquiryScreen() {
             return;
         }
         const result = await ImagePicker.launchImageLibraryAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+            mediaTypes: ['images'],
             allowsMultipleSelection: true,
             quality: 0.2, // Ensures file size is in KB
         });
@@ -98,22 +99,25 @@ export default function GeneralInquiryScreen() {
     const uploadAttachment = async (uri: string, userId: string, token: string): Promise<string | null> => {
         try {
             const fileName = `inquiry_${userId}_${Date.now()}.jpg`;
-            const blob = await (await fetch(uri)).blob();
-            const uploadResp = await fetch(
-                `${SUPABASE_URL}/storage/v1/object/incident-reports/${fileName}`,
-                {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${token}`,
-                        'Content-Type': 'image/jpeg',
-                        'x-upsert': 'true',
-                    },
-                    body: blob,
-                }
-            );
-            return uploadResp.ok
-                ? `${SUPABASE_URL}/storage/v1/object/public/incident-reports/${fileName}`
-                : null;
+            const SUPABASE_URL = 'https://xncciaozzxoqbesfxpww.supabase.co';
+            const ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhuY2NpYW96enhvcWJlc2Z4cHd3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIzNDgyMzQsImV4cCI6MjA4NzkyNDIzNH0.im6QTwjVyryj4y0fvcloH4qw-Rj5PPftDYhk4sKtymI';
+
+            const uploadUrl = `${SUPABASE_URL}/storage/v1/object/incident-reports/${fileName}`;
+            const uploadResult = await FileSystem.uploadAsync(uploadUrl, uri, {
+                httpMethod: 'POST',
+                uploadType: (FileSystem as any).FileSystemUploadType?.BINARY_CONTENT ?? 0,
+                headers: {
+                    'Authorization': `Bearer ${token || ANON_KEY}`,
+                    'apikey': ANON_KEY,
+                    'Content-Type': 'image/jpeg',
+                    'x-upsert': 'true',
+                },
+            });
+
+            if (uploadResult.status === 200 || uploadResult.status === 201) {
+                return `${SUPABASE_URL}/storage/v1/object/public/incident-reports/${fileName}`;
+            }
+            return null;
         } catch (e) {
             return null;
         }

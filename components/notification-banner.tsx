@@ -88,6 +88,7 @@ export default function NotificationBanner() {
     const hideTimer  = useRef<ReturnType<typeof setTimeout> | null>(null);
     const shownIds   = useRef<Set<string>>(new Set());
     const userId     = useRef<string | null>(null);
+    const targetRole = useRef<string>('user');
 
     const hideBanner = useCallback(() => {
         if (hideTimer.current) clearTimeout(hideTimer.current);
@@ -125,7 +126,7 @@ export default function NotificationBanner() {
                 .from('notifications')
                 .select('id, title, message, type, target_role')
                 .eq('user_id', userId.current)
-                .eq('target_role', 'user')
+                .eq('target_role', targetRole.current)
                 .gte('created_at', since)
                 .order('created_at', { ascending: false })
                 .limit(1);
@@ -240,6 +241,11 @@ export default function NotificationBanner() {
             userId.current = uid;
 
             const { data: profile } = await supabase.from('profiles').select('role').eq('id', uid).single();
+            if (profile?.role === 'lgu_headmaster' || profile?.role === 'admin') {
+                targetRole.current = 'lgu';
+            } else {
+                targetRole.current = 'user';
+            }
 
             channel = supabase
                 .channel(`notif-banner-${uid}`)
@@ -248,7 +254,7 @@ export default function NotificationBanner() {
                     table: 'notifications', filter: `user_id=eq.${uid}`,
                 }, (payload: any) => {
                     const row = payload.new;
-                    if (row.target_role && row.target_role !== 'user') return;
+                    if (row.target_role && row.target_role !== targetRole.current) return;
                     showBanner({ id: row.id, title: row.title || 'New Notification', message: row.message || '', type: row.type || 'Updates' });
                 })
                 .subscribe();

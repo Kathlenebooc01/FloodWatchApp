@@ -1,21 +1,10 @@
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { supabase } from '@/utils/supabase';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
-import {
-    ActivityIndicator,
-    Animated,
-    Dimensions,
-    Modal,
-    SafeAreaView,
-    ScrollView,
-    StatusBar,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
-} from 'react-native';
+import { Animated, Dimensions, StatusBar, View, TouchableOpacity, Text, ScrollView, Modal, ActivityIndicator, StyleSheet } from 'react-native';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -119,12 +108,20 @@ export default function NotificationsScreen() {
             const { data: sessionData } = await supabase.auth.getSession();
             const userId = sessionData?.session?.user?.id;
 
+            let targetRole = 'user';
+            if (userId) {
+                const { data: profile } = await supabase.from('profiles').select('role').eq('id', userId).maybeSingle();
+                if (profile?.role === 'lgu_headmaster' || profile?.role === 'admin') {
+                    targetRole = 'lgu';
+                }
+            }
+
             // Only fetch notifications targeted to 'user' role
             // Plus user's own notifications (user_id matches)
             const { data, error } = await supabase
                 .from('notifications')
                 .select('*')
-                .eq('target_role', 'user')
+                .eq('target_role', targetRole)
                 .or(userId ? `user_id.is.null,user_id.eq.${userId}` : 'user_id.is.null')
                 .order('created_at', { ascending: false });
 

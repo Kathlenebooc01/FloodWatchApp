@@ -1,22 +1,9 @@
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
 import React, { useState } from 'react';
-import {
-    ActivityIndicator,
-    Alert,
-    Image,
-    KeyboardAvoidingView,
-    Modal,
-    Platform,
-    SafeAreaView,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
-} from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, TextInput, Image, ActivityIndicator, KeyboardAvoidingView, Platform, Alert, Modal, Animated, Dimensions, StatusBar, Switch, FlatList, RefreshControl, Linking } from 'react-native';
 
 import { supabase } from '@/utils/supabase';
 
@@ -65,6 +52,17 @@ export default function LoginScreen() {
                 }
                 throw error;
             }
+
+            const { data: profile } = await supabase
+                .from('profiles')
+                .select('role')
+                .eq('id', data.session.user.id)
+                .maybeSingle();
+
+            if (profile?.role && profile.role.toLowerCase() !== 'citizen') {
+                await supabase.auth.signOut();
+                throw new Error('Incorrect email or password. Please try again.');
+            }
             
             await AsyncStorage.setItem('user_profile', JSON.stringify({
                 email: email.trim()
@@ -72,7 +70,11 @@ export default function LoginScreen() {
 
             router.replace('/dashboard' as any);
         } catch (err: any) {
-            setErrorMessage(err.message || 'Incorrect email or password. Please try again.');
+            let msg = err.message;
+            if (msg.includes('Invalid login credentials') || msg.includes('Incorrect email or password')) {
+                msg = 'Incorrect email or password. Please try again.';
+            }
+            setErrorMessage(msg || 'Incorrect email or password. Please try again.');
             setErrorModalVisible(true);
         } finally {
             setLoading(false);

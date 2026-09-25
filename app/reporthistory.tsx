@@ -1,19 +1,8 @@
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
-import {
-    ActivityIndicator,
-    FlatList,
-    Image,
-    Platform,
-    RefreshControl,
-    SafeAreaView,
-    StatusBar,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View
-} from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, TextInput, Image, ActivityIndicator, KeyboardAvoidingView, Platform, Alert, Modal, Animated, Dimensions, StatusBar, Switch, FlatList, RefreshControl, Linking } from 'react-native';
 
 import { supabase } from '@/utils/supabase';
 
@@ -30,15 +19,15 @@ interface Report {
 function getStatusStyle(status: string) {
     switch (status?.toLowerCase()) {
         case 'verified':
-            return { bg: '#DBEAFE', text: '#2563EB', label: 'VERIFIED' };
+            return { bg: '#DBEAFE', text: '#2563EB', label: 'Verified' };
         case 'resolved':
         case 'ready_for_lgu':
-            return { bg: '#D1FAE5', text: '#059669', label: status === 'ready_for_lgu' ? 'READY FOR LGU' : 'RESOLVED' };
+            return { bg: '#D1FAE5', text: '#059669', label: status === 'ready_for_lgu' ? 'Ready for LGU' : 'Resolved' };
         case 'pending_ai':
         case 'pending':
-            return { bg: '#FEF3C7', text: '#D97706', label: 'PENDING' };
+            return { bg: '#FEF3C7', text: '#D97706', label: 'Pending' };
         case 'rejected':
-            return { bg: '#FED7AA', text: '#EA580C', label: 'REJECTED' }; // Orange instead of red
+            return { bg: '#FED7AA', text: '#EA580C', label: 'Rejected' }; // Orange instead of red
         default:
             return { bg: '#F1F5F9', text: '#64748B', label: status?.toUpperCase() || 'UNKNOWN' };
     }
