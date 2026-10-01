@@ -127,6 +127,8 @@ export default function IncidentLguScreen() {
                 const { data, error } = await supabase
                     .from('incident_report')
                     .select('*')
+                    .neq('report_type', 'situational_report') // exclude old ones
+                    .not('hazard_type', 'like', '[SITUATIONAL]%') // exclude new bypassed ones
                     .order('created_at', { ascending: false });
                 
                 if (error) throw error;
@@ -206,6 +208,17 @@ export default function IncidentLguScreen() {
             }
         };
         fetchIncidents();
+
+        const channel = supabase.channel(`lgu-incident-reports-${Date.now()}`)
+            .on('postgres_changes' as any, { event: '*', schema: 'public', table: 'incident_report' }, () => {
+                console.log('⚡ Realtime update: incident_report');
+                fetchIncidents();
+            })
+            .subscribe();
+
+        return () => {
+            supabase.removeChannel(channel);
+        };
     }, []);
 
     const quickCount = incidents.filter(i => i.reportType === 'quick_snap' && i.status?.toLowerCase() !== 'verified').length;

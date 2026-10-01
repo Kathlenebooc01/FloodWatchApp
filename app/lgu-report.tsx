@@ -2,19 +2,27 @@ import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
+    ActivityIndicator,
+    Alert,
+    Modal,
     ScrollView,
     StyleSheet,
     Text,
     TouchableOpacity,
     View,
-    ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getCurrentFullAddress } from '@/utils/location';
+import { supabase } from '@/utils/supabase';
 
 export default function LguReportScreen() {
     const router = useRouter();
     const [currentSector, setCurrentSector] = useState<string>('Loading...');
+    const [userRole, setUserRole] = useState<string>('lgu_headmaster');
+    const [showConfirmModal, setShowConfirmModal] = useState<boolean>(false);
+    const [showWaitingModal, setShowWaitingModal] = useState<boolean>(false);
+    const [isSubmittingEscalation, setIsSubmittingEscalation] = useState<boolean>(false);
 
     useEffect(() => {
         const fetchLocation = async () => {
@@ -26,8 +34,87 @@ export default function LguReportScreen() {
                 setCurrentSector('Sector Unassigned');
             }
         };
+        const fetchRole = async () => {
+            try {
+                const { data: { user } } = await supabase.auth.getUser();
+                if (user) {
+                    const { data: profile } = await supabase
+                        .from('profiles')
+                        .select('role')
+                        .eq('id', user.id)
+                        .maybeSingle();
+                    if (profile?.role) setUserRole(profile.role.toLowerCase());
+                }
+            } catch {}
+        };
         fetchLocation();
+        fetchRole();
     }, []);
+
+    const handleEscalateConfirm = async () => {
+        setIsSubmittingEscalation(true);
+        try {
+            const { data: { user } } = await supabase.auth.getUser();
+
+            let municipalityId = null;
+            if (user) {
+                const { data: profile } = await supabase
+                    .from('profiles')
+                    .select('municipality_id')
+                    .eq('id', user.id)
+                    .maybeSingle();
+                if (profile?.municipality_id) municipalityId = profile.municipality_id;
+            }
+
+            const { data: insertedReport, error } = await supabase
+                .from('incident_report')
+                .insert({
+                    user_id: user?.id || null,
+                    report_type: 'moderate_report',
+                    hazard_type: 'Support escalation',
+                    description: `Regional Support Escalation requested by LGU Officer for ${currentSector}. Local emergency operational capacity exceeded; requesting direct provincial assistance and response coordination from PDRRMO.`,
+                    status: 'Pending_AI',
+                    municipality_id: municipalityId,
+                    created_at: new Date().toISOString(),
+                })
+                .select()
+                .single();
+
+            if (error) {
+                console.error('Failed to submit escalation:', error);
+                Alert.alert('Escalation Request Failed', error.message || 'Could not connect to PDRRMO server.');
+                setIsSubmittingEscalation(false);
+                return;
+            }
+
+            // Save to local cache in AsyncStorage
+            try {
+                const newItem = {
+                    id: insertedReport?.report_id ? String(insertedReport.report_id) : 'esc-' + Date.now(),
+                    type: 'escalation',
+                    timestamp: new Date().toISOString(),
+                    title: 'Support escalation',
+                    status: 'Pending',
+                    desc: `Regional Support Escalation requested for ${currentSector}. Local capacity exceeded; awaiting Provincial Admin confirmation.`,
+                };
+                const existing = await AsyncStorage.getItem('lgu_reports_history');
+                const historyList = existing ? JSON.parse(existing) : [];
+                historyList.unshift(newItem);
+                await AsyncStorage.setItem('lgu_reports_history', JSON.stringify(historyList));
+            } catch (storageErr) {
+                console.warn('AsyncStorage cache error:', storageErr);
+            }
+
+            // Close confirmation modal and open waiting modal
+            setShowConfirmModal(false);
+            setShowWaitingModal(true);
+        } catch (err: any) {
+            console.error('Escalation error:', err);
+            Alert.alert('Error', err?.message || 'An unexpected error occurred.');
+        } finally {
+            setIsSubmittingEscalation(false);
+        }
+    };
 
     return (
         <SafeAreaView style={s.safe}>
@@ -111,13 +198,24 @@ export default function LguReportScreen() {
                     </View>
                     <View style={s.optionTextContainer}>
                         <Text style={s.optionTitle}>Incident Report</Text>
-                        <Text style={s.optionDesc}>Manage incoming emergency signals.</Text>
-                    </View>
-                    <View style={[s.badge, { backgroundColor: '#FEE2E2', marginRight: 8 }]}>
-                        <Text style={[s.badgeText, { color: '#EF4444' }]}>2 NEW</Text>
+                        <Text style={s.optionDesc}>Manage incoming citizen emergency signals.</Text>
                     </View>
                     <Ionicons name="chevron-forward" size={20} color="#CBD5E1" />
                 </TouchableOpacity>
+
+                {/* ── ADMIN ONLY: LGU Situational Reports Review ── */}
+                {userRole === 'admin' && (
+                    <TouchableOpacity style={[s.optionCard, { borderWidth: 1.5, borderColor: '#6366F1' }]} activeOpacity={0.7} onPress={() => router.push('/situational-admin' as any)}>
+                        <View style={[s.optionIconCircle, { backgroundColor: '#EEF2FF' }]}>
+                            <Ionicons name="shield-checkmark-outline" size={22} color="#6366F1" />
+                        </View>
+                        <View style={s.optionTextContainer}>
+                            <Text style={[s.optionTitle, { color: '#4F46E5' }]}>LGU Situational Reports</Text>
+                            <Text style={s.optionDesc}>Review and accept reports submitted by LGU officers.</Text>
+                        </View>
+                        <Ionicons name="chevron-forward" size={20} color="#A5B4FC" />
+                    </TouchableOpacity>
+                )}
 
                 {/* ── ESCALATION CARD ── */}
                 <View style={[s.card, s.escalationCard]}>
@@ -130,7 +228,11 @@ export default function LguReportScreen() {
                         Request direct assistance from the Provincial Disaster Risk Reduction and Management Office when local capacity is exceeded.
                     </Text>
 
-                    <TouchableOpacity style={s.escalateBtn} activeOpacity={0.8}>
+                    <TouchableOpacity 
+                        style={s.escalateBtn} 
+                        activeOpacity={0.8}
+                        onPress={() => setShowConfirmModal(true)}
+                    >
                         <Ionicons name="push-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
                         <Text style={s.escalateBtnText}>ESCALATE TO PDRRMO</Text>
                     </TouchableOpacity>
@@ -141,6 +243,161 @@ export default function LguReportScreen() {
                     OFFICIAL GOVERNMENT PROTOCOL APPLICATION
                 </Text>
             </ScrollView>
+
+            {/* ── MODAL 1: CONFIRMATION MODAL ── */}
+            <Modal
+                visible={showConfirmModal}
+                transparent
+                animationType="fade"
+                onRequestClose={() => !isSubmittingEscalation && setShowConfirmModal(false)}
+            >
+                <View style={s.modalOverlay}>
+                    <View style={s.modalContainer}>
+                        {/* Header Badge */}
+                        <View style={s.modalBadgeRow}>
+                            <View style={s.modalBadgeIconWrap}>
+                                <Ionicons name="radio" size={28} color="#DC2626" />
+                            </View>
+                            <View style={s.modalTagPill}>
+                                <Text style={s.modalTagText}>EMERGENCY PROTOCOL</Text>
+                            </View>
+                        </View>
+
+                        {/* Title & Description */}
+                        <Text style={s.modalTitle}>
+                            Are you sure you want to request provincial assistance?
+                        </Text>
+                        <Text style={s.modalDesc}>
+                            This action escalates the emergency directly to the Provincial Disaster Risk Reduction and Management Office (PDRRMO) for regional response and reinforcement.
+                        </Text>
+
+                        {/* Current Sector Info Pill */}
+                        <View style={s.sectorPill}>
+                            <Ionicons name="location-sharp" size={14} color="#DC2626" />
+                            <Text style={s.sectorPillText}>Sector: <Text style={{ fontWeight: '700', color: '#0F172A' }}>{currentSector}</Text></Text>
+                        </View>
+
+                        {/* Action Buttons */}
+                        <View style={s.modalActions}>
+                            <TouchableOpacity
+                                style={s.cancelBtn}
+                                activeOpacity={0.7}
+                                onPress={() => setShowConfirmModal(false)}
+                                disabled={isSubmittingEscalation}
+                            >
+                                <Text style={s.cancelBtnText}>Cancel</Text>
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                                style={[s.confirmBtn, isSubmittingEscalation && { opacity: 0.8 }]}
+                                activeOpacity={0.8}
+                                onPress={handleEscalateConfirm}
+                                disabled={isSubmittingEscalation}
+                            >
+                                {isSubmittingEscalation ? (
+                                    <ActivityIndicator color="#FFFFFF" size="small" />
+                                ) : (
+                                    <>
+                                        <Ionicons name="paper-plane" size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
+                                        <Text style={s.confirmBtnText}>Yes, Request</Text>
+                                    </>
+                                )}
+                            </TouchableOpacity>
+                        </View>
+                    </View>
+                </View>
+            </Modal>
+
+            {/* ── MODAL 2: WAITING / TRANSMITTED MODAL ── */}
+            <Modal
+                visible={showWaitingModal}
+                transparent
+                animationType="fade"
+                onRequestClose={() => setShowWaitingModal(false)}
+            >
+                <View style={s.modalOverlay}>
+                    <View style={s.modalContainer}>
+                        {/* Header Badge */}
+                        <View style={s.modalBadgeRow}>
+                            <View style={[s.modalBadgeIconWrap, { backgroundColor: '#FEF3C7' }]}>
+                                <Ionicons name="time" size={28} color="#D97706" />
+                            </View>
+                            <View style={[s.modalTagPill, { backgroundColor: '#FEF3C7', borderColor: '#FDE68A' }]}>
+                                <View style={s.pulsingDot} />
+                                <Text style={[s.modalTagText, { color: '#B45309' }]}>TRANSMITTED TO PDRRMO</Text>
+                            </View>
+                        </View>
+
+                        {/* Title & Description */}
+                        <Text style={s.modalTitle}>
+                            Provincial Assistance Requested
+                        </Text>
+                        <Text style={s.modalDesc}>
+                            Your regional escalation has been successfully recorded. Please stand by while the Provincial Administrator reviews and confirms your request.
+                        </Text>
+
+                        {/* Timeline / Progress Indicator */}
+                        <View style={s.timelineCard}>
+                            <View style={s.timelineStepRow}>
+                                <View style={s.stepDoneCircle}>
+                                    <Ionicons name="checkmark" size={12} color="#FFFFFF" />
+                                </View>
+                                <View style={{ flex: 1, marginLeft: 10 }}>
+                                    <Text style={s.stepTitleDone}>Escalation Transmitted</Text>
+                                    <Text style={s.stepDescDone}>Sent to PDRRMO Command Center</Text>
+                                </View>
+                            </View>
+
+                            <View style={s.stepConnector} />
+
+                            <View style={s.timelineStepRow}>
+                                <View style={s.stepActiveCircle}>
+                                    <Ionicons name="hourglass-outline" size={12} color="#D97706" />
+                                </View>
+                                <View style={{ flex: 1, marginLeft: 10 }}>
+                                    <Text style={s.stepTitleActive}>Awaiting Admin Confirmation</Text>
+                                    <Text style={s.stepDescActive}>Provincial Admin reviewing request</Text>
+                                </View>
+                            </View>
+
+                            <View style={s.stepConnector} />
+
+                            <View style={s.timelineStepRow}>
+                                <View style={s.stepPendingCircle}>
+                                    <Ionicons name="ellipse" size={8} color="#94A3B8" />
+                                </View>
+                                <View style={{ flex: 1, marginLeft: 10 }}>
+                                    <Text style={s.stepTitlePending}>Regional Support Mobilization</Text>
+                                    <Text style={s.stepDescPending}>Resource & personnel dispatch</Text>
+                                </View>
+                            </View>
+                        </View>
+
+                        {/* Action Buttons */}
+                        <View style={s.modalActionsColumn}>
+                            <TouchableOpacity
+                                style={s.historyNavBtn}
+                                activeOpacity={0.8}
+                                onPress={() => {
+                                    setShowWaitingModal(false);
+                                    router.push('/lgu-history' as any);
+                                }}
+                            >
+                                <Ionicons name="time-outline" size={18} color="#FFFFFF" style={{ marginRight: 6 }} />
+                                <Text style={s.historyNavBtnText}>View in Submission History</Text>
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                                style={s.dismissBtn}
+                                activeOpacity={0.7}
+                                onPress={() => setShowWaitingModal(false)}
+                            >
+                                <Text style={s.dismissBtnText}>Close / Back to Hub</Text>
+                            </TouchableOpacity>
+                        </View>
+                    </View>
+                </View>
+            </Modal>
         </SafeAreaView>
     );
 }
@@ -355,5 +612,238 @@ const s = StyleSheet.create({
         letterSpacing: 1.2,
         textAlign: 'center',
         marginBottom: 20,
+    },
+
+    // Modals
+    modalOverlay: {
+        flex: 1,
+        backgroundColor: 'rgba(15, 23, 42, 0.65)',
+        justifyContent: 'center',
+        alignItems: 'center',
+        paddingHorizontal: 20,
+    },
+    modalContainer: {
+        width: '100%',
+        maxWidth: 380,
+        backgroundColor: '#FFFFFF',
+        borderRadius: 24,
+        padding: 24,
+        alignItems: 'center',
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 10 },
+        shadowOpacity: 0.15,
+        shadowRadius: 20,
+        elevation: 10,
+    },
+    modalBadgeRow: {
+        alignItems: 'center',
+        marginBottom: 16,
+    },
+    modalBadgeIconWrap: {
+        width: 60,
+        height: 60,
+        borderRadius: 30,
+        backgroundColor: '#FEE2E2',
+        justifyContent: 'center',
+        alignItems: 'center',
+        marginBottom: 10,
+    },
+    modalTagPill: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#FEE2E2',
+        paddingHorizontal: 12,
+        paddingVertical: 4,
+        borderRadius: 20,
+        borderWidth: 1,
+        borderColor: '#FECACA',
+    },
+    modalTagText: {
+        fontSize: 10,
+        fontWeight: '800',
+        color: '#DC2626',
+        letterSpacing: 0.8,
+    },
+    pulsingDot: {
+        width: 6,
+        height: 6,
+        borderRadius: 3,
+        backgroundColor: '#D97706',
+        marginRight: 6,
+    },
+    modalTitle: {
+        fontSize: 18,
+        fontWeight: '800',
+        color: '#0F172A',
+        textAlign: 'center',
+        lineHeight: 24,
+        marginBottom: 8,
+    },
+    modalDesc: {
+        fontSize: 13,
+        color: '#64748B',
+        textAlign: 'center',
+        lineHeight: 19,
+        marginBottom: 16,
+    },
+    sectorPill: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#F8FAFC',
+        paddingHorizontal: 14,
+        paddingVertical: 8,
+        borderRadius: 12,
+        borderWidth: 1,
+        borderColor: '#E2E8F0',
+        marginBottom: 20,
+    },
+    sectorPillText: {
+        fontSize: 12,
+        color: '#64748B',
+        marginLeft: 6,
+    },
+    modalActions: {
+        flexDirection: 'row',
+        width: '100%',
+        gap: 12,
+    },
+    cancelBtn: {
+        flex: 1,
+        height: 48,
+        borderRadius: 14,
+        backgroundColor: '#F1F5F9',
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    cancelBtnText: {
+        fontSize: 14,
+        fontWeight: '700',
+        color: '#475569',
+    },
+    confirmBtn: {
+        flex: 1.4,
+        height: 48,
+        borderRadius: 14,
+        backgroundColor: '#DC2626',
+        flexDirection: 'row',
+        justifyContent: 'center',
+        alignItems: 'center',
+        shadowColor: '#DC2626',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.25,
+        shadowRadius: 8,
+        elevation: 4,
+    },
+    confirmBtnText: {
+        fontSize: 14,
+        fontWeight: '700',
+        color: '#FFFFFF',
+    },
+    timelineCard: {
+        width: '100%',
+        backgroundColor: '#F8FAFC',
+        borderRadius: 16,
+        borderWidth: 1,
+        borderColor: '#E2E8F0',
+        padding: 16,
+        marginBottom: 20,
+    },
+    timelineStepRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+    },
+    stepConnector: {
+        width: 2,
+        height: 14,
+        backgroundColor: '#E2E8F0',
+        marginLeft: 9,
+        marginVertical: 2,
+    },
+    stepDoneCircle: {
+        width: 20,
+        height: 20,
+        borderRadius: 10,
+        backgroundColor: '#10B981',
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    stepTitleDone: {
+        fontSize: 12,
+        fontWeight: '700',
+        color: '#0F172A',
+    },
+    stepDescDone: {
+        fontSize: 10,
+        color: '#10B981',
+    },
+    stepActiveCircle: {
+        width: 20,
+        height: 20,
+        borderRadius: 10,
+        backgroundColor: '#FEF3C7',
+        borderWidth: 1.5,
+        borderColor: '#F59E0B',
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    stepTitleActive: {
+        fontSize: 12,
+        fontWeight: '700',
+        color: '#D97706',
+    },
+    stepDescActive: {
+        fontSize: 10,
+        color: '#B45309',
+    },
+    stepPendingCircle: {
+        width: 20,
+        height: 20,
+        borderRadius: 10,
+        backgroundColor: '#E2E8F0',
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    stepTitlePending: {
+        fontSize: 12,
+        fontWeight: '600',
+        color: '#94A3B8',
+    },
+    stepDescPending: {
+        fontSize: 10,
+        color: '#94A3B8',
+    },
+    modalActionsColumn: {
+        width: '100%',
+        gap: 10,
+    },
+    historyNavBtn: {
+        width: '100%',
+        height: 48,
+        borderRadius: 14,
+        backgroundColor: '#2563EB',
+        flexDirection: 'row',
+        justifyContent: 'center',
+        alignItems: 'center',
+        shadowColor: '#2563EB',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.25,
+        shadowRadius: 8,
+        elevation: 4,
+    },
+    historyNavBtnText: {
+        fontSize: 14,
+        fontWeight: '700',
+        color: '#FFFFFF',
+    },
+    dismissBtn: {
+        width: '100%',
+        height: 42,
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    dismissBtnText: {
+        fontSize: 13,
+        fontWeight: '600',
+        color: '#64748B',
     },
 });

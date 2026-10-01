@@ -94,7 +94,7 @@ export default function NotificationBanner() {
         if (hideTimer.current) clearTimeout(hideTimer.current);
         Animated.timing(translateY, {
             toValue: -220,
-            duration: 300,
+            duration: 200,
             useNativeDriver: true,
         }).start(() => setVisible(false));
     }, [translateY]);
@@ -109,8 +109,8 @@ export default function NotificationBanner() {
 
         Animated.spring(translateY, {
             toValue: 0,
-            tension: 60,
-            friction: 10,
+            tension: 90,
+            friction: 8,
             useNativeDriver: true,
         }).start();
 
@@ -121,12 +121,11 @@ export default function NotificationBanner() {
     const poll = useCallback(async () => {
         if (!userId.current) return;
         try {
-            const since = new Date(Date.now() - 15000).toISOString();
+            const since = new Date(Date.now() - 30000).toISOString();
             const { data } = await supabase
                 .from('notifications')
                 .select('id, title, message, type, target_role')
                 .eq('user_id', userId.current)
-                .eq('target_role', targetRole.current)
                 .gte('created_at', since)
                 .order('created_at', { ascending: false })
                 .limit(1);
@@ -140,8 +139,76 @@ export default function NotificationBanner() {
     useEffect(() => {
         let channel: any = null;
         let lguChannel: any = null;
+        let incidentChannel: any = null;
         let pollInterval: ReturnType<typeof setInterval> | null = null;
         let logisticsPoll: ReturnType<typeof setInterval> | null = null;
+        let incidentPoll: ReturnType<typeof setInterval> | null = null;
+
+        // ── SYNC SITUATIONAL & INCIDENT REPORTS ──
+        const syncIncidentReports = async (uid: string) => {
+            try {
+                const { data: reports, error } = await supabase
+                    .from('incident_report')
+                    .select('report_id, status, report_type, hazard_type, title, description, created_at')
+                    .eq('user_id', uid)
+                    .order('created_at', { ascending: false })
+                    .limit(25);
+
+                if (error || !reports) return;
+
+                const stored = await AsyncStorage.getItem(`incident_state_${uid}`);
+                const prevState: Record<string, string> = stored ? JSON.parse(stored) : {};
+                const newState: Record<string, string> = {};
+
+                for (const rep of reports) {
+                    const statusStr = (rep.status || '').toLowerCase();
+                    newState[rep.report_id] = statusStr;
+                    const oldState = prevState[rep.report_id];
+
+                    const isRecent = (Date.now() - new Date(rep.created_at).getTime()) < 48 * 60 * 60 * 1000;
+
+                    // Trigger banner if status transitioned from pending/old to accepted/verified/rejected
+                    if (oldState && oldState !== statusStr && isRecent) {
+                        const isEsc = (rep.hazard_type || '').toLowerCase().includes('escalation') ||
+                                      (rep.title || '').toLowerCase().includes('escalation');
+                        const isSit = rep.report_type === 'situational' || (rep.title || '').toLowerCase().includes('situational');
+
+                        if (statusStr === 'accepted' || statusStr === 'verified') {
+                            const bannerTitle = isEsc 
+                                ? 'Provincial Support Confirmed ✅' 
+                                : isSit 
+                                ? 'Situational Report Accepted ✅' 
+                                : 'Report Verified ✅';
+
+                            const bannerMsg = isEsc
+                                ? 'Your provincial assistance request has been confirmed and mobilized by PDRRMO.'
+                                : 'Your situational report has been verified and accepted by the PDRRMO.';
+
+                            showBanner({
+                                id: `inc-${rep.report_id}-${Date.now()}`,
+                                title: bannerTitle,
+                                message: bannerMsg,
+                                type: 'Updates',
+                            });
+                        } else if (statusStr === 'rejected' || statusStr === 'declined') {
+                            const bannerTitle = isEsc ? 'Provincial Support Declined' : 'Report Declined';
+                            const bannerMsg = 'Your report was reviewed by PDRRMO but could not be accepted at this time.';
+
+                            showBanner({
+                                id: `inc-${rep.report_id}-${Date.now()}`,
+                                title: bannerTitle,
+                                message: bannerMsg,
+                                type: 'Updates',
+                            });
+                        }
+                    }
+                }
+
+                await AsyncStorage.setItem(`incident_state_${uid}`, JSON.stringify(newState));
+            } catch (e) {
+                console.error('Incident sync error:', e);
+            }
+        };
 
         const syncLogisticsRequests = async (uid: string) => {
             try {
@@ -153,66 +220,45 @@ export default function NotificationBanner() {
                 
                 if (requestsError || !requests) return;
 
-                const requestIds = requests.map(r => r.request_id);
-                let allocMap: Record<string, any> = {};
-
-                if (requestIds.length > 0) {
-                    const { data: allocs } = await supabase
-                        .from('resource_allocations')
-                        .select('request_id, dispatched_at, returned_at')
-                        .in('request_id', requestIds);
-                        
-                    if (allocs) {
-                        allocs.forEach(a => {
-                            allocMap[a.request_id] = a;
-                        });
-                    }
-                }
-
                 const stored = await AsyncStorage.getItem(`logistics_state_${uid}`);
                 const prevState: Record<string, string> = stored ? JSON.parse(stored) : {};
                 const newState: Record<string, string> = {};
 
                 for (const req of requests) {
                     let stateString = req.status || '';
-                    const alloc = allocMap[req.request_id];
-                    if (alloc) {
-                        if (alloc.returned_at) stateString = 'Returned';
-                        else if (alloc.dispatched_at && !stateString.toLowerCase().includes('transit')) stateString = 'Dispatched';
-                    }
-
                     newState[req.request_id] = stateString;
                     const oldState = prevState[req.request_id];
 
                     // Check if it's recently created (within 24 hours) to allow notifications on first load
                     const isRecent = (new Date().getTime() - new Date(req.created_at).getTime()) < 24 * 60 * 60 * 1000;
                     const shouldNotifyIfNew = isRecent && stateString !== 'Pending';
-                    const isTransit = stateString.toLowerCase().includes('transit');
-                    const isReturned = stateString.toLowerCase().includes('return') || stateString === 'Completed';
 
                     if (oldState !== stateString && (oldState || shouldNotifyIfNew)) {
-                        if (stateString === 'Approved' || stateString === 'Fully_Allocated' || stateString === 'Dispatched' || isTransit || isReturned) {
+                        if (stateString === 'Approved' || stateString === 'Fully_Allocated' || stateString === 'Dispatched' || stateString === 'Transit' || stateString === 'Completed') {
                             
-                            let alertType = 'approved';
                             let title = 'Request Approved';
                             let message = `Your request has been approved by PDRRMO.`;
 
                             if (stateString === 'Dispatched') {
-                                alertType = 'Updates';
                                 title = 'Items Dispatched';
-                                message = `Your requested logistics have been dispatched!`;
-                            } else if (isTransit) {
-                                alertType = 'Updates';
+                                message = `Your requested logistics have been dispatched by the PDRRMO!`;
+                            } else if (stateString === 'Transit') {
                                 title = 'Items In Transit';
                                 message = `Your requested logistics are currently in transit to your location.`;
-                            } else if (isReturned) {
-                                alertType = 'verified';
+                            } else if (stateString === 'Completed') {
                                 title = 'Request Completed';
-                                message = `Your logistics request has been successfully returned/completed.`;
+                                message = `Your returned items have been officially received by the PDRRMO. Thank you for your cooperation!`;
                             } else if (stateString === 'Fully_Allocated') {
                                 title = 'Request Allocated';
                                 message = `PDRRMO has allocated items for your request.`;
                             }
+
+                            showBanner({
+                                id: `req-${req.request_id}-${Date.now()}`,
+                                title,
+                                message,
+                                type: 'Updates',
+                            });
 
                             await supabase.from('notifications').insert({
                                 user_id: uid,
@@ -222,8 +268,6 @@ export default function NotificationBanner() {
                                 message: `${message}\n\n[REF:${req.request_id}]`,
                                 is_read: false
                             });
-                            
-                            // Insert complete
                         }
                     }
                 }
@@ -241,12 +285,13 @@ export default function NotificationBanner() {
             userId.current = uid;
 
             const { data: profile } = await supabase.from('profiles').select('role').eq('id', uid).single();
-            if (profile?.role === 'lgu_headmaster' || profile?.role === 'admin') {
+            if (profile?.role === 'lgu' || profile?.role === 'lgu_headmaster' || profile?.role === 'admin') {
                 targetRole.current = 'lgu';
             } else {
                 targetRole.current = 'user';
             }
 
+            // Real-time listener for direct notifications
             channel = supabase
                 .channel(`notif-banner-${uid}`)
                 .on('postgres_changes' as any, {
@@ -254,45 +299,34 @@ export default function NotificationBanner() {
                     table: 'notifications', filter: `user_id=eq.${uid}`,
                 }, (payload: any) => {
                     const row = payload.new;
-                    if (row.target_role && row.target_role !== targetRole.current) return;
                     showBanner({ id: row.id, title: row.title || 'New Notification', message: row.message || '', type: row.type || 'Updates' });
                 })
                 .subscribe();
 
-            // IMPORTANT: Only setup this real-time listener for LGU accounts! Citizens should not connect.
-            if (profile?.role === 'lgu_headmaster' || profile?.role === 'admin') {
+            // Real-time listener on incident_report table
+            incidentChannel = supabase
+                .channel(`incident-banner-${uid}`)
+                .on('postgres_changes' as any, {
+                    event: 'UPDATE', schema: 'public', table: 'incident_report', filter: `user_id=eq.${uid}`
+                }, async (payload: any) => {
+                    syncIncidentReports(uid);
+                })
+                .subscribe();
+
+            // Initial and periodic syncs
+            syncIncidentReports(uid);
+            incidentPoll = setInterval(() => syncIncidentReports(uid), 10000);
+
+            // Logistics sync for LGU accounts
+            if (profile?.role === 'lgu' || profile?.role === 'lgu_headmaster' || profile?.role === 'admin') {
                 syncLogisticsRequests(uid);
-                logisticsPoll = setInterval(() => syncLogisticsRequests(uid), 15000);
+                logisticsPoll = setInterval(() => syncLogisticsRequests(uid), 12000);
 
                 lguChannel = supabase.channel(`lgu-requests-${uid}`)
                     .on('postgres_changes' as any, {
                         event: 'UPDATE', schema: 'public', table: 'resource_requests', filter: `requested_by=eq.${uid}`
                     }, async (payload: any) => {
-                        const newStatus = payload.new.status;
-                        const oldStatus = payload.old?.status || 'Pending';
-
-                        const isTransit = newStatus.toLowerCase().includes('transit');
-                        const isReturned = newStatus.toLowerCase().includes('return') || newStatus === 'Completed';
-
-                        if (newStatus !== oldStatus && (newStatus === 'Approved' || newStatus === 'Fully_Allocated' || newStatus === 'Dispatched' || isTransit || isReturned)) {
-                            // Automatically insert a local notification row for the user's history
-                            // The INSERT event above will instantly catch it and show the banner!
-                            await supabase.from('notifications').insert({
-                                user_id: uid,
-                                target_role: 'user',
-                                type: 'Updates',
-                                title: `Logistics Request ${newStatus}`,
-                                message: `Your logistics request has been marked as ${newStatus} by the PDRRMO.\n\n[REF:${payload.new.request_id}]`,
-                                is_read: false
-                            });
-                            // Update local state to prevent duplicate poll notifications
-                            const stored = await AsyncStorage.getItem(`logistics_state_${uid}`);
-                            if (stored) {
-                                const st = JSON.parse(stored);
-                                st[payload.new.request_id] = newStatus;
-                                await AsyncStorage.setItem(`logistics_state_${uid}`, JSON.stringify(st));
-                            }
-                        }
+                        syncLogisticsRequests(uid);
                     }).subscribe();
             }
 
@@ -302,8 +336,10 @@ export default function NotificationBanner() {
         setup();
         return () => {
             if (channel) supabase.removeChannel(channel);
+            if (incidentChannel) supabase.removeChannel(incidentChannel);
             if (lguChannel) supabase.removeChannel(lguChannel);
             if (pollInterval) clearInterval(pollInterval);
+            if (incidentPoll) clearInterval(incidentPoll);
             if (logisticsPoll) clearInterval(logisticsPoll);
             if (hideTimer.current) clearTimeout(hideTimer.current);
         };

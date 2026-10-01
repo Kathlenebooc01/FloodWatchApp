@@ -39,7 +39,48 @@ export default function ProfileScreen() {
     const [mobile, setMobile]       = useState('');
     const [profilePhoto, setProfilePhoto] = useState<string | null>(null);
     const [userRole, setUserRole] = useState('');
+    const [userEmail, setUserEmail] = useState('');
     const [profileLoading, setProfileLoading] = useState(true);
+
+    // ── Change Password state ──
+    const [changePassModalVisible, setChangePassModalVisible] = useState(false);
+    const [changePassEmail, setChangePassEmail] = useState('');
+    const [changePassLoading, setChangePassLoading] = useState(false);
+    const [changePassSuccessVisible, setChangePassSuccessVisible] = useState(false);
+
+    const openChangePasswordModal = () => {
+        setChangePassEmail(userEmail || '');
+        setChangePassModalVisible(true);
+    };
+
+    const handleSendChangePassLink = async () => {
+        if (!changePassEmail.trim()) {
+            Alert.alert('Email Required', 'Please enter your Gmail or registered email address.');
+            return;
+        }
+        setChangePassLoading(true);
+        try {
+            const { error } = await supabase.auth.resetPasswordForEmail(changePassEmail.trim());
+            if (error) throw error;
+            setChangePassModalVisible(false);
+            router.push({
+                pathname: '/reset-password',
+                params: { email: changePassEmail.trim(), from: 'profile' }
+            } as any);
+        } catch (err: any) {
+            Alert.alert('Request Failed', err.message || 'Failed to send password reset link.');
+        } finally {
+            setChangePassLoading(false);
+        }
+    };
+
+    const proceedToResetPassword = () => {
+        setChangePassSuccessVisible(false);
+        router.push({
+            pathname: '/reset-password',
+            params: { email: changePassEmail.trim(), from: 'profile' }
+        } as any);
+    };
 
     // ── Live location ──
     const [locationText, setLocationText]       = useState('Fetching location...');
@@ -61,6 +102,7 @@ export default function ProfileScreen() {
                         setMobile(profile.mobile || '');
                         setProfilePhoto(profile.photo || null);
                         setUserRole(profile.role || '');
+                        if (profile.email) setUserEmail(profile.email);
                         setProfileLoading(false); // Stop loading immediately
                         console.log('⚡ Loaded profile from cache (instant)');
                     }
@@ -70,6 +112,9 @@ export default function ProfileScreen() {
                 const { data: sessionData } = await supabase.auth.getSession();
                 const userId = sessionData?.session?.user?.id;
                 const userMeta = sessionData?.session?.user?.user_metadata;
+                if (sessionData?.session?.user?.email) {
+                    setUserEmail(sessionData.session.user.email);
+                }
 
                 console.log('👤 User ID:', userId);
                 console.log('📦 User metadata:', userMeta);
@@ -444,11 +489,11 @@ export default function ProfileScreen() {
                 </View>
 
                 {/* ── Buttons ── */}
-                {userRole === 'lgu_headmaster' && (
+                {(userRole === 'lgu_headmaster' || userRole?.toLowerCase().includes('lgu') || userRole === 'admin') && (
                     <TouchableOpacity
                         style={styles.primaryBtn}
                         activeOpacity={0.85}
-                        onPress={() => Alert.alert('Change Password', 'A password reset link will be sent to your email.')}
+                        onPress={openChangePasswordModal}
                     >
                         <Ionicons name="lock-closed-outline" size={18} color="#FFFFFF" style={{ marginRight: 10 }} />
                         <Text style={{ color: '#FFFFFF', fontWeight: '700', fontSize: 15 }}>Change Password</Text>
@@ -981,6 +1026,240 @@ export default function ProfileScreen() {
                                 textAlign: 'center',
                             }}>Cebu City Disaster Risk Reduction Management Office</Text>
                         </View>
+                    </View>
+                </View>
+            </Modal>
+
+            {/* ── CHANGE PASSWORD INPUT MODAL ── */}
+            <Modal
+                visible={changePassModalVisible}
+                transparent
+                animationType="fade"
+                onRequestClose={() => !changePassLoading && setChangePassModalVisible(false)}
+            >
+                <KeyboardAvoidingView
+                    behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+                    style={{
+                        flex: 1,
+                        backgroundColor: 'rgba(0, 0, 0, 0.5)',
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                        padding: 24,
+                    }}
+                >
+                    <View style={{
+                        backgroundColor: '#FFFFFF',
+                        borderRadius: 24,
+                        padding: 28,
+                        width: '100%',
+                        maxWidth: 380,
+                        alignItems: 'center',
+                        shadowColor: '#000',
+                        shadowOffset: { width: 0, height: 10 },
+                        shadowOpacity: 0.15,
+                        shadowRadius: 20,
+                        elevation: 10,
+                    }}>
+                        <TouchableOpacity
+                            style={{ position: 'absolute', top: 18, right: 18, padding: 6, zIndex: 10 }}
+                            onPress={() => setChangePassModalVisible(false)}
+                            disabled={changePassLoading}
+                        >
+                            <Ionicons name="close" size={24} color="#64748B" />
+                        </TouchableOpacity>
+
+                        <View style={{
+                            width: 64,
+                            height: 64,
+                            borderRadius: 32,
+                            backgroundColor: '#EFF6FF',
+                            justifyContent: 'center',
+                            alignItems: 'center',
+                            marginBottom: 16,
+                        }}>
+                            <Ionicons name="lock-closed-outline" size={32} color="#2563EB" />
+                        </View>
+
+                        <Text style={{
+                            fontSize: 20,
+                            fontWeight: '800',
+                            color: '#0F172A',
+                            marginBottom: 8,
+                            textAlign: 'center',
+                        }}>Change Password</Text>
+
+                        <Text style={{
+                            fontSize: 13,
+                            color: '#64748B',
+                            textAlign: 'center',
+                            lineHeight: 20,
+                            marginBottom: 20,
+                        }}>
+                            Enter your Gmail or registered email address. We will send a secure password reset link directly to your inbox.
+                        </Text>
+
+                        <View style={{
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            backgroundColor: '#F8FAFC',
+                            borderWidth: 1,
+                            borderColor: '#E2E8F0',
+                            borderRadius: 14,
+                            height: 52,
+                            paddingHorizontal: 16,
+                            width: '100%',
+                            marginBottom: 20,
+                        }}>
+                            <Ionicons name="mail-outline" size={18} color="#94A3B8" style={{ marginRight: 10 }} />
+                            <TextInput
+                                style={{ flex: 1, fontSize: 14, color: '#1E293B', height: '100%' }}
+                                placeholder="name@gmail.com"
+                                placeholderTextColor="#94A3B8"
+                                value={changePassEmail}
+                                onChangeText={setChangePassEmail}
+                                keyboardType="email-address"
+                                autoCapitalize="none"
+                                autoCorrect={false}
+                            />
+                        </View>
+
+                        <View style={{ flexDirection: 'row', width: '100%', gap: 12 }}>
+                            <TouchableOpacity
+                                style={{
+                                    flex: 1,
+                                    height: 48,
+                                    borderRadius: 14,
+                                    backgroundColor: '#F1F5F9',
+                                    justifyContent: 'center',
+                                    alignItems: 'center',
+                                }}
+                                onPress={() => setChangePassModalVisible(false)}
+                                disabled={changePassLoading}
+                                activeOpacity={0.7}
+                            >
+                                <Text style={{ fontSize: 14, fontWeight: '700', color: '#475569' }}>Cancel</Text>
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                                style={{
+                                    flex: 1.4,
+                                    height: 48,
+                                    borderRadius: 14,
+                                    backgroundColor: '#2563EB',
+                                    justifyContent: 'center',
+                                    alignItems: 'center',
+                                    opacity: changePassLoading ? 0.8 : 1,
+                                    shadowColor: '#2563EB',
+                                    shadowOpacity: 0.25,
+                                    shadowRadius: 8,
+                                    shadowOffset: { width: 0, height: 4 },
+                                    elevation: 4,
+                                }}
+                                onPress={handleSendChangePassLink}
+                                disabled={changePassLoading}
+                                activeOpacity={0.85}
+                            >
+                                {changePassLoading ? (
+                                    <ActivityIndicator color="#FFFFFF" size="small" />
+                                ) : (
+                                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                        <Ionicons name="paper-plane-outline" size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
+                                        <Text style={{ color: '#FFFFFF', fontSize: 14, fontWeight: '700' }}>Send Link</Text>
+                                    </View>
+                                )}
+                            </TouchableOpacity>
+                        </View>
+                    </View>
+                </KeyboardAvoidingView>
+            </Modal>
+
+            {/* ── CHANGE PASSWORD SUCCESS MODAL ── */}
+            <Modal
+                visible={changePassSuccessVisible}
+                transparent
+                animationType="fade"
+                onRequestClose={() => setChangePassSuccessVisible(false)}
+            >
+                <View style={{
+                    flex: 1,
+                    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    padding: 24,
+                }}>
+                    <View style={{
+                        backgroundColor: '#FFFFFF',
+                        borderRadius: 24,
+                        padding: 28,
+                        width: '100%',
+                        maxWidth: 380,
+                        alignItems: 'center',
+                        shadowColor: '#000',
+                        shadowOffset: { width: 0, height: 10 },
+                        shadowOpacity: 0.15,
+                        shadowRadius: 20,
+                        elevation: 10,
+                    }}>
+                        <View style={{
+                            width: 64,
+                            height: 64,
+                            borderRadius: 32,
+                            backgroundColor: '#DCFCE7',
+                            justifyContent: 'center',
+                            alignItems: 'center',
+                            marginBottom: 16,
+                        }}>
+                            <Ionicons name="checkmark-circle-outline" size={38} color="#16A34A" />
+                        </View>
+
+                        <Text style={{
+                            fontSize: 20,
+                            fontWeight: '800',
+                            color: '#0F172A',
+                            marginBottom: 8,
+                            textAlign: 'center',
+                        }}>Reset Link Sent! ✉️</Text>
+
+                        <Text style={{
+                            fontSize: 13,
+                            color: '#64748B',
+                            textAlign: 'center',
+                            lineHeight: 20,
+                            marginBottom: 24,
+                        }}>
+                            A password reset link and 6-digit recovery code have been sent directly to:{'\n'}
+                            <Text style={{ fontWeight: '700', color: '#1E293B' }}>{changePassEmail}</Text>
+                            {'\n\n'}Please check your Gmail inbox (and Spam folder) to set your new password.
+                        </Text>
+
+                        <TouchableOpacity
+                            style={{
+                                width: '100%',
+                                height: 48,
+                                borderRadius: 14,
+                                backgroundColor: '#2563EB',
+                                justifyContent: 'center',
+                                alignItems: 'center',
+                                marginBottom: 12,
+                                shadowColor: '#2563EB',
+                                shadowOpacity: 0.25,
+                                shadowRadius: 8,
+                                shadowOffset: { width: 0, height: 4 },
+                                elevation: 4,
+                            }}
+                            onPress={proceedToResetPassword}
+                            activeOpacity={0.85}
+                        >
+                            <Text style={{ color: '#FFFFFF', fontSize: 14, fontWeight: '700' }}>Enter 6-Digit Code & Change</Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                            style={{ width: '100%', height: 40, justifyContent: 'center', alignItems: 'center' }}
+                            onPress={() => setChangePassSuccessVisible(false)}
+                            activeOpacity={0.7}
+                        >
+                            <Text style={{ fontSize: 14, fontWeight: '600', color: '#64748B' }}>Done / Close</Text>
+                        </TouchableOpacity>
                     </View>
                 </View>
             </Modal>

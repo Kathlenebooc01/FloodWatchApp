@@ -2,7 +2,7 @@
 import { useState, useEffect } from "react"
 import CardBasedText from "../cards/CardBasedText"
 import CardSubHeader from "../cards/CardSubHeader"
-import { X, CheckCircle2, XCircle, FileImage, ChevronLeft, ChevronRight } from "lucide-react"
+import { X, CheckCircle2, XCircle, AlertCircle, FileImage, ChevronLeft, ChevronRight } from "lucide-react"
 import SideModal from "../Modal/SideModal"
 import { supabase } from "@/supabase/util/supabase"
 import SingleLineSkeleton from "../skeleton/SingleLineSkeleton"
@@ -199,6 +199,8 @@ export default function VerificationTableModal({ data, onClose }) {
                     <div className="flex items-center gap-2">
                       {data.ai_is_valid ? (
                         <><CheckCircle2 className="size-4 text-green-500" /><span className="text-sm font-medium text-green-600">Valid Format</span></>
+                      ) : (data.ai_insight && data.ai_insight.toLowerCase().includes('unavailable')) || (data.ai_confidence_score === 0 && data.status === 'pending') ? (
+                        <><AlertCircle className="size-4 text-amber-500" /><span className="text-sm font-medium text-amber-600">Manual Review Required</span></>
                       ) : (
                         <><XCircle className="size-4 text-red-500" /><span className="text-sm font-medium text-red-600">Invalid Format</span></>
                       )}

@@ -13,8 +13,10 @@ import {
     Platform,
     Alert,
     Modal,
+    ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { supabase } from '@/utils/supabase';
 
 const TITLE_OPTIONS = [
     'Flooding Situation Update',
@@ -41,6 +43,7 @@ export default function SituationalLguScreen() {
     const [isOtherTitle, setIsOtherTitle] = useState(false);
     const [showSuccessModal, setShowSuccessModal] = useState(false);
     const [errorModal, setErrorModal] = useState({ visible: false, title: '', message: '' });
+    const [isSubmitting, setIsSubmitting] = useState(false);
 
     const handleDocumentPick = async () => {
         try {
@@ -70,27 +73,101 @@ export default function SituationalLguScreen() {
             return;
         }
 
-        // Logic to submit the report to Supabase would go here.
-        // Save to History (Local)
-        const newItem = {
-            id: 'sit-' + Date.now(),
-            type: 'situational',
-            timestamp: new Date().toISOString(),
-            title: title,
-            status: status,
-            desc: description,
-            documentName: document ? document.name : undefined,
-        };
+        setIsSubmitting(true);
+
         try {
+            const { data: { session } } = await supabase.auth.getSession();
+            
+            let municipalityId = null;
+            if (session?.user) {
+                const { data: profile } = await supabase.from('profiles').select('municipality_id').eq('id', session.user.id).single();
+                municipalityId = profile?.municipality_id;
+            }
+
+            if (!municipalityId) {
+                const { data: validMunis } = await supabase.from('municipality_or_city').select('municipality_id').limit(1);
+                if (validMunis && validMunis.length > 0) {
+                    municipalityId = validMunis[0].municipality_id;
+                }
+            }
+            
+            let finalDescription = `[Field Status: ${status}]\n${description}`;
+            if (document && document.name && document.uri) {
+                try {
+                    const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
+                    const ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || '';
+                    
+                    // Make the filename unique to avoid 409 KeyAlreadyExists errors
+                    const uniqueFileName = `${Date.now()}_${document.name}`;
+                    const uploadUrl = `${SUPABASE_URL}/storage/v1/object/incident-reports/${uniqueFileName}`;
+                    
+                    const fileData = await fetch(document.uri);
+                    const blob = await fileData.blob();
+                    
+                    const uploadRes = await fetch(uploadUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${ANON_KEY}`,
+                            'Content-Type': document.mimeType || 'application/pdf',
+                            'x-upsert': 'true'
+                        },
+                        body: blob
+                    });
+                    
+                    if (!uploadRes.ok) {
+                        const errText = await uploadRes.text();
+                        console.error('File upload failed:', errText);
+                        throw new Error('Failed to upload the PDF to Supabase storage.');
+                    }
+                    
+                    finalDescription += `\n\n[Attached Document: ${uniqueFileName}]`;
+                } catch (uploadErr) {
+                    console.error('Upload Error:', uploadErr);
+                    setErrorModal({ visible: true, title: 'Upload Failed', message: 'Failed to upload the attached PDF.' });
+                    setIsSubmitting(false);
+                    return;
+                }
+            }
+
+            const { error: supabaseError } = await supabase
+                .from('incident_report')
+                .insert({
+                    user_id: session?.user?.id || null,
+                    report_type: 'moderate_report', 
+                    hazard_type: '[SITUATIONAL] ' + title,
+                    description: finalDescription,
+                    status: 'Pending_AI',
+                    municipality_id: municipalityId,
+                    created_at: new Date().toISOString(),
+                });
+
+            if (supabaseError) {
+                console.error("Supabase insert error:", supabaseError);
+                throw supabaseError;
+            }
+
+            // Save to History (Local)
+            const newItem = {
+                id: 'sit-' + Date.now(),
+                type: 'situational',
+                timestamp: new Date().toISOString(),
+                title: title,
+                status: status,
+                desc: description,
+                documentName: document ? document.name : undefined,
+            };
             const existing = await AsyncStorage.getItem('lgu_reports_history');
             const history = existing ? JSON.parse(existing) : [];
             history.push(newItem);
             await AsyncStorage.setItem('lgu_reports_history', JSON.stringify(history));
+            
+            setShowSuccessModal(true);
         } catch (err) {
-            console.error('Failed to save history', err);
+            console.error('Failed to submit report', err);
+            setErrorModal({ visible: true, title: 'Error', message: 'Failed to submit report to backend.' });
+        } finally {
+            setIsSubmitting(false);
         }
-
-        setShowSuccessModal(true);
     };
 
     return (
@@ -202,9 +279,18 @@ export default function SituationalLguScreen() {
                 </View>
 
                 {/* ── SUBMIT BUTTON ── */}
-                <TouchableOpacity style={s.submitBtn} onPress={handleSubmit} activeOpacity={0.8}>
-                    <Ionicons name="send-outline" size={18} color="#FFFFFF" style={s.submitIcon} />
-                    <Text style={s.submitBtnText}>Submit Report</Text>
+                <TouchableOpacity 
+                    style={[s.submitBtn, isSubmitting && { opacity: 0.7 }]} 
+                    onPress={handleSubmit} 
+                    activeOpacity={0.8}
+                    disabled={isSubmitting}
+                >
+                    {isSubmitting ? (
+                        <ActivityIndicator color="#FFFFFF" style={s.submitIcon} />
+                    ) : (
+                        <Ionicons name="send-outline" size={18} color="#FFFFFF" style={s.submitIcon} />
+                    )}
+                    <Text style={s.submitBtnText}>{isSubmitting ? 'Submitting...' : 'Submit Report'}</Text>
                 </TouchableOpacity>
 
                 {/* ── FOOTER ── */}

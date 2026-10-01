@@ -90,6 +90,16 @@ const getAlertIcon = (alertType: string, type?: string) => {
     return { icon: 'notifications', color: '#2563EB', bg: '#EFF6FF', accent: '#2563EB' };
 };
 
+// Format notification text (replacing LGU with PDRRMO where relevant)
+const formatNotifText = (text: string) => {
+    if (!text) return '';
+    return text
+        .replace(/by the LGU/gi, 'by the PDRRMO')
+        .replace(/by LGU/gi, 'by PDRRMO')
+        .replace(/accepted by the LGU/gi, 'accepted by the PDRRMO')
+        .replace(/ready for LGU/gi, 'ready for PDRRMO');
+};
+
 export default function NotificationsScreen() {
     const router = useRouter();
     const [activeTab, setActiveTab] = useState<Category>('All');
@@ -111,7 +121,7 @@ export default function NotificationsScreen() {
             let targetRole = 'user';
             if (userId) {
                 const { data: profile } = await supabase.from('profiles').select('role').eq('id', userId).maybeSingle();
-                if (profile?.role === 'lgu_headmaster' || profile?.role === 'admin') {
+                if (profile?.role === 'lgu' || profile?.role === 'lgu_headmaster' || profile?.role === 'admin') {
                     targetRole = 'lgu';
                 }
             }
@@ -153,9 +163,9 @@ export default function NotificationsScreen() {
                 return {
                     id: item.id,
                     category: category as 'Emergency' | 'Updates',
-                    title: item.title || 'Notification',
+                    title: formatNotifText(item.title || 'Notification'),
                     time: getTimeAgo(item.created_at),
-                    desc: item.message || item.description || 'No description available',
+                    desc: formatNotifText(item.message || item.description || 'No description available'),
                     location: item.location || 'Cebu',
                     fullTime: getFullTime(item.created_at),
                     icon: alertIcon.icon,
@@ -183,7 +193,7 @@ export default function NotificationsScreen() {
         let channel = supabase.channel(`realtime-notifications-${Date.now()}`)
             .on(
                 'postgres_changes' as any,
-                { event: 'INSERT', schema: 'public', table: 'notifications' },
+                { event: '*', schema: 'public', table: 'notifications' },
                 (payload: any) => {
                     console.log('🔔 New real-time notification received!');
                     fetchNotifications(); // instantly re-fetch to get new list
@@ -243,6 +253,29 @@ export default function NotificationsScreen() {
             setModalVisible(false);
             setSelectedNotif(null);
         });
+    };
+
+    // Handle Mark as Unread
+    const handleMarkAsUnread = async (target: Notification) => {
+        const updated = notifications.map(n =>
+            n.id === target.id ? { ...n, unread: true } : n
+        );
+        setNotifications(updated);
+        
+        try {
+            const stored = await AsyncStorage.getItem(STORAGE_KEY);
+            const readIds: string[] = stored ? JSON.parse(stored) : [];
+            const filteredRead = readIds.filter(id => id !== target.id);
+            await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(filteredRead));
+        } catch (e) {
+            console.error('Storage update failed:', e);
+        }
+
+        try {
+            await supabase.from('notifications').update({ is_read: false }).eq('id', target.id);
+        } catch {}
+
+        setDeleteTarget(null);
     };
 
     // Delete notification
@@ -334,43 +367,43 @@ export default function NotificationsScreen() {
                     </View>
                 ) : (
                     filtered.map((item) => (
-        <TouchableOpacity
-                        key={item.id}
-                        style={[styles.card, item.unread && styles.cardUnread]}
-                        onPress={() => openModal(item)}
-                        onLongPress={() => setDeleteTarget(item)}
-                        delayLongPress={400}
-                        activeOpacity={0.7}
-                    >
-                        {/* Left accent bar */}
-                        <View style={[styles.cardAccent, { backgroundColor: (item as any).accent || item.iconColor }]} />
+                        <TouchableOpacity
+                            key={item.id}
+                            style={[styles.card, item.unread && styles.cardUnread]}
+                            onPress={() => openModal(item)}
+                            onLongPress={() => setDeleteTarget(item)}
+                            delayLongPress={400}
+                            activeOpacity={0.7}
+                        >
+                            {/* Left accent bar */}
+                            <View style={[styles.cardAccent, { backgroundColor: (item as any).accent || item.iconColor }]} />
 
-                        <View style={[styles.iconBox, { backgroundColor: item.iconBg }]}>
-                            <Ionicons name={item.icon as any} size={24} color={item.iconColor} />
-                        </View>
-
-                        <View style={styles.cardContent}>
-                            <View style={styles.cardRow}>
-                                <Text style={styles.cardTitle} numberOfLines={1}>{item.title}</Text>
-                                <Text style={styles.cardTime}>{item.time}</Text>
+                            <View style={[styles.iconBox, { backgroundColor: item.iconBg }]}>
+                                <Ionicons name={item.icon as any} size={24} color={item.iconColor} />
                             </View>
-                            <View style={styles.cardMetaRow}>
-                                <View style={[
-                                    styles.categoryPill,
-                                    item.category === 'Emergency' ? styles.pillEmergency : styles.pillUpdate,
-                                ]}>
-                                    <Text style={[
-                                        styles.categoryPillText,
-                                        item.category === 'Emergency' ? styles.pillTextEmergency : styles.pillTextUpdate,
-                                    ]}>
-                                        {item.category.toUpperCase()}
-                                    </Text>
+
+                            <View style={styles.cardContent}>
+                                <View style={styles.cardRow}>
+                                    <Text style={styles.cardTitle} numberOfLines={1}>{item.title}</Text>
+                                    <Text style={styles.cardTime}>{item.time}</Text>
                                 </View>
-                                {item.unread && <View style={[styles.dot, { backgroundColor: (item as any).accent || '#2563EB' }]} />}
+                                <View style={styles.cardMetaRow}>
+                                    <View style={[
+                                        styles.categoryPill,
+                                        item.category === 'Emergency' ? styles.pillEmergency : styles.pillUpdate,
+                                    ]}>
+                                        <Text style={[
+                                            styles.categoryPillText,
+                                            item.category === 'Emergency' ? styles.pillTextEmergency : styles.pillTextUpdate,
+                                        ]}>
+                                            {item.category.toUpperCase()}
+                                        </Text>
+                                    </View>
+                                    {item.unread && <View style={[styles.dot, { backgroundColor: (item as any).accent || '#2563EB' }]} />}
+                                </View>
+                                <Text style={styles.cardDesc} numberOfLines={2}>{item.desc}</Text>
                             </View>
-                            <Text style={styles.cardDesc} numberOfLines={2}>{item.desc}</Text>
-                        </View>
-                    </TouchableOpacity>
+                        </TouchableOpacity>
                     ))
                 )}
             </ScrollView>
@@ -380,8 +413,11 @@ export default function NotificationsScreen() {
                 <View style={styles.overlay}>
                     <TouchableOpacity style={styles.dimmer} activeOpacity={1} onPress={closeModal} />
                     <Animated.View style={[styles.sheet, { transform: [{ translateY: slideAnim }] }]}>
-                        <TouchableOpacity style={styles.xButton} onPress={closeModal}>
-                            <Ionicons name="close" size={24} color="#64748B" />
+                        {/* Drag Handle */}
+                        <View style={styles.sheetHandle} />
+
+                        <TouchableOpacity style={styles.xButton} onPress={closeModal} activeOpacity={0.7}>
+                            <Ionicons name="close" size={20} color="#64748B" />
                         </TouchableOpacity>
 
                         <View style={styles.modalHeader}>
@@ -401,15 +437,6 @@ export default function NotificationsScreen() {
                                 {selectedNotif?.desc.replace(/\[REF:.+?\]/, '').trim()}
                             </Text>
 
-                            {!selectedNotif?.desc.includes('[REF:') && (
-                                <View style={styles.locationSection}>
-                                    <Text style={styles.locLabel}>AFFECTED LOCATION</Text>
-                                    <Text style={styles.locText}>
-                                        Radius: 5km around {selectedNotif?.location}
-                                    </Text>
-                                </View>
-                            )}
-
                             {selectedNotif?.desc.includes('[REF:') ? (
                                 <TouchableOpacity 
                                     style={styles.primaryBtn} 
@@ -421,53 +448,44 @@ export default function NotificationsScreen() {
                                             router.push({ pathname: '/lgu-history', params: { openRequest: refId } } as any);
                                         }
                                     }}
+                                    activeOpacity={0.85}
                                 >
                                     <Text style={styles.primaryBtnText}>View Request Details</Text>
                                 </TouchableOpacity>
                             ) : (
-                                <>
-                                    <TouchableOpacity style={styles.primaryBtn} onPress={closeModal}>
-                                        <Text style={styles.primaryBtnText}>Acknowledge Alert</Text>
-                                    </TouchableOpacity>
-
-                                    <TouchableOpacity style={styles.secondaryBtn}>
-                                        <Ionicons name="share-outline" size={20} color="#1E293B" />
-                                        <Text style={styles.secondaryBtnText}>Share Warning</Text>
-                                    </TouchableOpacity>
-                                </>
+                                <TouchableOpacity style={styles.primaryBtn} onPress={closeModal} activeOpacity={0.85}>
+                                    <Text style={styles.primaryBtnText}>OK</Text>
+                                </TouchableOpacity>
                             )}
                         </ScrollView>
                     </Animated.View>
                 </View>
             </Modal>
 
-            {/* ── Delete Confirm Modal ── */}
+            {/* ── Action / Options Modal (Long Press) ── */}
             <Modal visible={!!deleteTarget} transparent animationType="fade" onRequestClose={() => setDeleteTarget(null)}>
                 <View style={styles.deleteOverlay}>
                     <View style={styles.deleteSheet}>
-                        <Text style={styles.deleteMsg} numberOfLines={2}>
-                            "{deleteTarget?.title}"
+                        
+                        <View style={styles.deleteIconCircle}>
+                            <Ionicons name="notifications" size={26} color="#2563EB" />
+                        </View>
+
+                        {/* Title without quotation marks */}
+                        <Text style={styles.deleteTitle} numberOfLines={2}>
+                            {deleteTarget?.title}
+                        </Text>
+                        <Text style={styles.deleteSub} numberOfLines={2}>
+                            {deleteTarget?.desc}
                         </Text>
 
                         {/* Mark as Unread */}
                         <TouchableOpacity
                             style={styles.markUnreadBtn}
-                            onPress={() => {
-                                if (!deleteTarget) return;
-                                const updated = notifications.map(n =>
-                                    n.id === deleteTarget.id ? { ...n, unread: true } : n
-                                );
-                                setNotifications(updated);
-                                // Remove from read list in storage
-                                AsyncStorage.getItem(STORAGE_KEY).then(stored => {
-                                    const readIds: string[] = stored ? JSON.parse(stored) : [];
-                                    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(readIds.filter(id => id !== deleteTarget.id)));
-                                });
-                                setDeleteTarget(null);
-                            }}
-                            activeOpacity={0.8}
+                            onPress={() => deleteTarget && handleMarkAsUnread(deleteTarget)}
+                            activeOpacity={0.85}
                         >
-                            <Ionicons name="mail-unread-outline" size={18} color="#2563EB" style={{ marginRight: 8 }} />
+                            <Ionicons name="mail-unread" size={18} color="#2563EB" style={{ marginRight: 8 }} />
                             <Text style={styles.markUnreadText}>Mark as Unread</Text>
                         </TouchableOpacity>
 
@@ -475,15 +493,17 @@ export default function NotificationsScreen() {
                         <TouchableOpacity
                             style={styles.deleteConfirmBtn}
                             onPress={() => deleteTarget && deleteNotif(deleteTarget)}
-                            activeOpacity={0.8}
+                            activeOpacity={0.85}
                         >
-                            <Ionicons name="trash-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-                            <Text style={styles.deleteConfirmText}>Delete</Text>
+                            <Ionicons name="trash-outline" size={18} color="#EF4444" style={{ marginRight: 8 }} />
+                            <Text style={styles.deleteConfirmText}>Delete Notification</Text>
                         </TouchableOpacity>
 
+                        {/* Cancel */}
                         <TouchableOpacity
                             style={styles.deleteCancelBtn}
                             onPress={() => setDeleteTarget(null)}
+                            activeOpacity={0.7}
                         >
                             <Text style={styles.deleteCancelText}>Cancel</Text>
                         </TouchableOpacity>
@@ -496,15 +516,15 @@ export default function NotificationsScreen() {
 
 const styles = StyleSheet.create({
     container:   { flex: 1, backgroundColor: '#FFFFFF' },
-    header:      { flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 16, alignItems: 'center', height: 50, marginTop: 25 },
+    header:      { flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 16, alignItems: 'center', height: 50, marginTop: 15 },
     backBtn:     { flexDirection: 'row', alignItems: 'center' },
-    blueText:    { color: '#2563EB', fontSize: 18, fontWeight: '600', marginLeft: 4 },
+    blueText:    { color: '#2563EB', fontSize: 17, fontWeight: '700', marginLeft: 4 },
     blueTextSmall: { color: '#2563EB', fontSize: 14, fontWeight: '600' },
     titleWrapper:  { paddingHorizontal: 20, marginTop: 10 },
-    mainTitle:     { fontSize: 32, fontWeight: 'bold', color: '#1E293B' },
+    mainTitle:     { fontSize: 32, fontWeight: '800', color: '#0F172A' },
 
     // Tabs
-    tabBar:   { flexDirection: 'row', backgroundColor: '#F1F5F9', marginHorizontal: 20, borderRadius: 12, padding: 4, marginTop: 20, marginBottom: 4 },
+    tabBar:   { flexDirection: 'row', backgroundColor: '#F1F5F9', marginHorizontal: 20, borderRadius: 12, padding: 4, marginTop: 18, marginBottom: 4 },
     tabItem:  { flex: 1, paddingVertical: 10, alignItems: 'center', borderRadius: 10 },
     activeTab: { backgroundColor: '#FFFFFF', elevation: 3, shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 4, shadowOffset: { width: 0, height: 2 } },
     tabInner: { flexDirection: 'row', alignItems: 'center', gap: 5 },
@@ -533,7 +553,7 @@ const styles = StyleSheet.create({
     card: {
         flexDirection: 'row',
         backgroundColor: '#FFFFFF',
-        borderRadius: 20,
+        borderRadius: 18,
         marginBottom: 12,
         borderWidth: 1,
         borderColor: '#F1F5F9',
@@ -546,9 +566,9 @@ const styles = StyleSheet.create({
     },
     cardUnread: { backgroundColor: '#FAFBFF', borderColor: '#DBEAFE' },
     cardAccent: { width: 4 },
-    iconBox: { width: 52, height: 52, borderRadius: 26, justifyContent: 'center', alignItems: 'center', margin: 16, marginRight: 12, flexShrink: 0 },
+    iconBox: { width: 48, height: 48, borderRadius: 24, justifyContent: 'center', alignItems: 'center', margin: 14, marginRight: 10, flexShrink: 0 },
     cardContent: { flex: 1, paddingVertical: 14, paddingRight: 16 },
-    cardRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 },
+    cardRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 5 },
     cardTitle: { fontSize: 14, fontWeight: '800', color: '#0F172A', flex: 1, marginRight: 8, lineHeight: 19 },
     cardTime: { fontSize: 11, color: '#94A3B8', fontWeight: '500', marginTop: 1 },
     cardMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 },
@@ -564,42 +584,83 @@ const styles = StyleSheet.create({
     pillTextEmergency:   { color: '#EF4444' },
     pillTextUpdate:      { color: '#10B981' },
 
-    // Modal
-    overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
+    // Sheet Modal
+    overlay: { flex: 1, backgroundColor: 'rgba(15,23,42,0.5)', justifyContent: 'flex-end' },
     dimmer:  { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
     sheet: {
-        backgroundColor: 'white',
-        borderTopLeftRadius: 35,
-        borderTopRightRadius: 35,
+        backgroundColor: '#FFFFFF',
+        borderTopLeftRadius: 32,
+        borderTopRightRadius: 32,
         padding: 24,
-        paddingTop: 45,
-        height: SCREEN_HEIGHT * 0.82,
+        paddingTop: 16,
+        maxHeight: SCREEN_HEIGHT * 0.85,
+        shadowColor: '#000',
+        shadowOpacity: 0.15,
+        shadowRadius: 20,
+        elevation: 15,
     },
-    xButton:         { position: 'absolute', right: 20, top: 20, backgroundColor: '#F1F5F9', borderRadius: 20, padding: 6, zIndex: 10 },
-    modalHeader:     { flexDirection: 'row', alignItems: 'center', marginBottom: 25 },
-    modalIcon:       { width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center' },
-    modalHeaderText: { flex: 1, marginLeft: 15 },
-    modalTitle:      { fontSize: 22, fontWeight: '800', color: '#1E293B' },
-    modalMeta:       { fontSize: 13, color: '#94A3B8', marginTop: 4 },
-    longDesc:        { fontSize: 16, color: '#475569', lineHeight: 24, marginBottom: 30 },
-    locationSection: { marginBottom: 30, paddingBottom: 20, borderBottomWidth: 1, borderBottomColor: '#F1F5F9' },
-    locLabel:        { fontSize: 12, fontWeight: '800', color: '#CBD5E1', marginBottom: 8 },
-    locText:         { fontSize: 15, color: '#64748B' },
-    primaryBtn:      { backgroundColor: '#2563EB', paddingVertical: 18, borderRadius: 16, alignItems: 'center', marginBottom: 12 },
-    primaryBtnText:  { color: 'white', fontSize: 16, fontWeight: '700' },
-    secondaryBtn:    { flexDirection: 'row', backgroundColor: '#F8FAFC', paddingVertical: 18, borderRadius: 16, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#F1F5F9' },
-    secondaryBtnText:{ color: '#1E293B', fontSize: 16, fontWeight: '700', marginLeft: 10 },
+    sheetHandle: {
+        width: 40,
+        height: 5,
+        backgroundColor: '#CBD5E1',
+        borderRadius: 3,
+        alignSelf: 'center',
+        marginBottom: 16,
+    },
+    xButton: {
+        position: 'absolute',
+        right: 20,
+        top: 20,
+        backgroundColor: '#F1F5F9',
+        borderRadius: 18,
+        width: 36,
+        height: 36,
+        justifyContent: 'center',
+        alignItems: 'center',
+        zIndex: 10,
+    },
+    modalHeader:     { flexDirection: 'row', alignItems: 'center', marginBottom: 20, marginTop: 4, paddingRight: 36 },
+    modalIcon:       { width: 56, height: 56, borderRadius: 28, justifyContent: 'center', alignItems: 'center' },
+    modalHeaderText: { flex: 1, marginLeft: 14 },
+    modalTitle:      { fontSize: 20, fontWeight: '800', color: '#0F172A', lineHeight: 26 },
+    modalMeta:       { fontSize: 12.5, color: '#64748B', marginTop: 3, fontWeight: '500' },
+    longDesc:        { fontSize: 15, color: '#334155', lineHeight: 23, marginBottom: 22 },
+    locationSection: {
+        marginBottom: 24,
+        padding: 14,
+        backgroundColor: '#F8FAFC',
+        borderRadius: 14,
+        borderWidth: 1,
+        borderColor: '#E2E8F0',
+    },
+    locHeaderRow:    { flexDirection: 'row', alignItems: 'center', marginBottom: 4 },
+    locLabel:        { fontSize: 11, fontWeight: '800', color: '#64748B', letterSpacing: 0.5 },
+    locText:         { fontSize: 14, color: '#1E293B', fontWeight: '600', marginLeft: 22 },
+    primaryBtn: {
+        backgroundColor: '#2563EB',
+        height: 52,
+        borderRadius: 14,
+        justifyContent: 'center',
+        alignItems: 'center',
+        marginBottom: 16,
+        shadowColor: '#2563EB',
+        shadowOpacity: 0.25,
+        shadowRadius: 8,
+        shadowOffset: { width: 0, height: 4 },
+        elevation: 4,
+    },
+    primaryBtnText:  { color: '#FFFFFF', fontSize: 16, fontWeight: '800' },
 
-    // Delete / action sheet
-    deleteOverlay:     { flex: 1, backgroundColor: 'rgba(15,23,42,0.6)', justifyContent: 'center', alignItems: 'center', padding: 32 },
-    deleteSheet:       { backgroundColor: '#FFFFFF', borderRadius: 24, padding: 24, width: '100%', alignItems: 'center' },
-    deleteIconCircle:  { width: 60, height: 60, borderRadius: 30, backgroundColor: '#FEE2E2', justifyContent: 'center', alignItems: 'center', marginBottom: 16 },
-    deleteTitle:       { fontSize: 18, fontWeight: '800', color: '#1E293B', marginBottom: 8 },
-    deleteMsg:         { fontSize: 13, color: '#64748B', textAlign: 'center', marginBottom: 20, lineHeight: 18 },
-    markUnreadBtn:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#EFF6FF', width: '100%', height: 50, borderRadius: 14, marginBottom: 10, borderWidth: 1, borderColor: '#BFDBFE' },
-    markUnreadText:    { color: '#2563EB', fontSize: 15, fontWeight: '700' },
-    deleteConfirmBtn:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#EF4444', width: '100%', height: 50, borderRadius: 14, marginBottom: 10 },
-    deleteConfirmText: { color: '#FFFFFF', fontSize: 15, fontWeight: '800' },
-    deleteCancelBtn:   { width: '100%', height: 44, justifyContent: 'center', alignItems: 'center' },
-    deleteCancelText:  { color: '#94A3B8', fontSize: 15, fontWeight: '600' },
+    // Action sheet (Long press dialog)
+    deleteOverlay:     { flex: 1, backgroundColor: 'rgba(15,23,42,0.55)', justifyContent: 'center', alignItems: 'center', padding: 24 },
+    deleteSheet:       { backgroundColor: '#FFFFFF', borderRadius: 24, padding: 24, width: '100%', alignItems: 'center', shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 20, elevation: 10 },
+    deleteIconCircle:  { width: 54, height: 54, borderRadius: 27, backgroundColor: '#EFF6FF', justifyContent: 'center', alignItems: 'center', marginBottom: 14 },
+    deleteTitle:       { fontSize: 17, fontWeight: '800', color: '#0F172A', textAlign: 'center', marginBottom: 6 },
+    deleteSub:         { fontSize: 12.5, color: '#64748B', textAlign: 'center', marginBottom: 20, lineHeight: 18, paddingHorizontal: 8 },
+    markUnreadBtn:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#EFF6FF', width: '100%', height: 48, borderRadius: 14, marginBottom: 10, borderWidth: 1, borderColor: '#BFDBFE' },
+    markUnreadText:    { color: '#2563EB', fontSize: 14.5, fontWeight: '700' },
+    deleteConfirmBtn:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#FEF2F2', width: '100%', height: 48, borderRadius: 14, marginBottom: 10, borderWidth: 1, borderColor: '#FECACA' },
+    deleteConfirmText: { color: '#EF4444', fontSize: 14.5, fontWeight: '700' },
+    deleteCancelBtn:   { width: '100%', height: 42, justifyContent: 'center', alignItems: 'center' },
+    deleteCancelText:  { color: '#64748B', fontSize: 14.5, fontWeight: '600' },
 });

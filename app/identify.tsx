@@ -1,16 +1,16 @@
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView, TextInput, Image, ActivityIndicator, KeyboardAvoidingView, Platform, Alert, Modal, Animated, Dimensions, StatusBar, Switch, FlatList, RefreshControl, Linking } from 'react-native';
+import { ActivityIndicator, Alert, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { supabase } from '@/utils/supabase';
 
-const SUPABASE_URL = 'https://xncciaozzxoqbesfxpww.supabase.co';
-const ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhuY2NpYW96enhvcWJlc2Z4cHd3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIzNDgyMzQsImV4cCI6MjA4NzkyNDIzNH0.im6QTwjVyryj4y0fvcloH4qw-Rj5PPftDYhk4sKtymI';
+const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL!;
+const ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY!;
 
 const DOCUMENT_TYPES = [
     'Philippine Passport',
@@ -176,34 +176,144 @@ export default function IdentityVerification() {
                 throw new Error('Failed to submit ID. Please try again.');
             }
 
-            // ── ID validation runs silently in the background ──
-            // Always trigger AI validation with both URL and base64 for 100% reliability
+            // ── Send 'Pending' notification immediately ──
+            await supabase.from('notifications').insert({
+                user_id: userId,
+                title: 'ID Verification In Progress',
+                message: 'Your ID is currently being verified. Please wait — you will be notified once the verification is complete.',
+                type: 'Updates',
+                is_read: false,
+                target_role: 'user',
+                created_at: new Date().toISOString(),
+            });
+
+            // ── ID validation runs in background directly via Gemini AI ──
             if (verData?.id_verification_id) {
                 const capturedDocType = selectedDocType;
                 const capturedVerId = verData.id_verification_id;
 
-                fetch(`${SUPABASE_URL}/functions/v1/validate-id-image`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${ANON_KEY}`,
-                        'apikey': ANON_KEY,
-                    },
-                    body: JSON.stringify({
-                        verificationId: capturedVerId,
-                        idType: capturedDocType,
-                        userId: userId,
-                        imageUrl: frontUrl,
-                        imageBase64: frontBase64,
-                        backBase64: backBase64,
-                    }),
-                })
-                    .then(r => r.json())
-                    .then(res => {
-                        const confidence = typeof res.ai_confidence_score === 'number' ? res.ai_confidence_score : 0;
-                        console.log(`📊 ID validation result: ${res.status}, confidence: ${confidence.toFixed(1)}%`);
-                    })
-                    .catch(e => console.warn('⚠️ Validation background error:', e.message));
+                const runAIValidation = async () => {
+                    try {
+                        const geminiKey = process.env.EXPO_PUBLIC_GEMINI_LANTAW_AI || '';
+                        const prompt = `You are an ID verification expert for FloodWatch Cebu, a Philippine government disaster monitoring app.
+
+Your job is to verify if the submitted image is a real, valid Philippine government-issued ID.
+
+The user selected document type: "${capturedDocType}"
+
+Carefully examine the image and score it:
+
+SCORING GUIDE for confidence_score (0 to 100):
+- 95-100: Clearly a genuine Philippine gov ID, all text readable, photo visible, no tampering
+- 85-94: Looks like a real ID but slightly blurry or partially obscured
+- 70-84: Probably an ID but quality is poor or some details unclear  
+- 50-69: Uncertain — could be an ID but too many issues
+- 0-49: Not an ID, fake, screenshot, selfie, or unreadable
+
+APPROVE only if confidence_score >= 90.
+REJECT if confidence_score < 90.
+
+Respond ONLY in this exact JSON format with no other text:
+{
+  "ai_is_valid": true,
+  "confidence_score": 95,
+  "ai_insight": "Clear and genuine PhilSys National ID with visible QR code and details.",
+  "status": "approved"
+}`;
+
+                        const cleanBase64 = frontBase64.replace(/^data:image\/[a-zA-Z0-9.+]+;base64,/, '').trim();
+                        const resp = await fetch(
+                            `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${geminiKey}`,
+                            {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    contents: [{
+                                        parts: [
+                                            { inlineData: { mimeType: 'image/jpeg', data: cleanBase64 } },
+                                            { text: prompt }
+                                        ]
+                                    }],
+                                    generationConfig: { temperature: 0.1, maxOutputTokens: 2048, thinkingConfig: { thinkingBudget: 0 } }
+                                })
+                            }
+                        );
+
+                        if (!resp.ok) {
+                            throw new Error(`Gemini status ${resp.status}`);
+                        }
+
+                        const geminiJson = await resp.json();
+                        const rawText = geminiJson?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                        const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+                        if (!jsonMatch) throw new Error('No JSON in Gemini output');
+
+                        const parsed = JSON.parse(jsonMatch[0]);
+                        const confidence = Math.max(0, Math.min(100, Math.round(parsed.confidence_score ?? 0)));
+                        const isApproved = confidence >= 90 && parsed.ai_is_valid;
+                        const finalStatus = isApproved ? 'approved' : 'rejected';
+
+                        // 1. Update id_verification row
+                        await supabase
+                            .from('id_verification')
+                            .update({
+                                ai_is_valid: isApproved,
+                                ai_confidence_score: confidence,
+                                ai_insight: parsed.ai_insight || 'AI analysis completed.',
+                                status: finalStatus,
+                            })
+                            .eq('id_verification_id', capturedVerId);
+
+                        // 2. Update profile and send notification
+                        if (isApproved) {
+                            await supabase
+                                .from('profiles')
+                                .update({ is_verified: true })
+                                .eq('id', userId);
+                            await AsyncStorage.setItem('identity_verified', 'true');
+
+                            await supabase.from('notifications').insert({
+                                user_id: userId,
+                                title: '✅ ID Verification Complete',
+                                message: 'Your identity has been successfully verified. You can now submit flood incident reports.',
+                                type: 'Updates',
+                                is_read: false,
+                                target_role: 'user',
+                                created_at: new Date().toISOString(),
+                            });
+                        } else {
+                            await supabase
+                                .from('profiles')
+                                .update({ is_verified: false })
+                                .eq('id', userId);
+                            await AsyncStorage.removeItem('identity_verified');
+
+                            await supabase.from('notifications').insert({
+                                user_id: userId,
+                                title: '❌ ID Verification Failed',
+                                message: 'Your ID could not be verified. Please make sure your ID is clear, all details are readable, and try again.',
+                                type: 'Updates',
+                                is_read: false,
+                                target_role: 'user',
+                                created_at: new Date().toISOString(),
+                            });
+                        }
+                        console.log(`✅ Direct AI Validation done: ${finalStatus} (${confidence}%)`);
+                    } catch (aiErr: any) {
+                        console.warn('⚠️ Direct AI error, falling back to manual review:', aiErr.message);
+                        await supabase
+                            .from('id_verification')
+                            .update({
+                                ai_is_valid: false,
+                                ai_confidence_score: 0,
+                                ai_insight: 'AI validation unavailable. Pending manual review.',
+                                status: 'pending',
+                            })
+                            .eq('id_verification_id', capturedVerId);
+                    }
+                };
+
+                runAIValidation();
             }
 
             // Show success immediately — user doesn't wait for validation

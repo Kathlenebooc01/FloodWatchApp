@@ -159,7 +159,7 @@ Deno.serve(async (req) => {
     const cleanBase64 = base64Data.replace(/^data:image\/[a-zA-Z0-9.+]+;base64,/, '').trim();
 
     // 4. Send to Gemini AI for identification and confidence analysis
-    const models = ['gemini-3.6-flash'];
+    const models = ['gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-3.5-flash'];
     let result: any = null;
 
     for (const model of models) {
@@ -219,7 +219,7 @@ Examples of what to APPROVE:
                   },
                 ],
               }],
-              generationConfig: { temperature: 0.1, maxOutputTokens: 300 },
+              generationConfig: { temperature: 0.1, maxOutputTokens: 2048, responseMimeType: 'application/json' },
             }),
           }
         );
@@ -234,7 +234,8 @@ Examples of what to APPROVE:
         const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
         console.log('🤖 Gemini raw response:', rawText);
 
-        const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+        const cleanText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
+        const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
           const parsed = JSON.parse(jsonMatch[0]);
 

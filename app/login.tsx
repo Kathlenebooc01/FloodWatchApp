@@ -92,9 +92,12 @@ export default function LoginScreen() {
             const { error } = await supabase.auth.resetPasswordForEmail(forgotEmail.trim());
             if (error) throw error;
 
-            // Close forgot modal and show success modal
+            // Immediately navigate to reset-password screen
             setForgotModalVisible(false);
-            setSuccessModalVisible(true);
+            router.push({
+                pathname: '/reset-password',
+                params: { email: forgotEmail.trim(), from: 'citizen' }
+            } as any);
             
         } catch (err: any) {
             Alert.alert('Error', err.message || 'Failed to send reset code.');
@@ -107,7 +110,7 @@ export default function LoginScreen() {
         setSuccessModalVisible(false);
         router.push({
             pathname: '/reset-password',
-            params: { email: forgotEmail.trim() }
+            params: { email: forgotEmail.trim(), from: 'citizen' }
         } as any);
     };
 

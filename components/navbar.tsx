@@ -18,6 +18,8 @@ export default function Navbar() {
 
     // Check verification status every time the screen changes
     useEffect(() => {
+        let channel: any = null;
+
         const check = async () => {
             try {
                 const { data: sessionData } = await supabase.auth.getSession();
@@ -33,10 +35,10 @@ export default function Navbar() {
                     .limit(1)
                     .maybeSingle();
 
-                // Check profile role
+                // Check profile role and is_verified status
                 const { data: profile } = await supabase
                     .from('profiles')
-                    .select('role')
+                    .select('role, is_verified')
                     .eq('id', userId)
                     .maybeSingle();
 
@@ -44,7 +46,7 @@ export default function Navbar() {
                     setUserRole(profile.role.toLowerCase());
                 }
 
-                if (data?.status === 'approved') {
+                if (profile?.is_verified || data?.status === 'approved') {
                     setIsVerified(true);
                     setVerifyStatus('approved');
                     await AsyncStorage.setItem('identity_verified', 'true');
@@ -53,6 +55,7 @@ export default function Navbar() {
                     setVerifyStatus('pending');
                     await AsyncStorage.setItem('identity_verified', 'pending');
                 } else {
+                    // Rejected or none
                     setIsVerified(false);
                     setVerifyStatus('none');
                     await AsyncStorage.removeItem('identity_verified');
@@ -62,11 +65,53 @@ export default function Navbar() {
                 const local = await AsyncStorage.getItem('identity_verified');
                 if (local === 'true') { setIsVerified(true); setVerifyStatus('approved'); }
                 else if (local === 'pending') { setVerifyStatus('pending'); }
+                else { setIsVerified(false); setVerifyStatus('none'); }
             } finally {
                 setVerifyChecked(true);
             }
         };
-        check();
+
+        // ── Single async IIFE: check first, then subscribe ──
+        // isMounted guard ensures channel is only created if effect is still active,
+        // preventing the "cannot add callbacks after subscribe()" race condition.
+        let isMounted = true;
+
+        const init = async () => {
+            await check();
+            if (!isMounted) return;
+
+            const { data: sessionData } = await supabase.auth.getSession();
+            const userId = sessionData?.session?.user?.id;
+            if (!userId || !isMounted) return;
+
+            // Append Date.now() to guarantee a unique channel name per mount
+            channel = supabase
+                .channel(`navbar-realtime-${userId}-${Date.now()}`)
+                .on(
+                    'postgres_changes',
+                    { event: '*', schema: 'public', table: 'id_verification', filter: `user_id=eq.${userId}` },
+                    () => {
+                        console.log('⚡ Realtime navbar id_verification update');
+                        check();
+                    }
+                )
+                .on(
+                    'postgres_changes',
+                    { event: '*', schema: 'public', table: 'profiles', filter: `id=eq.${userId}` },
+                    () => {
+                        console.log('⚡ Realtime navbar profile update');
+                        check();
+                    }
+                )
+                .subscribe();
+        };
+
+        init();
+
+        return () => {
+            isMounted = false;
+            if (channel) supabase.removeChannel(channel);
+        };
     }, [pathname]);
 
     const isActive = (path: string) => pathname === path;

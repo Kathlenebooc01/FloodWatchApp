@@ -54,6 +54,7 @@ export default function RootLayout() {
                 <Stack.Screen name="localreports" />
                 <Stack.Screen name="lgu-report" />
                 <Stack.Screen name="situational-lgu" />
+                <Stack.Screen name="situational-admin" />
                 <Stack.Screen name="logistics-lgu" />
                 <Stack.Screen name="incident-lgu" />
                 <Stack.Screen name="reporthistory" />

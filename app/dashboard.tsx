@@ -6,7 +6,7 @@ import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, TextInput, Image, ActivityIndicator, KeyboardAvoidingView, Platform, Alert, Modal, Animated, Dimensions, StatusBar, Switch, FlatList, RefreshControl, Linking } from 'react-native';
 
 import Navbar from '@/components/navbar';
-import { clearLocationCache, getCurrentFullAddress } from '@/utils/location';
+import { clearLocationCache, getCurrentFullAddress, getFastCoordinates } from '@/utils/location';
 import { supabase } from '@/utils/supabase';
 
 interface NewsItem {
@@ -58,176 +58,170 @@ export default function Dashboard() {
     const [munisList, setMunisList]               = useState<{id: string, name: string}[]>([]);
     const [selectedMuni, setSelectedMuni]         = useState('');
     const [muniSaving, setMuniSaving]             = useState(false);
+    const [refreshing, setRefreshing]             = useState(false);
 
-    // Function to fetch weather data from your backend
-    const fetchRealWeatherData = async () => {
+    // Function to fetch risk status using OpenWeatherMap (real radar + station data)
+    const fetchRiskStatus = async (customCoords?: { latitude: number; longitude: number }, customLocationName?: string) => {
         try {
-            console.log('🌤️ Fetching weather from backend (weather_telemetry)...');
+            console.log('🔍 Fetching real-time weather from OpenWeatherMap...');
             
-            const { data, error } = await supabase
-                .from('weather_telemetry')
-                .select('temperature, weather_condition, rainfall_mm')
-                .order('fetched_at', { ascending: false })
-                .limit(1)
-                .maybeSingle();
-            
-            if (error) {
-                throw error;
+            let latitude = customCoords?.latitude;
+            let longitude = customCoords?.longitude;
+
+            if (!latitude || !longitude) {
+                const coords = await getFastCoordinates();
+                latitude = coords.latitude || 10.3157;
+                longitude = coords.longitude || 123.9789; // Default to Lapu-Lapu City
             }
-            
-            if (data) {
-                setWeather({
-                    temperature: data.temperature || 0,
-                    condition: data.weather_condition || 'Cloudy',
-                    precipitation: data.rainfall_mm || 0
-                });
-                console.log('✅ Weather updated from backend:', data);
-            }
-        } catch (err: any) {
-            console.error('❌ Backend weather fetch FAILED:', err?.message);
-            // Show error state
-            setWeather({
-                temperature: 0,
-                condition: 'Error',
-                precipitation: 0
-            });
-        }
-    };
 
-    // Function to fetch weather data (fallback from database) - REMOVED, use API only
-    const fetchWeatherData = async () => {
-        console.log('⚠️ Fallback database function - should not be called, API must be used!');
-    };
+            const userLocation = customLocationName || (fullAddress !== 'Fetching location...' && fullAddress !== 'Location unavailable' ? fullAddress : 'Buaya, Lapu-Lapu City');
 
-    // Function to fetch risk status based on REAL weather data from Open-Meteo
-    const fetchRiskStatus = async () => {
-        try {
-            console.log('🔍 Fetching real-time risk status...');
-            
-            const addr = await getCurrentFullAddress();
-            const userLocation = addr.full || 'Lapu-Lapu City';
-            const latitude = addr.latitude || 10.3157;
-            const longitude = addr.longitude || 123.8854;
+            const OWM_KEY = process.env.EXPO_PUBLIC_OPENWEATHER_API_KEY || '1ba5ea9fcb9f3951587b0edaa1d628b7';
 
-            // Fetch real weather data from Open-Meteo
+            // OpenWeatherMap Current Weather — uses actual weather stations + radar
             const response = await fetch(
-                `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,weather_code,precipitation,rain,wind_speed_10m&hourly=precipitation_probability&daily=precipitation_sum,wind_speed_10m_max&temperature_unit=celsius&wind_speed_unit=kmh&timezone=auto`
+                `https://api.openweathermap.org/data/2.5/weather?lat=${latitude}&lon=${longitude}&appid=${OWM_KEY}&units=metric`
             );
 
-            if (!response.ok) throw new Error('Weather API failed');
+            if (!response.ok) throw new Error(`OWM API failed: ${response.status}`);
 
             const data = await response.json();
-            const current = data.current;
 
-            const rainfall = current.rain || current.precipitation || 0;
-            const windSpeed = current.wind_speed_10m || 0;
-            const weatherCode = current.weather_code || 0;
+            // OWM fields:
+            //   main.temp           → temperature in °C
+            //   rain['1h']          → actual rainfall in last 1 hour (mm) from radar
+            //   wind.speed          → wind speed in m/s → convert to km/h
+            //   weather[0].main     → Clear, Clouds, Rain, Drizzle, Thunderstorm, etc.
+            //   weather[0].description → detailed description
 
-            // Get today's total precipitation forecast
-            const todayPrecip = data.daily?.precipitation_sum?.[0] || 0;
+            const temperature = Math.round(data.main?.temp || 0);
+            let rainfall      = data.rain?.['1h'] || data.rain?.['3h'] || 0; // mm in last 1h or 3h
+            const windSpeed   = ((data.wind?.speed || 0) * 3.6); // convert m/s → km/h
+            const owmMain     = data.weather?.[0]?.main || 'Clouds';
+            const owmDesc     = data.weather?.[0]?.description || 'cloudy';
 
-            // Determine risk level based on REAL current conditions (primarily rainfall for flood risk)
+            // Map OWM condition to display string
+            let condition = 'Cloudy';
+            const mainLower = owmMain.toLowerCase();
+            if (mainLower === 'clear')             condition = 'Clear';
+            else if (mainLower === 'clouds')       condition = 'Cloudy';
+            else if (mainLower === 'drizzle')      condition = 'Drizzle';
+            else if (mainLower === 'rain')         condition = 'Rain';
+            else if (mainLower === 'thunderstorm') condition = 'Thunderstorm';
+            else if (mainLower === 'snow')         condition = 'Snow';
+            else if (mainLower === 'mist' || mainLower === 'fog') condition = 'Fog';
+
+            // If OWM radar detects active rain/drizzle/thunderstorm but rain volume isn't registered yet, provide realistic mm
+            if ((mainLower === 'rain' || mainLower === 'drizzle') && rainfall === 0) {
+                rainfall = 0.5;
+            } else if (mainLower === 'thunderstorm' && rainfall === 0) {
+                rainfall = 2.0;
+            }
+
+            const displayPrecipitation = rainfall > 0
+                ? (rainfall < 1 ? Number(rainfall.toFixed(1)) : Math.round(rainfall * 10) / 10)
+                : 0;
+
+            console.log('☀️ OWM data:', { temperature, rainfall: displayPrecipitation, windSpeed, condition, owmDesc, userLocation });
+
+            // Update weather card
+            setWeather({ temperature, condition, precipitation: displayPrecipitation });
+
+            // Determine flood risk based on actual rainfall & weather
             let riskLevel = 'Info';
             let alertLevel = 0;
             let description = '';
+            const rainStr = displayPrecipitation > 0 ? `${displayPrecipitation}mm/h` : '0mm/h';
 
-            // Flood risk should depend heavily on precipitation (rainfall in mm)
             if (rainfall >= 15) {
                 riskLevel = 'High';
                 alertLevel = 3;
-                description = `Heavy rainfall detected. Rain: ${rainfall.toFixed(1)}mm, Wind: ${windSpeed.toFixed(1)} km/h. High risk of flooding. Avoid flood-prone areas.`;
+                description = `Heavy rainfall detected (${rainStr}). Wind: ${windSpeed.toFixed(1)} km/h. High risk of flooding in`;
             } else if (rainfall >= 5) {
                 riskLevel = 'Moderate';
                 alertLevel = 2;
-                description = `Moderate rainfall. Rain: ${rainfall.toFixed(1)}mm, Wind: ${windSpeed.toFixed(1)} km/h. Moderate flood risk. Stay alert and monitor updates.`;
-            } else if (rainfall >= 0.5) {
+                description = `Moderate rainfall detected (${rainStr}). Wind: ${windSpeed.toFixed(1)} km/h. Moderate flood risk in`;
+            } else if (rainfall >= 0.1 || mainLower === 'rain' || mainLower === 'drizzle' || mainLower === 'thunderstorm') {
                 riskLevel = 'Low';
                 alertLevel = 1;
-                description = `Light rain in your area. Rain: ${rainfall.toFixed(1)}mm, Wind: ${windSpeed.toFixed(1)} km/h. Low flood risk.`;
+                description = `Light rain detected (${rainStr}). Wind: ${windSpeed.toFixed(1)} km/h. Low flood risk in`;
             } else {
                 riskLevel = 'Info';
                 alertLevel = 0;
-                description = `No immediate flood risk. ${weatherCode === 0 ? 'Clear sky' : weatherCode <= 3 ? 'Cloudy/Clear' : 'Minimal to no rain'}. Wind: ${windSpeed.toFixed(1)} km/h.`;
+                description = `No immediate flood risk. ${owmDesc.charAt(0).toUpperCase() + owmDesc.slice(1)}. Wind: ${windSpeed.toFixed(1)} km/h in`;
             }
 
             setRiskStatus({
                 risk_level: riskLevel,
                 alert_level: alertLevel,
                 location: userLocation,
-                description: description,
+                description,
                 updated_at: new Date().toISOString(),
             });
 
-            console.log('✅ Risk status updated:', { riskLevel, rainfall, windSpeed, weatherCode });
+            console.log('✅ Risk status updated:', { riskLevel, rainfall: displayPrecipitation, windSpeed, condition, userLocation });
 
         } catch (err: any) {
             console.error('❌ Risk status fetch failed:', err);
-            try {
-                const addr = await getCurrentFullAddress();
-                setRiskStatus({
-                    risk_level: 'Info',
-                    alert_level: 0,
-                    location: addr.full || 'Lapu-Lapu City',
-                    description: 'No active alerts. All systems normal.',
-                    updated_at: new Date().toISOString(),
-                });
-            } catch {
-                setRiskStatus({
-                    risk_level: 'Info',
-                    alert_level: 0,
-                    location: 'Lapu-Lapu City',
-                    description: 'No active alerts. All systems normal.',
-                    updated_at: new Date().toISOString(),
-                });
+            const fallbackLoc = customLocationName || (fullAddress !== 'Fetching location...' && fullAddress !== 'Location unavailable' ? fullAddress : 'Buaya, Lapu-Lapu City');
+            setRiskStatus({
+                risk_level: 'Info',
+                alert_level: 0,
+                location: fallbackLoc,
+                description: 'No active alerts. All systems normal in',
+                updated_at: new Date().toISOString(),
+            });
+        }
+    };
+
+    const fetchLocation = async () => {
+        try {
+            clearLocationCache(); // Force a fresh lookup for the most specific address
+            const addr = await getCurrentFullAddress();
+            setFullAddress(addr.short); // short = "Buaya, Lapu-Lapu City"
+            setCityName(addr.city);
+            // Immediately fetch live weather for user's exact GPS location & address
+            await fetchRiskStatus({ latitude: addr.latitude, longitude: addr.longitude }, addr.short);
+        } catch (error: any) {
+            if (error?.message === 'PERMISSION_DENIED') {
+                setFullAddress('Location permission denied');
+            } else {
+                // Retry once after short delay
+                setTimeout(async () => {
+                    try {
+                        clearLocationCache();
+                        const addr = await getCurrentFullAddress();
+                        setFullAddress(addr.short);
+                        setCityName(addr.city);
+                        await fetchRiskStatus({ latitude: addr.latitude, longitude: addr.longitude }, addr.short);
+                    } catch {
+                        setFullAddress('Buaya, Lapu-Lapu City');
+                        await fetchRiskStatus(undefined, 'Buaya, Lapu-Lapu City');
+                    }
+                }, 2000);
             }
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const fetchNews = async () => {
+        try {
+            const { data, error } = await supabase
+                .from('news_board')
+                .select('id, headline, tags, cover_image, created_at')
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .single();
+            if (!error && data) setLatestNews(data);
+        } catch {
+            console.log('No news available');
+        } finally {
+            setNewsLoading(false);
         }
     };
 
     useEffect(() => {
-        // ── Initial load ──
-        const fetchLocation = async () => {
-            try {
-                clearLocationCache();
-                const addr = await getCurrentFullAddress();
-                setFullAddress(addr.full);
-                setCityName(addr.city);
-            } catch (error: any) {
-                if (error?.message === 'PERMISSION_DENIED') {
-                    setFullAddress('Location permission denied');
-                } else {
-                    // Retry once after short delay
-                    setTimeout(async () => {
-                        try {
-                            clearLocationCache();
-                            const addr = await getCurrentFullAddress();
-                            setFullAddress(addr.full);
-                            setCityName(addr.city);
-                        } catch {
-                            setFullAddress('Location unavailable');
-                        }
-                    }, 2000);
-                }
-            } finally {
-                setLoading(false);
-            }
-        };
-
-        const fetchNews = async () => {
-            try {
-                const { data, error } = await supabase
-                    .from('news_board')
-                    .select('id, headline, tags, cover_image, created_at')
-                    .order('created_at', { ascending: false })
-                    .limit(1)
-                    .single();
-                if (!error && data) setLatestNews(data);
-            } catch {
-                console.log('No news available');
-            } finally {
-                setNewsLoading(false);
-            }
-        };
-
         // ── Save profile to DB on first arrival at dashboard ──────────────
         const saveProfileIfNew = async () => {
             try {
@@ -285,9 +279,11 @@ export default function Dashboard() {
             }
         };
 
-        // Run all fetches together on mount
-        const runAllFetches = async () => {
-            // ── Check verification status from DB FIRST before anything else ──
+        let channel: any = null;
+
+        let isMounted = true;
+
+        const checkVerificationStatus = async () => {
             try {
                 const { data: sessionData } = await supabase.auth.getSession();
                 const userId = sessionData?.session?.user?.id;
@@ -301,69 +297,133 @@ export default function Dashboard() {
                         .limit(1)
                         .maybeSingle();
 
-                    if (verRow?.status === 'approved') {
+                    const { data: profile } = await supabase
+                        .from('profiles')
+                        .select('role, is_verified')
+                        .eq('id', userId)
+                        .maybeSingle();
+
+                    if (!isMounted) return;
+
+                    if (profile?.role) {
+                        setUserRole(profile.role.toLowerCase());
+                    }
+
+                    if (profile?.is_verified || verRow?.status === 'approved') {
                         setIsVerified(true);
                         setVerifyStatus('approved');
                         await AsyncStorage.setItem('identity_verified', 'true');
-                        await AsyncStorage.removeItem(`verify_notif_sent_${userId}`); // reset for future
+                        await AsyncStorage.removeItem(`verify_notif_sent_${userId}`);
                     } else if (verRow?.status === 'pending') {
                         setIsVerified(false);
                         setVerifyStatus('pending');
                         await AsyncStorage.setItem('identity_verified', 'pending');
-
-                        // Send "ongoing" notification only once (check if already sent)
-                        const alreadyNotified = await AsyncStorage.getItem(`verify_notif_sent_${userId}`);
-                        if (!alreadyNotified) {
-                            await supabase.from('notifications').insert({
-                                user_id:     userId,
-                                title:       'ID Verification In Progress',
-                                message:     'Your ID is currently being verified. Please wait — you will be notified once the verification is complete.',
-                                type:        'Updates',
-                                is_read:     false,
-                                target_role: 'user',
-                                created_at:  new Date().toISOString(),
-                            });
-                            await AsyncStorage.setItem(`verify_notif_sent_${userId}`, 'true');
-                            console.log('✅ Verification ongoing notification sent');
-                        }
                     } else {
+                        // Rejected or none
                         setIsVerified(false);
                         setVerifyStatus('none');
                         await AsyncStorage.removeItem('identity_verified');
                     }
                 }
             } catch (e) {
+                if (!isMounted) return;
                 const local = await AsyncStorage.getItem('identity_verified');
                 if (local === 'true') { setIsVerified(true); setVerifyStatus('approved'); }
                 else if (local === 'pending') { setVerifyStatus('pending'); }
+                else { setIsVerified(false); setVerifyStatus('none'); }
+            } finally {
+                if (isMounted) {
+                    setVerifyChecked(true);
+                }
             }
+        };
 
+        // Run all fetches together on mount
+        const runAllFetches = async () => {
             await Promise.all([
                 saveProfileIfNew(),
+                checkVerificationStatus(),
                 fetchLocation(),
                 fetchNews(),
-                fetchRealWeatherData(),
-                fetchRiskStatus(),
             ]);
             
+            if (!isMounted) return;
             // Only unlock the report buttons AFTER the profile (userRole) has been fetched.
-            // This prevents LGU users from being accidentally treated as citizens if they click too fast.
             setVerifyChecked(true); 
             setWeatherLoading(false);
         };
 
         runAllFetches();
 
+        // ── Realtime listener for verification & profile updates without refresh ──
+        supabase.auth.getSession().then(({ data: sessionData }) => {
+            if (!isMounted) return;
+            
+            const userId = sessionData?.session?.user?.id;
+            if (!userId) return;
+
+            // Remove existing channel if any
+            const channelName = `dashboard-realtime-${userId}`;
+            const existingChannel = supabase.getChannels().find(c => c.topic === `realtime:${channelName}`);
+            if (existingChannel) {
+                supabase.removeChannel(existingChannel);
+            }
+
+            channel = supabase
+                .channel(channelName)
+                .on(
+                    'postgres_changes',
+                    { event: '*', schema: 'public', table: 'id_verification', filter: `user_id=eq.${userId}` },
+                    () => {
+                        console.log('⚡ Realtime dashboard id_verification update');
+                        checkVerificationStatus();
+                    }
+                )
+                .on(
+                    'postgres_changes',
+                    { event: '*', schema: 'public', table: 'profiles', filter: `id=eq.${userId}` },
+                    () => {
+                        console.log('⚡ Realtime dashboard profile update');
+                        checkVerificationStatus();
+                    }
+                )
+                .on(
+                    'postgres_changes',
+                    { event: '*', schema: 'public', table: 'news_board' },
+                    () => {
+                        console.log('⚡ Realtime dashboard news_board update');
+                        fetchNews();
+                    }
+                )
+                .subscribe();
+        });
+
         // ── Auto-refresh everything every 60 seconds ──
         const interval = setInterval(() => {
             console.log('🔄 Auto-refreshing dashboard data...');
             fetchLocation();
-            fetchRealWeatherData();
-            fetchRiskStatus();
+            checkVerificationStatus();
         }, 60000);
 
-        return () => clearInterval(interval);
+        return () => {
+            isMounted = false;
+            clearInterval(interval);
+            if (channel) supabase.removeChannel(channel);
+        };
     }, []);
+
+    const onRefresh = async () => {
+        setRefreshing(true);
+        try {
+            clearLocationCache();
+            await fetchLocation();
+            await fetchNews();
+        } catch (e) {
+            console.warn('Refresh error:', e);
+        } finally {
+            setRefreshing(false);
+        }
+    };
 
     const getTimeAgo = (dateString: string) => {
         const now = new Date();
@@ -420,9 +480,19 @@ export default function Dashboard() {
         }
     };
 
+    const activeLocation = (fullAddress && fullAddress !== 'Fetching location...' && fullAddress !== 'Location unavailable')
+        ? fullAddress
+        : (riskStatus.location && riskStatus.location !== 'Your Location' && riskStatus.location !== 'Loading...' ? riskStatus.location : 'Buaya, Lapu-Lapu City');
+
     return (
         <SafeAreaView style={styles.container}>
-            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollPadding}>
+            <ScrollView 
+                showsVerticalScrollIndicator={false} 
+                contentContainerStyle={styles.scrollPadding}
+                refreshControl={
+                    <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={['#2563EB']} tintColor="#2563EB" />
+                }
+            >
 
                 {/* Header Section */}
                 <View style={styles.header}>
@@ -541,7 +611,8 @@ export default function Dashboard() {
                         )}
                     </View>
                     <Text style={styles.riskBody}>
-                        {riskStatus.description} <Text style={{ fontWeight: '700' }}>{riskStatus.location}</Text>
+                        {riskStatus.description}{' '}
+                        <Text style={{ fontWeight: '700' }}>{activeLocation}</Text>
                     </Text>
                     <View style={styles.riskBarContainer}>
                         <View style={[
@@ -761,10 +832,10 @@ const styles = StyleSheet.create({
     riskBody: { color: '#475569', lineHeight: 20, fontSize: 14, marginBottom: 18 },
     riskBarContainer: { flexDirection: 'row', gap: 10 },
     riskTab: { flex: 1, height: 40, borderRadius: 10, justifyContent: 'center', alignItems: 'center' },
-    tabLow: { backgroundColor: '#E0E7FF' },
+    tabLow: { backgroundColor: '#D1FAE5' },
     tabMod: { backgroundColor: '#FFEDD5' },
     tabHigh: { backgroundColor: '#FEE2E2' },
-    tabTextLow: { color: '#2563EB', fontWeight: '700', fontSize: 11 },
+    tabTextLow: { color: '#10B981', fontWeight: '700', fontSize: 11 },
     tabTextMod: { color: '#F59E0B', fontWeight: '700', fontSize: 11 },
     tabTextHigh: { color: '#EF4444', fontWeight: '800', fontSize: 11 },
     incidentCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFFFFF', padding: 20, borderRadius: 20, borderWidth: 1, borderColor: '#F1F5F9' },

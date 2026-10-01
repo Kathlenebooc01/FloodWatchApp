@@ -75,12 +75,17 @@ async function fetchNominatimGeocode(lat: number, lng: number): Promise<{
             `https://nominatim.openstreetmap.org/reverse` +
             `?lat=${lat}&lon=${lng}&format=json&addressdetails=1&zoom=18&accept-language=en`;
 
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout to allow full barangay resolution
+
         const response = await fetch(url, {
             headers: {
                 // Nominatim requires a User-Agent identifying your app
                 'User-Agent': 'FloodWatchApp/1.0 (flood-watch-cebu)',
             },
+            signal: controller.signal
         });
+        clearTimeout(timeoutId);
 
         if (!response.ok) return null;
 
@@ -89,18 +94,20 @@ async function fetchNominatimGeocode(lat: number, lng: number): Promise<{
         if (!a) return null;
 
         // Nominatim address fields for Philippine residential areas:
-        //   quarter / neighbourhood / suburb / village → barangay
+        //   city_district / quarter / neighbourhood / suburb / village → barangay
         //   city / town / municipality                 → city
         //   province / state                           → province
         //   road                                       → street
         //   house_number                               → zone/house
 
         const barangay =
+            a.city_district  ||
             a.quarter        ||
             a.neighbourhood  ||
             a.suburb         ||
             a.village        ||
             a.hamlet         ||
+            a.residential    ||
             '';
 
         const city = fixCityName(
@@ -129,11 +136,57 @@ async function fetchNominatimGeocode(lat: number, lng: number): Promise<{
 }
 
 /**
- * Assembles the final address string from Nominatim + expo-location data.
- * Nominatim is primary (has barangay); expo-location is fallback.
+ * Calls BigDataCloud free reverse geocoding API.
+ * Parses the localityInfo.administrative array to find the exact barangay (adminLevel 9/10).
+ */
+async function fetchBigDataCloudGeocode(lat: number, lng: number): Promise<{ barangay: string; city: string; province: string } | null> {
+    try {
+        const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`;
+        
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000); // 5s timeout
+
+        const response = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) return null;
+
+        const data = await response.json();
+        const adminList: Array<{name: string; adminLevel: number}> = data?.localityInfo?.administrative || [];
+
+        // Philippine admin levels:
+        //  2  = Country
+        //  3  = Region  
+        //  6  = Province/City
+        //  9  = Municipality/City (lower)
+        //  10 = Barangay
+        // Sort by highest adminLevel (most specific) first
+        const sorted = [...adminList].sort((a, b) => b.adminLevel - a.adminLevel);
+
+        // Barangay is the most specific level (10), then 9
+        const barangayEntry = sorted.find(a => a.adminLevel >= 9);
+        const barangay = barangayEntry?.name || '';
+
+        // City is adminLevel 6
+        const cityEntry = adminList.find(a => a.adminLevel === 6);
+        const city = fixCityName(cityEntry?.name || data.city || '');
+
+        const province = data.principalSubdivision?.replace(/\s*\(.*?\)/, '').trim() || '';
+
+        console.log('🌍 BigDataCloud result:', { barangay, city, province, adminList });
+        return { barangay, city, province };
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Assembles the final address string from Nominatim + BigDataCloud + expo-location data.
+ * Nominatim is primary (has barangay); BigDataCloud is secondary; expo-location is fallback.
  */
 function assembleAddress(
     nom: Awaited<ReturnType<typeof fetchNominatimGeocode>>,
+    bigData: Awaited<ReturnType<typeof fetchBigDataCloudGeocode>>,
     expo: Location.LocationGeocodedAddress,
     latitude: number = 0,
     longitude: number = 0,
@@ -141,9 +194,9 @@ function assembleAddress(
     const parts: string[] = [];
 
     const zone     = nom?.zone     || '';
-    const barangay = nom?.barangay || expo.district || '';
-    const city     = nom?.city     || fixCityName(expo.city || expo.subregion || '');
-    const province = nom?.province || '';
+    const barangay = nom?.barangay || bigData?.barangay || expo.district || '';
+    const city     = nom?.city     || bigData?.city     || fixCityName(expo.city || expo.subregion || '');
+    const province = nom?.province || bigData?.province || '';
 
     // expo street info as fallback
     const expoName = (expo.name && !isPlusCode(expo.name)) ? expo.name.trim() : '';
@@ -203,22 +256,27 @@ export async function getCurrentFullAddress(): Promise<FullAddress> {
         const { status } = await Location.requestForegroundPermissionsAsync();
         if (status !== 'granted') throw new Error('PERMISSION_DENIED');
 
+        // Force high accuracy GPS for the text address to get the exact barangay and street
         const position = await Location.getCurrentPositionAsync({
-            accuracy: Location.Accuracy.High,
+            accuracy: Location.Accuracy.Highest,
         });
 
         const { latitude, longitude } = position.coords;
 
-        // Run both in parallel — Nominatim for barangay, expo-location as fallback
-        const [expoResults, nominatimData] = await Promise.all([
-            Location.reverseGeocodeAsync({ latitude, longitude }),
+        // Run all three in parallel — Nominatim, BigDataCloud, and expo-location fallback
+        const [expoResults, nominatimData, bigDataCloudData] = await Promise.all([
+            Location.reverseGeocodeAsync({ latitude, longitude }).catch(e => {
+                console.warn('Expo reverse geocoding failed', e);
+                return null;
+            }),
             fetchNominatimGeocode(latitude, longitude),
+            fetchBigDataCloudGeocode(latitude, longitude),
         ]);
 
-        if (!expoResults?.length && !nominatimData) throw new Error('NO_RESULTS');
+        if (!expoResults?.length && !nominatimData && !bigDataCloudData) throw new Error('NO_RESULTS');
 
         const expoGeo = expoResults?.[0] ?? ({} as Location.LocationGeocodedAddress);
-        const result = assembleAddress(nominatimData, expoGeo, latitude, longitude);
+        const result = assembleAddress(nominatimData, bigDataCloudData, expoGeo, latitude, longitude);
 
         // Store in cache for all future calls
         _cachedAddress = result;
@@ -236,5 +294,33 @@ export function clearLocationCache(): void {
 }
 
 export function buildFullAddress(geo: Location.LocationGeocodedAddress): FullAddress {
-    return assembleAddress(null, geo, 0, 0);
+    return assembleAddress(null, null, geo, 0, 0);
+}
+
+/** 
+ * Skips the slow reverse geocoding process and ONLY returns the coordinates.
+ * This is used for weather fetching so it can be completely instant.
+ */
+export async function getFastCoordinates(): Promise<{ latitude: number; longitude: number }> {
+    // If we already have a cached address, use its exact coordinates immediately!
+    if (_cachedAddress && _cachedAddress.latitude && _cachedAddress.longitude) {
+        return { latitude: _cachedAddress.latitude, longitude: _cachedAddress.longitude };
+    }
+
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== 'granted') throw new Error('PERMISSION_DENIED');
+
+    try {
+        const position = await Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.High,
+        });
+        return { latitude: position.coords.latitude, longitude: position.coords.longitude };
+    } catch {
+        const lastPos = await Location.getLastKnownPositionAsync();
+        if (lastPos?.coords?.latitude && lastPos?.coords?.longitude) {
+            return { latitude: lastPos.coords.latitude, longitude: lastPos.coords.longitude };
+        }
+        // Lapu-Lapu City default coordinates
+        return { latitude: 10.3157, longitude: 123.9789 };
+    }
 }

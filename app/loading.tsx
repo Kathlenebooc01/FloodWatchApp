@@ -21,7 +21,7 @@ export default function LoadingScreen() {
 
 const styles = StyleSheet.create({
     overlay: {
-        ...StyleSheet.absoluteFillObject,
+        ...StyleSheet.absoluteFill,
         zIndex: 9999,
     },
     blurContainer: {

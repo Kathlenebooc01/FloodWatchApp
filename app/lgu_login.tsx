@@ -15,6 +15,46 @@ export default function LguLoginScreen() {
     const [errorModalVisible, setErrorModalVisible] = useState(false);
     const [errorMessage, setErrorMessage] = useState('');
 
+    // ── Forgot Password state ──
+    const [forgotModalVisible, setForgotModalVisible] = useState(false);
+    const [forgotEmail, setForgotEmail] = useState('');
+    const [forgotLoading, setForgotLoading] = useState(false);
+    const [forgotSuccessVisible, setForgotSuccessVisible] = useState(false);
+
+    const handleOpenForgot = () => {
+        setForgotEmail(email.trim());
+        setForgotModalVisible(true);
+    };
+
+    const handleSendResetCode = async () => {
+        if (!forgotEmail.trim()) {
+            Alert.alert('Email Required', 'Please enter your Gmail or registered email address.');
+            return;
+        }
+        setForgotLoading(true);
+        try {
+            const { error } = await supabase.auth.resetPasswordForEmail(forgotEmail.trim());
+            if (error) throw error;
+            setForgotModalVisible(false);
+            router.push({
+                pathname: '/reset-password',
+                params: { email: forgotEmail.trim(), from: 'lgu' }
+            } as any);
+        } catch (err: any) {
+            Alert.alert('Reset Request Failed', err.message || 'Failed to send password reset link.');
+        } finally {
+            setForgotLoading(false);
+        }
+    };
+
+    const proceedToResetPassword = () => {
+        setForgotSuccessVisible(false);
+        router.push({
+            pathname: '/reset-password',
+            params: { email: forgotEmail.trim(), from: 'lgu' }
+        } as any);
+    };
+
     const handleSignIn = async () => {
         if (!email.trim() || !password.trim()) {
             setErrorMessage('Please enter your email and password.');
@@ -144,7 +184,7 @@ export default function LguLoginScreen() {
                         {/* Password */}
                         <View style={s.labelRow}>
                             <Text style={s.label}>PASSWORD</Text>
-                            <TouchableOpacity>
+                            <TouchableOpacity onPress={handleOpenForgot} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
                                 <Text style={s.forgot}>FORGOT PASSWORD?</Text>
                             </TouchableOpacity>
                         </View>
@@ -211,6 +251,115 @@ export default function LguLoginScreen() {
                     </Text>
                 </ScrollView>
             </KeyboardAvoidingView>
+
+            {/* ── FORGOT PASSWORD INPUT MODAL ── */}
+            <Modal
+                visible={forgotModalVisible}
+                transparent
+                animationType="fade"
+                onRequestClose={() => !forgotLoading && setForgotModalVisible(false)}
+            >
+                <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={s.modalOverlay}>
+                    <View style={s.modalContainer}>
+                        <TouchableOpacity 
+                            style={s.modalCloseBtn} 
+                            onPress={() => setForgotModalVisible(false)}
+                            disabled={forgotLoading}
+                        >
+                            <Ionicons name="close" size={24} color="#64748B" />
+                        </TouchableOpacity>
+
+                        <View style={[s.modalIconCircle, { backgroundColor: '#EFF6FF' }]}>
+                            <Ionicons name="lock-closed-outline" size={36} color="#2563EB" />
+                        </View>
+
+                        <Text style={s.modalTitle}>Forgot Password?</Text>
+                        <Text style={s.modalSubtitle}>
+                            Enter your official Gmail or registered email address. We will send a secure password reset link directly to your inbox.
+                        </Text>
+
+                        <View style={s.modalInputWrapper}>
+                            <Ionicons name="mail-outline" size={18} color="#94A3B8" style={{ marginRight: 10 }} />
+                            <TextInput
+                                style={s.modalInput}
+                                placeholder="operator@cebucity.gov.ph or @gmail.com"
+                                placeholderTextColor="#94A3B8"
+                                value={forgotEmail}
+                                onChangeText={setForgotEmail}
+                                keyboardType="email-address"
+                                autoCapitalize="none"
+                                autoCorrect={false}
+                            />
+                        </View>
+
+                        <View style={s.modalActionsRow}>
+                            <TouchableOpacity
+                                style={s.modalCancelBtn}
+                                onPress={() => setForgotModalVisible(false)}
+                                disabled={forgotLoading}
+                                activeOpacity={0.7}
+                            >
+                                <Text style={s.modalCancelBtnText}>Cancel</Text>
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                                style={[s.modalBlueBtn, forgotLoading && { opacity: 0.8 }]}
+                                onPress={handleSendResetCode}
+                                disabled={forgotLoading}
+                                activeOpacity={0.85}
+                            >
+                                {forgotLoading ? (
+                                    <ActivityIndicator color="#FFFFFF" size="small" />
+                                ) : (
+                                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                        <Ionicons name="paper-plane-outline" size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
+                                        <Text style={s.modalBlueBtnText}>Send Reset Link</Text>
+                                    </View>
+                                )}
+                            </TouchableOpacity>
+                        </View>
+                    </View>
+                </KeyboardAvoidingView>
+            </Modal>
+
+            {/* ── FORGOT PASSWORD SUCCESS MODAL ── */}
+            <Modal
+                visible={forgotSuccessVisible}
+                transparent
+                animationType="fade"
+                onRequestClose={() => setForgotSuccessVisible(false)}
+            >
+                <View style={s.modalOverlay}>
+                    <View style={s.modalContainer}>
+                        <View style={[s.modalIconCircle, { backgroundColor: '#DCFCE7' }]}>
+                            <Ionicons name="checkmark-circle-outline" size={40} color="#16A34A" />
+                        </View>
+
+                        <Text style={s.modalTitle}>Reset Link Sent! ✉️</Text>
+                        <Text style={s.modalSubtitle}>
+                            A password reset link and 6-digit code have been dispatched directly to:{'\n'}
+                            <Text style={{ fontWeight: '700', color: '#1E293B' }}>{forgotEmail}</Text>
+                            {'\n\n'}Please check your Gmail inbox (and Spam folder).
+                        </Text>
+
+                        <TouchableOpacity
+                            style={[s.modalBlueBtn, { width: '100%', marginBottom: 12 }]}
+                            onPress={proceedToResetPassword}
+                            activeOpacity={0.85}
+                        >
+                            <Text style={s.modalBlueBtnText}>Enter 6-Digit Code</Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                            style={s.modalDismissBtn}
+                            onPress={() => setForgotSuccessVisible(false)}
+                            activeOpacity={0.7}
+                        >
+                            <Text style={s.modalDismissBtnText}>Back to Sign In</Text>
+                        </TouchableOpacity>
+                    </View>
+                </View>
+            </Modal>
 
             {/* ── CUSTOM ERROR MODAL ── */}
             <Modal
@@ -441,5 +590,87 @@ const s = StyleSheet.create({
         color: '#FFFFFF',
         fontSize: 16,
         fontWeight: '700',
+    },
+
+    // Forgot Password Modal Styles
+    modalCloseBtn: {
+        position: 'absolute',
+        top: 20,
+        right: 20,
+        padding: 6,
+        zIndex: 10,
+    },
+    modalSubtitle: {
+        fontSize: 14,
+        color: '#64748B',
+        textAlign: 'center',
+        lineHeight: 22,
+        marginBottom: 20,
+        paddingHorizontal: 8,
+    },
+    modalInputWrapper: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#F8FAFC',
+        borderWidth: 1,
+        borderColor: '#E2E8F0',
+        borderRadius: 14,
+        height: 54,
+        paddingHorizontal: 16,
+        width: '100%',
+        marginBottom: 20,
+    },
+    modalInput: {
+        flex: 1,
+        fontSize: 14,
+        color: '#1E293B',
+        height: '100%',
+    },
+    modalActionsRow: {
+        flexDirection: 'row',
+        width: '100%',
+        gap: 12,
+    },
+    modalCancelBtn: {
+        flex: 1,
+        height: 50,
+        borderRadius: 14,
+        backgroundColor: '#F1F5F9',
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    modalCancelBtnText: {
+        fontSize: 14,
+        fontWeight: '700',
+        color: '#475569',
+    },
+    modalBlueBtn: {
+        flex: 1.5,
+        height: 50,
+        borderRadius: 14,
+        backgroundColor: '#2563EB',
+        justifyContent: 'center',
+        alignItems: 'center',
+        shadowColor: '#2563EB',
+        shadowOpacity: 0.25,
+        shadowRadius: 8,
+        shadowOffset: { width: 0, height: 4 },
+        elevation: 4,
+    },
+    modalBlueBtnText: {
+        color: '#FFFFFF',
+        fontSize: 14,
+        fontWeight: '700',
+    },
+    modalDismissBtn: {
+        width: '100%',
+        height: 44,
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    modalDismissBtnText: {
+        fontSize: 14,
+        fontWeight: '600',
+        color: '#64748B',
     },
 });
