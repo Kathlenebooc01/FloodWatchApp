@@ -2,7 +2,7 @@ import NotificationBanner from '@/components/notification-banner';
 import { supabase } from '@/utils/supabase';
 import { Stack, useRouter } from 'expo-router';
 import { useEffect } from 'react';
-import { View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 
 export default function RootLayout() {
     const router = useRouter();
@@ -19,7 +19,7 @@ export default function RootLayout() {
     }, []);
 
     return (
-        <View style={{ flex: 1 }}>
+        <View style={styles.root}>
             <Stack
                 screenOptions={{
                     headerShown: false,
@@ -62,8 +62,14 @@ export default function RootLayout() {
                 <Stack.Screen name="modal" />
             </Stack>
 
-            {/* Global heads-up banner — floats above all screens */}
+            {/* Global heads-up banner — uses Modal internally so it ALWAYS floats above all screens */}
             <NotificationBanner />
         </View>
     );
 }
+
+const styles = StyleSheet.create({
+    root: {
+        flex: 1,
+    },
+});

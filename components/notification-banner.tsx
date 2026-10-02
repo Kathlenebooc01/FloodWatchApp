@@ -1,24 +1,40 @@
 import { supabase } from '@/utils/supabase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
+import * as Haptics from 'expo-haptics';
 import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
     Animated,
-    Alert,
     Modal,
     Platform,
+    StatusBar,
     StyleSheet,
     Text,
     TouchableOpacity,
     View,
 } from 'react-native';
 
-interface BannerNotif {
+export interface BannerNotif {
     id: string;
     title: string;
     message: string;
     type: string;
+}
+
+type BannerListener = (notif: BannerNotif, force?: boolean) => void;
+let globalBannerListener: BannerListener | null = null;
+const pendingBannerQueue: { notif: BannerNotif; force?: boolean }[] = [];
+
+/**
+ * Manually trigger the heads-up notification banner from anywhere in the app
+ */
+export function triggerNotificationBanner(notif: BannerNotif, force: boolean = true) {
+    if (globalBannerListener) {
+        globalBannerListener(notif, force);
+    } else {
+        pendingBannerQueue.push({ notif, force });
+    }
 }
 
 function getBannerStyle(title: string, type: string) {
@@ -30,18 +46,18 @@ function getBannerStyle(title: string, type: string) {
             iconBg:   '#D1FAE5',
             iconColor:'#059669',
             icon:     'checkmark-circle' as const,
-            tag:      'SUCCESS',
+            tag:      'VERIFIED',
             tagBg:    '#ECFDF5',
             tagColor: '#059669',
         };
     }
-    if (t.includes('failed') || t.includes('rejected') || t.includes('not accepted')) {
+    if (t.includes('failed') || t.includes('rejected') || t.includes('declined') || t.includes('not accepted')) {
         return {
             accent:   '#EF4444',
             iconBg:   '#FEE2E2',
             iconColor:'#DC2626',
             icon:     'close-circle' as const,
-            tag:      'ALERT',
+            tag:      'DECLINED',
             tagBg:    '#FEF2F2',
             tagColor: '#DC2626',
         };
@@ -68,7 +84,6 @@ function getBannerStyle(title: string, type: string) {
             tagColor: '#DC2626',
         };
     }
-    // Default — Updates/Info
     return {
         accent:   '#2563EB',
         iconBg:   '#EFF6FF',
@@ -81,80 +96,186 @@ function getBannerStyle(title: string, type: string) {
 }
 
 export default function NotificationBanner() {
-    const router     = useRouter();
-    const [visible, setVisible] = useState(false);
-    const [banner, setBanner]   = useState<BannerNotif | null>(null);
-    const translateY = useRef(new Animated.Value(-220)).current;
-    const hideTimer  = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const shownIds   = useRef<Set<string>>(new Set());
-    const userId     = useRef<string | null>(null);
+    const router = useRouter();
+    const [modalVisible, setModalVisible] = useState(false);
+    const [banner, setBanner] = useState<BannerNotif | null>(null);
+    const translateY = useRef(new Animated.Value(-300)).current;
+    const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const shownIds = useRef<Set<string>>(new Set());
+    const userId = useRef<string | null>(null);
     const targetRole = useRef<string>('user');
+    // Track the timestamp when we started watching — only pop banners NEWER than this
+    const watchSince = useRef<string>(new Date().toISOString());
+    const lastTitleTimes = useRef<{ [key: string]: number }>({});
 
     const hideBanner = useCallback(() => {
-        if (hideTimer.current) clearTimeout(hideTimer.current);
+        if (hideTimer.current) {
+            clearTimeout(hideTimer.current);
+            hideTimer.current = null;
+        }
         Animated.timing(translateY, {
-            toValue: -220,
-            duration: 200,
+            toValue: -300,
+            duration: 280,
             useNativeDriver: true,
-        }).start(() => setVisible(false));
+        }).start(() => {
+            setModalVisible(false);
+            setBanner(null);
+        });
     }, [translateY]);
 
-    const showBanner = useCallback((notif: BannerNotif) => {
-        if (shownIds.current.has(notif.id)) return;
+    const showBanner = useCallback((notif: BannerNotif, force: boolean = false) => {
+        if (!notif) return;
+        if (!force && shownIds.current.has(notif.id)) return;
+
+        // Deduplicate by normalized title within 12 seconds so multiple simultaneous triggers
+        // (e.g. notifications insert + id_verification update + profiles update) only pop up once
+        const normTitle = (notif.title || '').replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '').trim().toLowerCase();
+        const now = Date.now();
+        if (normTitle && lastTitleTimes.current[normTitle] && (now - lastTitleTimes.current[normTitle] < 12000)) {
+            console.log('🔇 Suppressed duplicate banner for title:', normTitle);
+            return;
+        }
+        if (normTitle) {
+            lastTitleTimes.current[normTitle] = now;
+        }
+
         shownIds.current.add(notif.id);
 
-        translateY.setValue(-220);
+        if (hideTimer.current) {
+            clearTimeout(hideTimer.current);
+            hideTimer.current = null;
+        }
+
         setBanner(notif);
-        setVisible(true);
+        translateY.setValue(-300);
+        setModalVisible(true);
+    }, [translateY]);
+
+    // Animate in whenever banner is set
+    useEffect(() => {
+        if (!banner) return;
+
+        try {
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+        } catch (e) {}
 
         Animated.spring(translateY, {
             toValue: 0,
-            tension: 90,
-            friction: 8,
+            tension: 85,
+            friction: 9,
             useNativeDriver: true,
         }).start();
 
         if (hideTimer.current) clearTimeout(hideTimer.current);
-        hideTimer.current = setTimeout(hideBanner, 5000);
-    }, [translateY, hideBanner]);
+        hideTimer.current = setTimeout(() => {
+            hideBanner();
+        }, 7000);
+    }, [banner]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    // Register global trigger listener & flush pending queue
+    useEffect(() => {
+        globalBannerListener = (notif: BannerNotif, force?: boolean) => {
+            showBanner(notif, force ?? true);
+        };
+        // Flush any queued banners that came before component mounted
+        while (pendingBannerQueue.length > 0) {
+            const p = pendingBannerQueue.shift();
+            if (p) showBanner(p.notif, p.force ?? true);
+        }
+        return () => {
+            globalBannerListener = null;
+        };
+    }, [showBanner]);
+
+    const handleVerificationStatusChange = useCallback((rawStatus: string, verId?: string) => {
+        const s = (rawStatus || '').toLowerCase().trim();
+        // Use a stable key so same status+verId never pops twice
+        const bannerKey = `ver_${verId || 'curr'}_${s}`;
+        if (shownIds.current.has(bannerKey)) return; // deduplicated
+        shownIds.current.add(bannerKey);
+
+        if (s === 'approved' || s === 'verified') {
+            showBanner({
+                id: bannerKey,
+                title: '\u2705 ID Verification Complete',
+                message: 'Your identity has been successfully verified. You can now submit flood incident reports.',
+                type: 'Updates',
+            });
+        } else if (s === 'rejected' || s === 'declined' || s === 'failed') {
+            showBanner({
+                id: bannerKey,
+                title: '\u274c ID Verification Failed',
+                message: 'Your ID could not be verified. Please make sure your ID photo is clear and try again.',
+                type: 'Updates',
+            });
+        }
+        // Note: 'pending' is shown via triggerNotificationBanner in identify.tsx only — not repeated here
+    }, [showBanner]);
+
+    // Fallback poll: ONLY fires for notifications created after this session started.
+    // Realtime handles instant delivery; poll is just a safety net for missed websocket events.
     const poll = useCallback(async () => {
-        if (!userId.current) return;
+        const uid = userId.current;
+        if (!uid) return;
+
         try {
-            const since = new Date(Date.now() - 30000).toISOString();
-            const { data } = await supabase
+            const { data: notifs } = await supabase
                 .from('notifications')
-                .select('id, title, message, type, target_role')
-                .eq('user_id', userId.current)
-                .gte('created_at', since)
+                .select('id, title, message, type, user_id, target_role')
+                .or(`user_id.eq.${uid},and(target_role.eq.user,user_id.is.null)`)
+                .gte('created_at', watchSince.current) // ONLY new ones since mount
                 .order('created_at', { ascending: false })
-                .limit(1);
-            if (data && data.length > 0) {
-                const row = data[0];
-                showBanner({ id: row.id, title: row.title || 'New Notification', message: row.message || '', type: row.type || 'Updates' });
+                .limit(5);
+
+            if (notifs) {
+                for (const row of notifs) {
+                    if (!shownIds.current.has(row.id)) {
+                        showBanner({
+                            id: row.id,
+                            title: row.title || 'New Notification',
+                            message: row.message || '',
+                            type: row.type || 'Updates',
+                        });
+                        break; // only show one at a time
+                    }
+                }
             }
-        } catch (e) {}
+        } catch (e) {
+            // silent
+        }
     }, [showBanner]);
 
     useEffect(() => {
         let channel: any = null;
-        let lguChannel: any = null;
+        let verifyChannel: any = null;
+        let profileChannel: any = null;
         let incidentChannel: any = null;
+        let lguChannel: any = null;
         let pollInterval: ReturnType<typeof setInterval> | null = null;
-        let logisticsPoll: ReturnType<typeof setInterval> | null = null;
         let incidentPoll: ReturnType<typeof setInterval> | null = null;
+        let logisticsPoll: ReturnType<typeof setInterval> | null = null;
 
-        // ── SYNC SITUATIONAL & INCIDENT REPORTS ──
+        const cleanupSubs = () => {
+            if (channel) { supabase.removeChannel(channel); channel = null; }
+            if (verifyChannel) { supabase.removeChannel(verifyChannel); verifyChannel = null; }
+            if (profileChannel) { supabase.removeChannel(profileChannel); profileChannel = null; }
+            if (incidentChannel) { supabase.removeChannel(incidentChannel); incidentChannel = null; }
+            if (lguChannel) { supabase.removeChannel(lguChannel); lguChannel = null; }
+            if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+            if (incidentPoll) { clearInterval(incidentPoll); incidentPoll = null; }
+            if (logisticsPoll) { clearInterval(logisticsPoll); logisticsPoll = null; }
+        };
+
         const syncIncidentReports = async (uid: string) => {
             try {
-                const { data: reports, error } = await supabase
+                const { data: reports } = await supabase
                     .from('incident_report')
-                    .select('report_id, status, report_type, hazard_type, title, description, created_at')
+                    .select('report_id, status, report_type, hazard_type, title, created_at')
                     .eq('user_id', uid)
                     .order('created_at', { ascending: false })
-                    .limit(25);
+                    .limit(20);
 
-                if (error || !reports) return;
+                if (!reports) return;
 
                 const stored = await AsyncStorage.getItem(`incident_state_${uid}`);
                 const prevState: Record<string, string> = stored ? JSON.parse(stored) : {};
@@ -164,93 +285,68 @@ export default function NotificationBanner() {
                     const statusStr = (rep.status || '').toLowerCase();
                     newState[rep.report_id] = statusStr;
                     const oldState = prevState[rep.report_id];
-
                     const isRecent = (Date.now() - new Date(rep.created_at).getTime()) < 48 * 60 * 60 * 1000;
 
-                    // Trigger banner if status transitioned from pending/old to accepted/verified/rejected
                     if (oldState && oldState !== statusStr && isRecent) {
                         const isEsc = (rep.hazard_type || '').toLowerCase().includes('escalation') ||
                                       (rep.title || '').toLowerCase().includes('escalation');
-                        const isSit = rep.report_type === 'situational' || (rep.title || '').toLowerCase().includes('situational');
+                        const isSit = rep.report_type === 'situational';
 
                         if (statusStr === 'accepted' || statusStr === 'verified') {
-                            const bannerTitle = isEsc 
-                                ? 'Provincial Support Confirmed ✅' 
-                                : isSit 
-                                ? 'Situational Report Accepted ✅' 
-                                : 'Report Verified ✅';
-
-                            const bannerMsg = isEsc
-                                ? 'Your provincial assistance request has been confirmed and mobilized by PDRRMO.'
-                                : 'Your situational report has been verified and accepted by the PDRRMO.';
-
                             showBanner({
                                 id: `inc-${rep.report_id}-${Date.now()}`,
-                                title: bannerTitle,
-                                message: bannerMsg,
+                                title: isEsc ? 'Provincial Support Confirmed ✅' : isSit ? 'Situational Report Accepted ✅' : 'Report Verified ✅',
+                                message: isEsc
+                                    ? 'Your provincial assistance request has been confirmed and mobilized by PDRRMO.'
+                                    : 'Your situational report has been verified and accepted by the PDRRMO.',
                                 type: 'Updates',
-                            });
+                            }, true);
                         } else if (statusStr === 'rejected' || statusStr === 'declined') {
-                            const bannerTitle = isEsc ? 'Provincial Support Declined' : 'Report Declined';
-                            const bannerMsg = 'Your report was reviewed by PDRRMO but could not be accepted at this time.';
-
                             showBanner({
                                 id: `inc-${rep.report_id}-${Date.now()}`,
-                                title: bannerTitle,
-                                message: bannerMsg,
+                                title: isEsc ? 'Provincial Support Declined' : 'Report Declined',
+                                message: 'Your report was reviewed by PDRRMO but could not be accepted at this time.',
                                 type: 'Updates',
-                            });
+                            }, true);
                         }
                     }
                 }
-
                 await AsyncStorage.setItem(`incident_state_${uid}`, JSON.stringify(newState));
-            } catch (e) {
-                console.error('Incident sync error:', e);
-            }
+            } catch (e) {}
         };
 
         const syncLogisticsRequests = async (uid: string) => {
             try {
-                // Fetch current statuses safely without potentially broken joins
-                const { data: requests, error: requestsError } = await supabase
+                const { data: requests } = await supabase
                     .from('resource_requests')
                     .select('request_id, status, created_at')
                     .eq('requested_by', uid);
-                
-                if (requestsError || !requests) return;
+
+                if (!requests) return;
 
                 const stored = await AsyncStorage.getItem(`logistics_state_${uid}`);
                 const prevState: Record<string, string> = stored ? JSON.parse(stored) : {};
                 const newState: Record<string, string> = {};
 
                 for (const req of requests) {
-                    let stateString = req.status || '';
+                    const stateString = req.status || '';
                     newState[req.request_id] = stateString;
                     const oldState = prevState[req.request_id];
+                    const isRecent = (Date.now() - new Date(req.created_at).getTime()) < 24 * 60 * 60 * 1000;
 
-                    // Check if it's recently created (within 24 hours) to allow notifications on first load
-                    const isRecent = (new Date().getTime() - new Date(req.created_at).getTime()) < 24 * 60 * 60 * 1000;
-                    const shouldNotifyIfNew = isRecent && stateString !== 'Pending';
-
-                    if (oldState !== stateString && (oldState || shouldNotifyIfNew)) {
-                        if (stateString === 'Approved' || stateString === 'Fully_Allocated' || stateString === 'Dispatched' || stateString === 'Transit' || stateString === 'Completed') {
-                            
+                    if (oldState !== stateString && (oldState || (isRecent && stateString !== 'Pending'))) {
+                        if (['Approved', 'Fully_Allocated', 'Dispatched', 'Transit', 'Completed'].includes(stateString)) {
                             let title = 'Request Approved';
-                            let message = `Your request has been approved by PDRRMO.`;
-
+                            let message = 'Your request has been approved by PDRRMO.';
                             if (stateString === 'Dispatched') {
-                                title = 'Items Dispatched';
-                                message = `Your requested logistics have been dispatched by the PDRRMO!`;
+                                title = 'Items Dispatched 🚛';
+                                message = 'Your requested logistics have been dispatched by the PDRRMO!';
                             } else if (stateString === 'Transit') {
                                 title = 'Items In Transit';
-                                message = `Your requested logistics are currently in transit to your location.`;
+                                message = 'Your requested logistics are currently in transit to your location.';
                             } else if (stateString === 'Completed') {
-                                title = 'Request Completed';
-                                message = `Your returned items have been officially received by the PDRRMO. Thank you for your cooperation!`;
-                            } else if (stateString === 'Fully_Allocated') {
-                                title = 'Request Allocated';
-                                message = `PDRRMO has allocated items for your request.`;
+                                title = 'Request Completed ✅';
+                                message = 'Your returned items have been officially received by PDRRMO.';
                             }
 
                             showBanner({
@@ -258,128 +354,226 @@ export default function NotificationBanner() {
                                 title,
                                 message,
                                 type: 'Updates',
-                            });
-
-                            await supabase.from('notifications').insert({
-                                user_id: uid,
-                                target_role: 'user',
-                                type: 'Updates',
-                                title: title,
-                                message: `${message}\n\n[REF:${req.request_id}]`,
-                                is_read: false
-                            });
+                            }, true);
                         }
                     }
                 }
-
                 await AsyncStorage.setItem(`logistics_state_${uid}`, JSON.stringify(newState));
-            } catch (e) {
-                console.error(e);
+            } catch (e) {}
+        };
+
+        let isInitializing = false;
+
+        const initForUser = async (uid: string) => {
+            // Prevent concurrent initializations that cause channel double-subscribe errors
+            if (isInitializing) return;
+            isInitializing = true;
+            cleanupSubs();
+            userId.current = uid;
+
+            // Unique suffix prevents Supabase from reusing a stale channel with the same name
+            const ts = Date.now();
+
+            try {
+                // Set watchSince to now so poll only picks up NEW notifications from this point
+                watchSince.current = new Date().toISOString();
+
+                // Preload ALL existing notification IDs so they never pop as banners
+                const { data: existing } = await supabase
+                    .from('notifications')
+                    .select('id')
+                    .or(`user_id.eq.${uid},and(target_role.eq.user,user_id.is.null)`)
+                    .order('created_at', { ascending: false })
+                    .limit(50);
+                if (existing) existing.forEach(r => shownIds.current.add(r.id));
+
+                const { data: profile } = await supabase
+                    .from('profiles')
+                    .select('role')
+                    .eq('id', uid)
+                    .single();
+                if (profile) {
+                    if (['lgu', 'lgu_headmaster', 'admin'].includes(profile.role)) {
+                        targetRole.current = 'lgu';
+                    } else {
+                        targetRole.current = 'user';
+                    }
+                }
+            } catch (e) {}
+
+            // If user changed while we were awaiting, bail out — cleanupSubs was already called
+            if (userId.current !== uid) {
+                isInitializing = false;
+                return;
             }
+
+            // === Real-time: notifications table ===
+            channel = supabase
+                .channel(`banner-notifs-${uid}-${ts}`)
+                .on('postgres_changes' as any, {
+                    event: 'INSERT',
+                    schema: 'public',
+                    table: 'notifications',
+                }, (payload: any) => {
+                    const row = payload.new;
+                    if (!row) return;
+                    const isForMe = row.user_id === uid ||
+                        (!row.user_id && (row.target_role === targetRole.current || row.target_role === 'user'));
+                    if (isForMe) {
+                        // showBanner uses shownIds dedup — won't repeat
+                        showBanner({
+                            id: row.id || `notif-rt-${Date.now()}`,
+                            title: row.title || 'New Notification',
+                            message: row.message || '',
+                            type: row.type || 'Updates',
+                        });
+                    }
+                })
+                .subscribe();
+
+            // === Real-time: id_verification ===
+            verifyChannel = supabase
+                .channel(`banner-verify-${uid}-${ts}`)
+                .on('postgres_changes' as any, {
+                    event: '*',
+                    schema: 'public',
+                    table: 'id_verification',
+                }, (payload: any) => {
+                    const row = payload.new;
+                    if (row && row.user_id === uid) {
+                        handleVerificationStatusChange(row.status, row.id_verification_id);
+                    }
+                })
+                .subscribe();
+
+            // === Real-time: profiles — deduped via shownIds ===
+            profileChannel = supabase
+                .channel(`banner-profiles-${uid}-${ts}`)
+                .on('postgres_changes' as any, {
+                    event: 'UPDATE',
+                    schema: 'public',
+                    table: 'profiles',
+                }, (payload: any) => {
+                    const row = payload.new;
+                    if (row && row.id === uid && row.is_verified === true) {
+                        const key = `profile-verified-${uid}`;
+                        if (!shownIds.current.has(key)) {
+                            shownIds.current.add(key);
+                            showBanner({
+                                id: key,
+                                title: '\u2705 ID Verification Complete',
+                                message: 'Your identity has been successfully verified. You can now submit flood incident reports.',
+                                type: 'Updates',
+                            });
+                        }
+                    }
+                })
+                .subscribe();
+
+            // === Real-time: incident_report ===
+            incidentChannel = supabase
+                .channel(`banner-incidents-${uid}-${ts}`)
+                .on('postgres_changes' as any, {
+                    event: 'UPDATE',
+                    schema: 'public',
+                    table: 'incident_report',
+                    filter: `user_id=eq.${uid}`,
+                }, () => {
+                    syncIncidentReports(uid);
+                })
+                .subscribe();
+
+            syncIncidentReports(uid);
+            incidentPoll = setInterval(() => syncIncidentReports(uid), 8000);
+
+            if (targetRole.current === 'lgu') {
+                syncLogisticsRequests(uid);
+                logisticsPoll = setInterval(() => syncLogisticsRequests(uid), 10000);
+                lguChannel = supabase.channel(`banner-lgu-${uid}-${ts}`)
+                    .on('postgres_changes' as any, {
+                        event: 'UPDATE',
+                        schema: 'public',
+                        table: 'resource_requests',
+                        filter: `requested_by=eq.${uid}`,
+                    }, () => { syncLogisticsRequests(uid); })
+                    .subscribe();
+            }
+
+            // Fallback poll every 15s (realtime handles instant delivery)
+            poll();
+            pollInterval = setInterval(poll, 15000);
+            isInitializing = false;
         };
 
         const setup = async () => {
             const { data: sessionData } = await supabase.auth.getSession();
             const uid = sessionData?.session?.user?.id;
-            if (!uid) return;
-            userId.current = uid;
-
-            const { data: profile } = await supabase.from('profiles').select('role').eq('id', uid).single();
-            if (profile?.role === 'lgu' || profile?.role === 'lgu_headmaster' || profile?.role === 'admin') {
-                targetRole.current = 'lgu';
-            } else {
-                targetRole.current = 'user';
-            }
-
-            // Real-time listener for direct notifications
-            channel = supabase
-                .channel(`notif-banner-${uid}`)
-                .on('postgres_changes' as any, {
-                    event: 'INSERT', schema: 'public',
-                    table: 'notifications', filter: `user_id=eq.${uid}`,
-                }, (payload: any) => {
-                    const row = payload.new;
-                    showBanner({ id: row.id, title: row.title || 'New Notification', message: row.message || '', type: row.type || 'Updates' });
-                })
-                .subscribe();
-
-            // Real-time listener on incident_report table
-            incidentChannel = supabase
-                .channel(`incident-banner-${uid}`)
-                .on('postgres_changes' as any, {
-                    event: 'UPDATE', schema: 'public', table: 'incident_report', filter: `user_id=eq.${uid}`
-                }, async (payload: any) => {
-                    syncIncidentReports(uid);
-                })
-                .subscribe();
-
-            // Initial and periodic syncs
-            syncIncidentReports(uid);
-            incidentPoll = setInterval(() => syncIncidentReports(uid), 10000);
-
-            // Logistics sync for LGU accounts
-            if (profile?.role === 'lgu' || profile?.role === 'lgu_headmaster' || profile?.role === 'admin') {
-                syncLogisticsRequests(uid);
-                logisticsPoll = setInterval(() => syncLogisticsRequests(uid), 12000);
-
-                lguChannel = supabase.channel(`lgu-requests-${uid}`)
-                    .on('postgres_changes' as any, {
-                        event: 'UPDATE', schema: 'public', table: 'resource_requests', filter: `requested_by=eq.${uid}`
-                    }, async (payload: any) => {
-                        syncLogisticsRequests(uid);
-                    }).subscribe();
-            }
-
-            pollInterval = setInterval(poll, 10000);
+            if (uid) initForUser(uid);
         };
+
+        const { data: authSub } = supabase.auth.onAuthStateChange((_event, session) => {
+            const uid = session?.user?.id;
+            if (uid && uid !== userId.current) initForUser(uid);
+        });
 
         setup();
+
         return () => {
-            if (channel) supabase.removeChannel(channel);
-            if (incidentChannel) supabase.removeChannel(incidentChannel);
-            if (lguChannel) supabase.removeChannel(lguChannel);
-            if (pollInterval) clearInterval(pollInterval);
-            if (incidentPoll) clearInterval(incidentPoll);
-            if (logisticsPoll) clearInterval(logisticsPoll);
+            authSub?.subscription?.unsubscribe();
+            cleanupSubs();
             if (hideTimer.current) clearTimeout(hideTimer.current);
         };
-    }, [showBanner, poll]);
+    }, [showBanner, poll, handleVerificationStatusChange]);
 
     const style = getBannerStyle(banner?.title || '', banner?.type || '');
+    const TOP = Platform.OS === 'ios' ? 54 : (StatusBar.currentHeight || 24) + 10;
 
     return (
-        <Modal visible={visible} transparent animationType="none" statusBarTranslucent onRequestClose={hideBanner}>
+        <Modal
+            visible={modalVisible}
+            transparent
+            animationType="none"
+            statusBarTranslucent
+            onRequestClose={hideBanner}
+        >
             <View style={styles.overlay} pointerEvents="box-none">
-                <Animated.View style={[styles.container, { transform: [{ translateY }] }]} pointerEvents="auto">
-                    <TouchableOpacity
-                        style={[styles.card, { borderLeftColor: style.accent }]}
-                        activeOpacity={0.95}
-                        onPress={() => { hideBanner(); router.push('/notifications' as any); }}
-                    >
-                        {/* Left accent bar is handled by borderLeft on card */}
-
-                        <View style={[styles.iconCircle, { backgroundColor: style.iconBg }]}>
-                            <Ionicons name={style.icon} size={26} color={style.iconColor} />
-                        </View>
-
-                        <View style={styles.textArea}>
-                            {/* Tag pill */}
-                            <View style={[styles.tagPill, { backgroundColor: style.tagBg }]}>
-                                <Text style={[styles.tagText, { color: style.tagColor }]}>{style.tag}</Text>
-                            </View>
-                            <Text style={styles.title} numberOfLines={1}>{banner?.title}</Text>
-                            <Text style={styles.message} numberOfLines={2}>{banner?.message}</Text>
-                        </View>
-
+                <Animated.View
+                    style={[
+                        styles.container,
+                        { top: TOP, transform: [{ translateY }] },
+                    ]}
+                    pointerEvents="box-none"
+                >
+                    {banner && (
                         <TouchableOpacity
-                            style={styles.closeBtn}
-                            onPress={hideBanner}
-                            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                            style={[styles.card, { borderLeftColor: style.accent }]}
+                            activeOpacity={0.95}
+                            onPress={() => {
+                                hideBanner();
+                                router.push('/notifications' as any);
+                            }}
                         >
-                            <Ionicons name="close" size={18} color="#94A3B8" />
-                        </TouchableOpacity>
-                    </TouchableOpacity>
+                            <View style={[styles.iconCircle, { backgroundColor: style.iconBg }]}>
+                                <Ionicons name={style.icon as any} size={26} color={style.iconColor} />
+                            </View>
 
+                            <View style={styles.textArea}>
+                                <View style={[styles.tagPill, { backgroundColor: style.tagBg }]}>
+                                    <Text style={[styles.tagText, { color: style.tagColor }]}>{style.tag}</Text>
+                                </View>
+                                <Text style={styles.title} numberOfLines={1}>{banner.title}</Text>
+                                <Text style={styles.message} numberOfLines={2}>{banner.message}</Text>
+                            </View>
+
+                            <TouchableOpacity
+                                style={styles.closeBtn}
+                                onPress={hideBanner}
+                                hitSlop={{ top: 14, bottom: 14, left: 14, right: 14 }}
+                            >
+                                <Ionicons name="close" size={20} color="#94A3B8" />
+                            </TouchableOpacity>
+                        </TouchableOpacity>
+                    )}
                 </Animated.View>
             </View>
         </Modal>
@@ -393,76 +587,64 @@ const styles = StyleSheet.create({
     },
     container: {
         position: 'absolute',
-        top:      Platform.OS === 'ios' ? 52 : 42,
-        left:     12,
-        right:    12,
+        left: 12,
+        right: 12,
     },
     card: {
         flexDirection:    'row',
         alignItems:       'center',
         backgroundColor:  '#FFFFFF',
         borderRadius:     20,
-        padding:          16,
-        paddingLeft:      14,
+        padding:          14,
         shadowColor:      '#000',
-        shadowOffset:     { width: 0, height: 10 },
-        shadowOpacity:    0.15,
-        shadowRadius:     24,
-        elevation:        20,
+        shadowOffset:     { width: 0, height: 8 },
+        shadowOpacity:    0.20,
+        shadowRadius:     20,
+        elevation:        30,
         borderWidth:      1,
-        borderColor:      '#F1F5F9',
-        borderLeftWidth:  4,
+        borderColor:      '#E2E8F0',
+        borderLeftWidth:  5,
     },
     iconCircle: {
-        width:          50,
-        height:         50,
-        borderRadius:   25,
+        width:          48,
+        height:         48,
+        borderRadius:   24,
         justifyContent: 'center',
         alignItems:     'center',
-        marginRight:    14,
+        marginRight:    12,
         flexShrink:     0,
     },
     textArea: {
-        flex:        1,
-        marginRight: 8,
+        flex: 1,
+        justifyContent: 'center',
     },
     tagPill: {
-        alignSelf:       'flex-start',
+        alignSelf:         'flex-start',
         paddingHorizontal: 8,
-        paddingVertical:  3,
-        borderRadius:    20,
-        marginBottom:    5,
+        paddingVertical:   2,
+        borderRadius:      6,
+        marginBottom:      3,
     },
     tagText: {
-        fontSize:   9,
-        fontWeight: '900',
+        fontSize:      9,
+        fontWeight:    '700',
         letterSpacing: 0.8,
     },
     title: {
-        fontSize:     14,
-        fontWeight:   '800',
-        color:        '#0F172A',
-        marginBottom: 3,
-        letterSpacing: -0.2,
+        fontSize:   14,
+        fontWeight: '700',
+        color:      '#0F172A',
+        lineHeight: 18,
     },
     message: {
         fontSize:   12,
-        color:      '#64748B',
-        lineHeight: 17,
+        color:      '#475569',
+        marginTop:  2,
+        lineHeight: 16,
     },
     closeBtn: {
-        width:          28,
-        height:         28,
-        borderRadius:   14,
-        backgroundColor: '#F8FAFC',
-        justifyContent: 'center',
-        alignItems:     'center',
-        flexShrink:     0,
-    },
-    progressBg: {
-        display: 'none',
-    },
-    progressBar: {
-        display: 'none',
+        padding:    6,
+        marginLeft: 8,
+        flexShrink: 0,
     },
 });

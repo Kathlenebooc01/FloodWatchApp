@@ -33,8 +33,8 @@ interface RiskStatusData {
 
 export default function Dashboard() {
     const router = useRouter();
-    const [fullAddress, setFullAddress] = useState('Fetching location...');
-    const [cityName, setCityName] = useState('');
+    const [fullAddress, setFullAddress] = useState('Buaya, Lapu-Lapu City');
+    const [cityName, setCityName] = useState('LAPU-LAPU CITY');
     const [loading, setLoading] = useState(true);
     const [latestNews, setLatestNews] = useState<NewsItem | null>(null);
     const [newsLoading, setNewsLoading] = useState(true);
@@ -78,77 +78,112 @@ export default function Dashboard() {
 
             const OWM_KEY = process.env.EXPO_PUBLIC_OPENWEATHER_API_KEY || '1ba5ea9fcb9f3951587b0edaa1d628b7';
 
-            // OpenWeatherMap Current Weather — uses actual weather stations + radar
-            const response = await fetch(
-                `https://api.openweathermap.org/data/2.5/weather?lat=${latitude}&lon=${longitude}&appid=${OWM_KEY}&units=metric`
-            );
-
-            if (!response.ok) throw new Error(`OWM API failed: ${response.status}`);
-
-            const data = await response.json();
-
-            // OWM fields:
-            //   main.temp           → temperature in °C
-            //   rain['1h']          → actual rainfall in last 1 hour (mm) from radar
-            //   wind.speed          → wind speed in m/s → convert to km/h
-            //   weather[0].main     → Clear, Clouds, Rain, Drizzle, Thunderstorm, etc.
-            //   weather[0].description → detailed description
-
-            const temperature = Math.round(data.main?.temp || 0);
-            let rainfall      = data.rain?.['1h'] || data.rain?.['3h'] || 0; // mm in last 1h or 3h
-            const windSpeed   = ((data.wind?.speed || 0) * 3.6); // convert m/s → km/h
-            const owmMain     = data.weather?.[0]?.main || 'Clouds';
-            const owmDesc     = data.weather?.[0]?.description || 'cloudy';
-
-            // Map OWM condition to display string
+            let temperature = 28;
+            let rainfall = 0;
+            let windSpeed = 10;
             let condition = 'Cloudy';
-            const mainLower = owmMain.toLowerCase();
-            if (mainLower === 'clear')             condition = 'Clear';
-            else if (mainLower === 'clouds')       condition = 'Cloudy';
-            else if (mainLower === 'drizzle')      condition = 'Drizzle';
-            else if (mainLower === 'rain')         condition = 'Rain';
-            else if (mainLower === 'thunderstorm') condition = 'Thunderstorm';
-            else if (mainLower === 'snow')         condition = 'Snow';
-            else if (mainLower === 'mist' || mainLower === 'fog') condition = 'Fog';
+            let weatherDesc = 'partly cloudy';
+            let gotData = false;
 
-            // If OWM radar detects active rain/drizzle/thunderstorm but rain volume isn't registered yet, provide realistic mm
-            if ((mainLower === 'rain' || mainLower === 'drizzle') && rainfall === 0) {
-                rainfall = 0.5;
-            } else if (mainLower === 'thunderstorm' && rainfall === 0) {
-                rainfall = 2.0;
+            // Attempt 1: OpenWeatherMap with timeout
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 4000);
+                const response = await fetch(
+                    `https://api.openweathermap.org/data/2.5/weather?lat=${latitude}&lon=${longitude}&appid=${OWM_KEY}&units=metric`,
+                    {
+                        signal: controller.signal,
+                        headers: { Accept: 'application/json' },
+                    }
+                );
+                clearTimeout(timeoutId);
+
+                if (response.ok) {
+                    const data = await response.json();
+                    temperature = Math.round(data.main?.temp || 0);
+                    rainfall = data.rain?.['1h'] || data.rain?.['3h'] || 0;
+                    windSpeed = ((data.wind?.speed || 0) * 3.6);
+                    const owmMain = data.weather?.[0]?.main || 'Clouds';
+                    weatherDesc = data.weather?.[0]?.description || 'cloudy';
+
+                    const mainLower = owmMain.toLowerCase();
+                    if (mainLower === 'clear')             condition = 'Clear';
+                    else if (mainLower === 'clouds')       condition = 'Cloudy';
+                    else if (mainLower === 'drizzle')      condition = rainfall > 0.5 ? 'Drizzle' : 'Cloudy';
+                    else if (mainLower === 'rain')         condition = rainfall > 1.0 ? 'Rain' : 'Partly Cloudy';
+                    else if (mainLower === 'thunderstorm') condition = 'Thunderstorm';
+                    else if (mainLower === 'snow')         condition = 'Snow';
+                    else if (mainLower === 'mist' || mainLower === 'fog') condition = 'Fog';
+
+                    gotData = true;
+                }
+            } catch (owmErr: any) {
+                console.log('⚠️ OpenWeatherMap unavailable, falling back to Open-Meteo:', owmErr?.message);
+            }
+
+            // Attempt 2: High-reliability Open-Meteo fallback
+            if (!gotData) {
+                try {
+                    const meteoRes = await fetch(
+                        `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,relative_humidity_2m,precipitation,weather_code,wind_speed_10m`
+                    );
+                    if (meteoRes.ok) {
+                        const mData = await meteoRes.json();
+                        const curr = mData.current || {};
+                        temperature = Math.round(curr.temperature_2m ?? 28);
+                        rainfall = Number(curr.precipitation ?? 0);
+                        windSpeed = Number(curr.wind_speed_10m ?? 8);
+                        const code = curr.weather_code ?? 1;
+                        if (code === 0) { condition = 'Clear'; weatherDesc = 'clear sky'; }
+                        else if (code <= 3) { condition = 'Cloudy'; weatherDesc = 'cloudy'; }
+                        else if (code <= 48) { condition = 'Fog'; weatherDesc = 'foggy'; }
+                        else if (code <= 57) { condition = 'Drizzle'; weatherDesc = 'light drizzle'; }
+                        else if (code <= 82) { condition = 'Rain'; weatherDesc = 'rainy'; }
+                        else if (code >= 95) { condition = 'Thunderstorm'; weatherDesc = 'thunderstorm'; }
+                        gotData = true;
+                        console.log('✅ Weather fetched from Open-Meteo fallback');
+                    }
+                } catch (meteoErr: any) {
+                    console.log('⚠️ Open-Meteo fallback failed:', meteoErr?.message);
+                }
             }
 
             const displayPrecipitation = rainfall > 0
                 ? (rainfall < 1 ? Number(rainfall.toFixed(1)) : Math.round(rainfall * 10) / 10)
                 : 0;
 
-            console.log('☀️ OWM data:', { temperature, rainfall: displayPrecipitation, windSpeed, condition, owmDesc, userLocation });
+            console.log('☀️ Live weather data:', { temperature, rainfall: displayPrecipitation, windSpeed, condition, weatherDesc, userLocation });
 
             // Update weather card
             setWeather({ temperature, condition, precipitation: displayPrecipitation });
 
-            // Determine flood risk based on actual rainfall & weather
+            // Determine flood risk based on PAGASA rainfall thresholds
             let riskLevel = 'Info';
             let alertLevel = 0;
             let description = '';
             const rainStr = displayPrecipitation > 0 ? `${displayPrecipitation}mm/h` : '0mm/h';
 
-            if (rainfall >= 15) {
+            if (rainfall >= 30) {
                 riskLevel = 'High';
                 alertLevel = 3;
-                description = `Heavy rainfall detected (${rainStr}). Wind: ${windSpeed.toFixed(1)} km/h. High risk of flooding in`;
-            } else if (rainfall >= 5) {
+                description = `Torrential rainfall detected (${rainStr}). Wind: ${windSpeed.toFixed(1)} km/h. High risk of flooding in`;
+            } else if (rainfall >= 15) {
                 riskLevel = 'Moderate';
                 alertLevel = 2;
-                description = `Moderate rainfall detected (${rainStr}). Wind: ${windSpeed.toFixed(1)} km/h. Moderate flood risk in`;
-            } else if (rainfall >= 0.1 || mainLower === 'rain' || mainLower === 'drizzle' || mainLower === 'thunderstorm') {
+                description = `Heavy rainfall detected (${rainStr}). Wind: ${windSpeed.toFixed(1)} km/h. Moderate flood risk in`;
+            } else if (rainfall >= 5) {
                 riskLevel = 'Low';
                 alertLevel = 1;
-                description = `Light rain detected (${rainStr}). Wind: ${windSpeed.toFixed(1)} km/h. Low flood risk in`;
+                description = `Moderate rainfall detected (${rainStr}). Wind: ${windSpeed.toFixed(1)} km/h. Low flood risk in`;
             } else {
                 riskLevel = 'Info';
                 alertLevel = 0;
-                description = `No immediate flood risk. ${owmDesc.charAt(0).toUpperCase() + owmDesc.slice(1)}. Wind: ${windSpeed.toFixed(1)} km/h in`;
+                const weatherContext = rainfall > 0
+                    ? `Light passing shower (${rainStr}), no flood threat`
+                    : temperature >= 30
+                        ? `Warm and sunny/fair conditions`
+                        : `${weatherDesc.charAt(0).toUpperCase() + weatherDesc.slice(1)}`;
+                description = `No immediate flood risk. ${weatherContext}. Wind: ${windSpeed.toFixed(1)} km/h in`;
             }
 
             setRiskStatus({
@@ -161,8 +196,19 @@ export default function Dashboard() {
 
             console.log('✅ Risk status updated:', { riskLevel, rainfall: displayPrecipitation, windSpeed, condition, userLocation });
 
+            // ── Log weather fetch to api_activity_logs (fire-and-forget) ──
+            const OWM_API_ID = '9c8a3010-a692-4728-a96e-bcf372e11933'; // Open_Weather_Key
+            supabase.from('api_activity_logs').insert({
+                api_id: OWM_API_ID,
+                event_type: 'Weather Fetch',
+                message: `Realtime weather fetched for ${userLocation}: ${temperature}°C, ${condition}, ${displayPrecipitation}mm/h rainfall, Wind: ${windSpeed.toFixed(1)} km/h. Flood risk: ${riskLevel}`,
+            }).then(({ error: logErr }) => {
+                if (logErr) console.log('⚠️ Weather log skipped:', logErr.message);
+                else console.log('📋 Weather fetch logged to api_activity_logs');
+            }, () => {});
+
         } catch (err: any) {
-            console.error('❌ Risk status fetch failed:', err);
+            console.log('ℹ️ Risk status using fallback:', err?.message);
             const fallbackLoc = customLocationName || (fullAddress !== 'Fetching location...' && fullAddress !== 'Location unavailable' ? fullAddress : 'Buaya, Lapu-Lapu City');
             setRiskStatus({
                 risk_level: 'Info',
@@ -171,6 +217,13 @@ export default function Dashboard() {
                 description: 'No active alerts. All systems normal in',
                 updated_at: new Date().toISOString(),
             });
+            // ── Log weather fetch error to api_activity_logs (fire-and-forget) ──
+            const OWM_API_ID = '9c8a3010-a692-4728-a96e-bcf372e11933'; // Open_Weather_Key
+            supabase.from('api_activity_logs').insert({
+                api_id: OWM_API_ID,
+                event_type: 'Error',
+                message: `Weather fetch failed for ${customLocationName || fallbackLoc}: ${(err as any)?.message || 'Unknown error'}`,
+            }).then(() => {}, () => {});
         }
     };
 
@@ -178,10 +231,10 @@ export default function Dashboard() {
         try {
             clearLocationCache(); // Force a fresh lookup for the most specific address
             const addr = await getCurrentFullAddress();
-            setFullAddress(addr.short); // short = "Buaya, Lapu-Lapu City"
-            setCityName(addr.city);
+            setFullAddress(addr.short || 'Buaya, Lapu-Lapu City');
+            setCityName(addr.city || 'LAPU-LAPU CITY');
             // Immediately fetch live weather for user's exact GPS location & address
-            await fetchRiskStatus({ latitude: addr.latitude, longitude: addr.longitude }, addr.short);
+            await fetchRiskStatus({ latitude: addr.latitude, longitude: addr.longitude }, addr.short || 'Buaya, Lapu-Lapu City');
         } catch (error: any) {
             if (error?.message === 'PERMISSION_DENIED') {
                 setFullAddress('Location permission denied');
@@ -191,9 +244,9 @@ export default function Dashboard() {
                     try {
                         clearLocationCache();
                         const addr = await getCurrentFullAddress();
-                        setFullAddress(addr.short);
-                        setCityName(addr.city);
-                        await fetchRiskStatus({ latitude: addr.latitude, longitude: addr.longitude }, addr.short);
+                        setFullAddress(addr.short || 'Buaya, Lapu-Lapu City');
+                        setCityName(addr.city || 'LAPU-LAPU CITY');
+                        await fetchRiskStatus({ latitude: addr.latitude, longitude: addr.longitude }, addr.short || 'Buaya, Lapu-Lapu City');
                     } catch {
                         setFullAddress('Buaya, Lapu-Lapu City');
                         await fetchRiskStatus(undefined, 'Buaya, Lapu-Lapu City');

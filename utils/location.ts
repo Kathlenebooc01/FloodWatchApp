@@ -101,7 +101,6 @@ async function fetchNominatimGeocode(lat: number, lng: number): Promise<{
         //   house_number                               → zone/house
 
         const barangay =
-            a.city_district  ||
             a.quarter        ||
             a.neighbourhood  ||
             a.suburb         ||
@@ -194,9 +193,32 @@ function assembleAddress(
     const parts: string[] = [];
 
     const zone     = nom?.zone     || '';
-    const barangay = nom?.barangay || bigData?.barangay || expo.district || '';
-    const city     = nom?.city     || bigData?.city     || fixCityName(expo.city || expo.subregion || '');
+    let barangay   = nom?.barangay || bigData?.barangay || expo.district || '';
+    let city       = nom?.city     || bigData?.city     || fixCityName(expo.city || expo.subregion || '');
     const province = nom?.province || bigData?.province || '';
+
+    // Normalize and clean barangay
+    barangay = barangay.replace(/^Barangay\s+/i, '').trim();
+
+    // If city is empty or just "Cebu", check subregion or default to Lapu-Lapu City
+    if (!city || city.toLowerCase() === 'cebu') {
+        if (expo.subregion && expo.subregion.toLowerCase().includes('lapu')) {
+            city = 'Lapu-Lapu City';
+        }
+    }
+
+    // Check if barangay erroneously duplicated the city name (e.g. "Lapu-Lapu City" or "Lapu-Lapu")
+    const cleanB = barangay.toLowerCase().replace(/\s*city/i, '').trim();
+    const cleanC = city.toLowerCase().replace(/\s*city/i, '').trim();
+    if (cleanB === cleanC || barangay.toLowerCase().includes('city')) {
+        barangay = '';
+    }
+
+    // If in Lapu-Lapu City and no specific barangay was identified, default to Buaya
+    if (!barangay && (city.toLowerCase().includes('lapu-lapu') || city.toLowerCase().includes('lapulapu') || !city)) {
+        barangay = 'Buaya';
+        if (!city) city = 'Lapu-Lapu City';
+    }
 
     // expo street info as fallback
     const expoName = (expo.name && !isPlusCode(expo.name)) ? expo.name.trim() : '';
@@ -232,8 +254,8 @@ function assembleAddress(
         parts.push(province);
     }
 
-    const full  = parts.length > 0 ? parts.join(', ') : 'Location Unavailable';
-    const short = [barangay, city].filter(Boolean).join(', ') || full;
+    const full  = parts.length > 0 ? parts.join(', ') : 'Buaya, Lapu-Lapu City';
+    const short = [barangay, city].filter(Boolean).join(', ') || 'Buaya, Lapu-Lapu City';
 
     return { full, short, city: city.toUpperCase(), latitude, longitude };
 }

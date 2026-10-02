@@ -4,10 +4,11 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useState } from 'react';
-import { ActivityIndicator, Alert, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { supabase } from '@/utils/supabase';
+import { triggerNotificationBanner } from '@/components/notification-banner';
 
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL!;
 const ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY!;
@@ -176,16 +177,24 @@ export default function IdentityVerification() {
                 throw new Error('Failed to submit ID. Please try again.');
             }
 
-            // ── Send 'Pending' notification immediately ──
+            // Insert 'In Progress' notification into notifications table so it appears in notifications list
             await supabase.from('notifications').insert({
                 user_id: userId,
-                title: 'ID Verification In Progress',
-                message: 'Your ID is currently being verified. Please wait — you will be notified once the verification is complete.',
+                title: '⏳ ID Verification In Progress',
+                message: 'Your ID is currently being verified. We will notify you once complete.',
                 type: 'Updates',
                 is_read: false,
                 target_role: 'user',
                 created_at: new Date().toISOString(),
             });
+
+            // Trigger banner popup immediately
+            triggerNotificationBanner({
+                id: `verify-pending-${Date.now()}`,
+                title: '⏳ ID Verification In Progress',
+                message: 'Your ID is currently being verified. We will notify you once complete.',
+                type: 'Updates',
+            }, true);
 
             // ── ID validation runs in background directly via Gemini AI ──
             if (verData?.id_verification_id) {
@@ -250,7 +259,7 @@ Respond ONLY in this exact JSON format with no other text:
 
                         const parsed = JSON.parse(jsonMatch[0]);
                         const confidence = Math.max(0, Math.min(100, Math.round(parsed.confidence_score ?? 0)));
-                        const isApproved = confidence >= 90 && parsed.ai_is_valid;
+                        const isApproved = confidence >= 80 && (parsed.ai_is_valid || parsed.status === 'approved');
                         const finalStatus = isApproved ? 'approved' : 'rejected';
 
                         // 1. Update id_verification row
@@ -264,7 +273,7 @@ Respond ONLY in this exact JSON format with no other text:
                             })
                             .eq('id_verification_id', capturedVerId);
 
-                        // 2. Update profile and send notification
+                        // 2. Update profile and insert ONE final result notification
                         if (isApproved) {
                             await supabase
                                 .from('profiles')
@@ -272,6 +281,7 @@ Respond ONLY in this exact JSON format with no other text:
                                 .eq('id', userId);
                             await AsyncStorage.setItem('identity_verified', 'true');
 
+                            // Insert once — realtime listener in notification-banner will auto-pop the banner
                             await supabase.from('notifications').insert({
                                 user_id: userId,
                                 title: '✅ ID Verification Complete',
@@ -288,6 +298,7 @@ Respond ONLY in this exact JSON format with no other text:
                                 .eq('id', userId);
                             await AsyncStorage.removeItem('identity_verified');
 
+                            // Insert once — realtime listener in notification-banner will auto-pop the banner
                             await supabase.from('notifications').insert({
                                 user_id: userId,
                                 title: '❌ ID Verification Failed',
@@ -458,8 +469,8 @@ Respond ONLY in this exact JSON format with no other text:
 
             </ScrollView>
 
-            {/* ── Missing Photo Modal ── */}
-            <Modal visible={showPhotoAlert} transparent animationType="fade" onRequestClose={() => setShowPhotoAlert(false)}>
+            {/* ── Missing Photo Overlay ── */}
+            {showPhotoAlert && (
                 <View style={styles.alertOverlay}>
                     <View style={styles.alertCard}>
                         <View style={styles.alertIconCircle}>
@@ -476,10 +487,10 @@ Respond ONLY in this exact JSON format with no other text:
                         </TouchableOpacity>
                     </View>
                 </View>
-            </Modal>
+            )}
 
-            {/* ── ID Submitted Success Modal ── */}
-            <Modal visible={showSuccessModal} transparent animationType="fade" onRequestClose={() => { }}>
+            {/* ── ID Submitted Success Overlay ── */}
+            {showSuccessModal && (
                 <View style={styles.alertOverlay}>
                     <View style={styles.alertCard}>
                         <View style={styles.successIconCircle}>
@@ -509,7 +520,7 @@ Respond ONLY in this exact JSON format with no other text:
                         </TouchableOpacity>
                     </View>
                 </View>
-            </Modal>
+            )}
 
 
         </SafeAreaView>
@@ -556,8 +567,20 @@ const styles = StyleSheet.create({
     submitButtonText: { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
     skipText: { textAlign: 'center', color: '#2563EB', fontWeight: '700', fontSize: 14 },
 
-    // Missing photo modal
-    alertOverlay: { flex: 1, backgroundColor: 'rgba(15,23,42,0.75)', justifyContent: 'center', alignItems: 'center', padding: 28 },
+    // Missing photo & success overlay
+    alertOverlay: {
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        backgroundColor: 'rgba(15,23,42,0.75)',
+        justifyContent: 'center',
+        alignItems: 'center',
+        padding: 28,
+        zIndex: 1000,
+        elevation: 10,
+    },
     alertCard: { backgroundColor: '#FFFFFF', borderRadius: 28, padding: 30, width: '100%', alignItems: 'center', shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 20, shadowOffset: { width: 0, height: 8 }, elevation: 10 },
     alertIconCircle: { width: 72, height: 72, borderRadius: 36, backgroundColor: '#EFF6FF', justifyContent: 'center', alignItems: 'center', marginBottom: 18 },
     alertTitle: { fontSize: 20, fontWeight: '800', color: '#1E293B', marginBottom: 10, textAlign: 'center' },
