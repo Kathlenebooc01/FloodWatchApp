@@ -203,19 +203,22 @@ export default function LguReportScreen() {
                     <Ionicons name="chevron-forward" size={20} color="#CBD5E1" />
                 </TouchableOpacity>
 
-                {/* ── ADMIN ONLY: LGU Situational Reports Review ── */}
-                {userRole === 'admin' && (
-                    <TouchableOpacity style={[s.optionCard, { borderWidth: 1.5, borderColor: '#6366F1' }]} activeOpacity={0.7} onPress={() => router.push('/situational-admin' as any)}>
-                        <View style={[s.optionIconCircle, { backgroundColor: '#EEF2FF' }]}>
-                            <Ionicons name="shield-checkmark-outline" size={22} color="#6366F1" />
+                {/* ── LGU Emergency Requests & Documentation (Jira View) ── */}
+                <TouchableOpacity style={[s.optionCard, { borderWidth: 1.5, borderColor: '#6366F1' }]} activeOpacity={0.7} onPress={() => router.push('/situational-admin' as any)}>
+                    <View style={[s.optionIconCircle, { backgroundColor: '#EEF2FF' }]}>
+                        <Ionicons name="git-network-outline" size={22} color="#6366F1" />
+                    </View>
+                    <View style={s.optionTextContainer}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                            <Text style={[s.optionTitle, { color: '#4F46E5' }]}>LGU Emergency Requests</Text>
+                            <View style={{ backgroundColor: '#EEF2FF', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 4, borderWidth: 1, borderColor: '#C7D2FE' }}>
+                                <Text style={{ fontSize: 9, fontWeight: '800', color: '#4F46E5' }}>JIRA VIEW</Text>
+                            </View>
                         </View>
-                        <View style={s.optionTextContainer}>
-                            <Text style={[s.optionTitle, { color: '#4F46E5' }]}>LGU Situational Reports</Text>
-                            <Text style={s.optionDesc}>Review and accept reports submitted by LGU officers.</Text>
-                        </View>
-                        <Ionicons name="chevron-forward" size={20} color="#A5B4FC" />
-                    </TouchableOpacity>
-                )}
+                        <Text style={s.optionDesc}>Hierarchical request and documentation interface for Provincial Admin.</Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={20} color="#A5B4FC" />
+                </TouchableOpacity>
 
                 {/* ── ESCALATION CARD ── */}
                 <View style={[s.card, s.escalationCard]}>

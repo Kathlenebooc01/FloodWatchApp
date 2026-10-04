@@ -316,17 +316,6 @@ export default function NewsScreen() {
               >
                 <Text style={styles.acknowledgeText}>Close</Text>
               </TouchableOpacity>
-
-              {/* Share Button */}
-              <TouchableOpacity style={styles.shareButton}>
-                <Ionicons
-                  name="share-outline"
-                  size={20}
-                  color="#1E293B"
-                  style={{ marginRight: 8 }}
-                />
-                <Text style={styles.shareText}>Share News</Text>
-              </TouchableOpacity>
             </ScrollView>
           </View>
         </View>
@@ -427,7 +416,6 @@ function NewsItemComponent({
       <View style={styles.newsInfo}>
         <View style={styles.newsMeta}>
           <Text style={styles.newsTime}>{time}</Text>
-          <Ionicons name="share-social-outline" size={18} color="#94A3B8" />
         </View>
         <Text style={styles.newsTitle}>{title}</Text>
         <Text style={styles.newsDesc} numberOfLines={2}>
@@ -621,7 +609,7 @@ const styles = StyleSheet.create({
     paddingVertical: 16,
     borderRadius: 16,
     alignItems: "center",
-    marginBottom: 12,
+    marginBottom: 20,
   },
   acknowledgeText: { color: "#FFFFFF", fontSize: 16, fontWeight: "700" },
   shareButton: {
