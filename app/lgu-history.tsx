@@ -9,11 +9,13 @@ import {
     ScrollView,
     StyleSheet,
     Text,
+    TextInput,
     TouchableOpacity,
     View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { supabase } from '@/utils/supabase';
+import { parseDropOffAndNotes } from '@/utils/logisticsHelpers';
 
 export interface Allocation {
     allocation_id: string;
@@ -48,12 +50,16 @@ export interface HistoryItem {
 const formatStatusUI = (status: string) => {
     if (!status) return 'Unknown';
     const s = status.toLowerCase();
+    if (s === 'overdue') return 'Overdue';
     if (s.includes('pending')) return 'Pending Review';
     if (s === 'ready_for_lgu') return 'Ready for LGU';
     if (s === 'in_progress') return 'In Progress';
+    if (s === 'in_transit' || s === 'in transit' || s === 'dispatched') return 'In Transit';
+    if (s === 'received') return 'Received';
     if (s === 'verified') return 'Verified';
     if (s === 'accepted' || s === 'confirmed') return 'Confirmed';
-    if (s === 'resolved') return 'Resolved';
+    if (s === 'returned') return 'Returned';
+    if (s === 'resolved' || s === 'completed') return 'Completed';
     if (s === 'rejected') return 'Rejected';
     return status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 };
@@ -61,12 +67,21 @@ const formatStatusUI = (status: string) => {
 const getStatusColor = (status: string) => {
     if (!status) return { bg: 'rgba(148,163,184,0.15)', text: '#94A3B8', border: '#CBD5E1', dot: '#94A3B8' };
     const s = status.toLowerCase();
+    if (s === 'overdue') return { bg: '#FEF2F2', text: '#DC2626', border: '#FECACA', dot: '#EF4444' };
     if (s.includes('pending')) return { bg: 'rgba(251,191,36,0.15)', text: '#D97706', border: '#FCD34D', dot: '#F59E0B' };
+    if (s === 'received') return { bg: 'rgba(16,185,129,0.15)', text: '#059669', border: '#6EE7B7', dot: '#10B981' };
     if (s === 'verified' || s === 'accepted' || s === 'confirmed') return { bg: 'rgba(16,185,129,0.15)', text: '#059669', border: '#6EE7B7', dot: '#10B981' };
     if (s === 'rejected') return { bg: 'rgba(239,68,68,0.15)', text: '#DC2626', border: '#FCA5A5', dot: '#EF4444' };
     if (s === 'returned' || s === 'completed') return { bg: 'rgba(139,92,246,0.15)', text: '#7C3AED', border: '#C4B5FD', dot: '#8B5CF6' };
-    if (s === 'dispatched' || s === 'transit') return { bg: 'rgba(59,130,246,0.15)', text: '#2563EB', border: '#93C5FD', dot: '#3B82F6' };
+    if (s === 'dispatched' || s.includes('transit')) return { bg: 'rgba(59,130,246,0.15)', text: '#2563EB', border: '#93C5FD', dot: '#3B82F6' };
     return { bg: 'rgba(148,163,184,0.15)', text: '#64748B', border: '#CBD5E1', dot: '#94A3B8' };
+};
+
+const formatBatchTitle = (batch?: string, idx: number = 0) => {
+    if (!batch) return `Allocation ${idx + 1}`;
+    const cleaned = batch.replace(/_/g, ' ').trim();
+    if (cleaned.toLowerCase() === 'in transit') return 'In Transit';
+    return cleaned;
 };
 
 const getTypeConfig = (type: 'situational' | 'logistics' | 'escalation') => {
@@ -89,6 +104,13 @@ export default function LguHistoryScreen() {
     const [allocations, setAllocations] = useState<Allocation[]>([]);
     const [loadingAlloc, setLoadingAlloc] = useState(false);
     const [deleteCandidate, setDeleteCandidate] = useState<HistoryItem | null>(null);
+
+    // ── FILTER & PAGINATION STATE ──
+    const [searchQuery, setSearchQuery] = useState('');
+    const [typeFilter, setTypeFilter] = useState<'all' | 'logistics' | 'situational' | 'escalation'>('all');
+    const [statusFilter, setStatusFilter] = useState<string>('ALL');
+    const [currentPage, setCurrentPage] = useState(1);
+    const itemsPerPage = 6;
 
     const fetchHistory = async (silent = false) => {
         try {
@@ -130,30 +152,112 @@ export default function LguHistoryScreen() {
             if (user) {
                 const { data: requests, error } = await supabase
                     .from('resource_requests')
-                    .select('*, resource_request_items(quantity_requested, utilities(name))')
+                    .select('*, resource_allocations(*), resource_request_items(quantity_requested, expected_return_date, utilities(name)), municipality_or_city(name)')
                     .eq('requested_by', user.id)
                     .order('created_at', { ascending: false });
 
                 if (!error && requests) {
-                    backendLogistics = requests.map((req: any) => {
+                    backendLogistics = await Promise.all(requests.map(async (req: any) => {
                         const itemsObj: Record<string, number> = {};
+                        let itemExpectedReturn: string | null = null;
                         req.resource_request_items?.forEach((item: any) => {
                             if (item.utilities?.name) {
                                 itemsObj[item.utilities.name] = item.quantity_requested;
                             }
+                            if (item.expected_return_date && !itemExpectedReturn) {
+                                itemExpectedReturn = item.expected_return_date;
+                            }
                         });
+
+                        const shortId = req.request_id.substring(0, 8).toUpperCase();
+
+                        // Try to get cached human-readable drop-off from AsyncStorage
+                        let cachedDropoff = await AsyncStorage.getItem(`@dropoff_location_${req.request_id}`);
+                        if (!cachedDropoff) {
+                            cachedDropoff = await AsyncStorage.getItem(`@dropoff_location_${shortId}`);
+                        }
+
+                        // Parse the drop-off address and clean the description
+                        const parsed = parseDropOffAndNotes(
+                            req.request_reason,
+                            cachedDropoff || req.drop_off_address,
+                            req.municipality_or_city?.name
+                        );
+
+                        // Compute true real-time dynamic status based on allocations
+                        const allocs = req.resource_allocations || [];
+                        let dynamicStatus = req.status || 'Pending';
+                        let isOverdue = false;
+                        const now = new Date();
+
+                        if (allocs.length > 0) {
+                            const allReturned = allocs.every((a: any) => !!a.returned_at);
+                            const anyReceived = allocs.some((a: any) => !!a.received_at && !a.returned_at);
+                            const anyDispatched = allocs.some((a: any) => (!!a.dispatched_at || !!a.delivered_at) && !a.received_at);
+
+                            if (allReturned) {
+                                dynamicStatus = 'Returned';
+                            } else if (anyReceived) {
+                                const activeAlloc = allocs.find((a: any) => !!a.received_at && !a.returned_at);
+                                const expReturn = activeAlloc?.expected_return_date || itemExpectedReturn;
+                                if (expReturn) {
+                                    const expD = new Date(expReturn);
+                                    if (!isNaN(expD.getTime()) && now.getTime() > expD.getTime()) {
+                                        isOverdue = true;
+                                        dynamicStatus = 'Overdue';
+                                    } else {
+                                        dynamicStatus = 'Received';
+                                    }
+                                } else {
+                                    dynamicStatus = 'Received';
+                                }
+                            } else if (anyDispatched) {
+                                dynamicStatus = 'In Transit';
+                            }
+                        } else {
+                            const sLower = (req.status || '').toLowerCase();
+                            if (sLower === 'in_transit' || sLower === 'dispatched' || sLower === 'in transit') {
+                                dynamicStatus = 'In Transit';
+                            } else if (sLower === 'received') {
+                                dynamicStatus = 'Received';
+                            } else if (sLower === 'returned' || sLower === 'completed') {
+                                dynamicStatus = 'Returned';
+                            }
+                        }
+
+                        // Overdue notification check
+                        if (isOverdue && user) {
+                            try {
+                                const notifKey = `@notified_overdue_${req.request_id}`;
+                                const alreadyNotified = await AsyncStorage.getItem(notifKey);
+                                if (!alreadyNotified) {
+                                    await supabase.from('notifications').insert({
+                                        user_id: user.id,
+                                        target_role: 'lgu',
+                                        type: 'Alerts',
+                                        title: 'Resource Return Overdue!',
+                                        message: `Logistics items for Request #${shortId} are overdue for return to PDRRMO. Please process return immediately.`,
+                                        is_read: false
+                                    });
+                                    await AsyncStorage.setItem(notifKey, 'true');
+                                }
+                            } catch (nErr) {
+                                console.warn('Could not insert overdue notification', nErr);
+                            }
+                        }
 
                         return {
                             id: req.request_id,
                             type: 'logistics' as const,
                             timestamp: req.created_at,
                             title: 'Logistics Request',
-                            status: req.status || 'Pending',
-                            desc: req.request_reason,
-                            dropoff: req.drop_off_address || 'Coordinate',
+                            status: dynamicStatus,
+                            desc: parsed.cleanNotes,
+                            dropoff: parsed.dropoff,
+                            urgency: parsed.urgency,
                             items: itemsObj,
                         };
-                    });
+                    }));
                 }
             }
 
@@ -222,10 +326,16 @@ export default function LguHistoryScreen() {
             })
             .subscribe();
 
+        // Polling heartbeat (every 3.5s) to guarantee instant real-time sync without pull-to-refresh
+        const intervalId = setInterval(() => {
+            fetchHistory(true);
+        }, 3500);
+
         return () => {
             supabase.removeChannel(reqChannel);
             supabase.removeChannel(allocChannel);
             supabase.removeChannel(sitChannel);
+            clearInterval(intervalId);
         };
     }, []);
 
@@ -293,8 +403,22 @@ export default function LguHistoryScreen() {
     const handleUpdateAllocation = async (allocationId: string, type: 'receive' | 'return') => {
         try {
             const updateData: any = {};
-            if (type === 'receive') updateData.received_at = new Date().toISOString();
-            if (type === 'return') updateData.returned_at = new Date().toISOString();
+            const now = new Date().toISOString();
+            if (type === 'receive') {
+                updateData.received_at = now;
+                updateData.delivered_at = now; // Mag dungan sila: receiving records delivery completion
+                
+                // Set expected return date starting from received date (+7 days) if not already set
+                const targetAlloc = allocations.find(a => a.allocation_id === allocationId);
+                if (!targetAlloc?.expected_return_date) {
+                    const exp = new Date();
+                    exp.setDate(exp.getDate() + 7);
+                    updateData.expected_return_date = exp.toISOString();
+                }
+            }
+            if (type === 'return') {
+                updateData.returned_at = now;
+            }
 
             const { error } = await supabase
                 .from('resource_allocations')
@@ -302,6 +426,16 @@ export default function LguHistoryScreen() {
                 .eq('allocation_id', allocationId);
 
             if (error) throw error;
+
+            const newStatus = type === 'receive' ? 'Received' : 'Returned';
+
+            // Also sync parent resource_requests status if applicable
+            if (selectedItem?.id) {
+                await supabase
+                    .from('resource_requests')
+                    .update({ status: newStatus })
+                    .eq('request_id', selectedItem.id);
+            }
 
             // Trigger notification
             const { data: { user } } = await supabase.auth.getUser();
@@ -311,7 +445,7 @@ export default function LguHistoryScreen() {
                 
                 if (type === 'receive') {
                     notifTitle = 'Items Received';
-                    notifMessage = `You have successfully marked the logistics items as received.`;
+                    notifMessage = `You have successfully marked the logistics items as delivered and received.`;
                 } else if (type === 'return') {
                     notifTitle = 'Items Returned';
                     notifMessage = `You have marked the logistics items as returned. Awaiting PDRRMO confirmation.`;
@@ -327,14 +461,92 @@ export default function LguHistoryScreen() {
                 });
             }
 
-            // Optimistically update UI
+            // Optimistically update UI in REAL TIME
             setAllocations(prev => prev.map(a => 
                 a.allocation_id === allocationId ? { ...a, ...updateData } : a
+            ));
+            setSelectedItem(prev => prev ? { ...prev, status: newStatus } : null);
+            setHistory(prev => prev.map(item => 
+                item.id === selectedItem?.id ? { ...item, status: newStatus } : item
             ));
         } catch (e) {
             console.error("Update failed:", e);
             alert("Failed to update allocation status.");
         }
+    };
+
+    // Reset page to 1 whenever filters change
+    useEffect(() => {
+        setCurrentPage(1);
+    }, [searchQuery, typeFilter, statusFilter]);
+
+    // ── FILTER COMPUTATION ──
+    const typeCounts = {
+        all: history.length,
+        logistics: history.filter(i => i.type === 'logistics').length,
+        situational: history.filter(i => i.type === 'situational').length,
+        escalation: history.filter(i => i.type === 'escalation').length,
+    };
+
+    const statusCounts = {
+        inTransit: history.filter(i => {
+            const s = (i.status || '').toLowerCase();
+            return s === 'in transit' || s === 'in_transit' || s === 'dispatched';
+        }).length,
+        received: history.filter(i => (i.status || '').toLowerCase() === 'received').length,
+        overdue: history.filter(i => (i.status || '').toLowerCase() === 'overdue').length,
+        returned: history.filter(i => (i.status || '').toLowerCase() === 'returned').length,
+        pending: history.filter(i => (i.status || '').toLowerCase().includes('pending')).length,
+    };
+
+    const filteredHistory = history.filter(item => {
+        // Search query
+        if (searchQuery.trim()) {
+            const q = searchQuery.toLowerCase().trim();
+            const matchTitle = item.title?.toLowerCase().includes(q);
+            const matchDesc = item.desc?.toLowerCase().includes(q);
+            const matchId = item.id?.toLowerCase().includes(q);
+            const matchStatus = item.status?.toLowerCase().includes(q);
+            const matchDropoff = item.dropoff?.toLowerCase().includes(q);
+            if (!matchTitle && !matchDesc && !matchId && !matchStatus && !matchDropoff) {
+                return false;
+            }
+        }
+
+        // Type filter
+        if (typeFilter !== 'all' && item.type !== typeFilter) {
+            return false;
+        }
+
+        // Status filter
+        if (statusFilter !== 'ALL') {
+            const s = (item.status || '').toLowerCase();
+            if (statusFilter === 'IN_TRANSIT') {
+                if (s !== 'in transit' && s !== 'in_transit' && s !== 'dispatched') return false;
+            } else if (statusFilter === 'RECEIVED') {
+                if (s !== 'received') return false;
+            } else if (statusFilter === 'OVERDUE') {
+                if (s !== 'overdue') return false;
+            } else if (statusFilter === 'RETURNED') {
+                if (s !== 'returned') return false;
+            } else if (statusFilter === 'PENDING') {
+                if (!s.includes('pending')) return false;
+            }
+        }
+
+        return true;
+    });
+
+    const isAnyFilterActive = searchQuery.trim() !== '' || typeFilter !== 'all' || statusFilter !== 'ALL';
+    const totalPages = Math.max(1, Math.ceil(filteredHistory.length / itemsPerPage));
+    const safePage = Math.min(currentPage, totalPages);
+    const paginatedHistory = filteredHistory.slice((safePage - 1) * itemsPerPage, safePage * itemsPerPage);
+
+    const resetFilters = () => {
+        setSearchQuery('');
+        setTypeFilter('all');
+        setStatusFilter('ALL');
+        setCurrentPage(1);
     };
 
     return (
@@ -352,67 +564,282 @@ export default function LguHistoryScreen() {
                     </View>
                     <Text style={s.navTitle}>Submission History</Text>
                 </View>
-                <View style={{ width: 40 }} />
+                <TouchableOpacity onPress={() => fetchHistory()} style={s.backBtn} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                    <Ionicons name="refresh-outline" size={20} color="#2563EB" />
+                </TouchableOpacity>
             </View>
 
             <ScrollView contentContainerStyle={s.scroll} showsVerticalScrollIndicator={false}>
+                {/* ── SEARCH BAR ── */}
+                <View style={s.searchBarWrapper}>
+                    <Ionicons name="search-outline" size={18} color="#64748B" style={{ marginRight: 8 }} />
+                    <TextInput
+                        style={s.searchInput}
+                        placeholder="Search submissions by title, ID, note..."
+                        placeholderTextColor="#94A3B8"
+                        value={searchQuery}
+                        onChangeText={setSearchQuery}
+                    />
+                    {searchQuery.length > 0 && (
+                        <TouchableOpacity onPress={() => setSearchQuery('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                            <Ionicons name="close-circle" size={18} color="#94A3B8" />
+                        </TouchableOpacity>
+                    )}
+                </View>
+
+                {/* ── TYPE FILTER TABS (SCROLLABLE) ── */}
+                <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    style={s.typeScroll}
+                    contentContainerStyle={s.typeScrollContent}
+                >
+                    <TouchableOpacity
+                        style={[s.typeTab, typeFilter === 'all' && s.typeTabActive]}
+                        onPress={() => setTypeFilter('all')}
+                        activeOpacity={0.8}
+                    >
+                        <Ionicons name="layers-outline" size={13} color={typeFilter === 'all' ? '#FFFFFF' : '#64748B'} style={{ marginRight: 5 }} />
+                        <Text style={[s.typeTabText, typeFilter === 'all' && s.typeTabTextActive]}>
+                            All ({typeCounts.all})
+                        </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                        style={[s.typeTab, typeFilter === 'logistics' && s.typeTabActiveLogistics]}
+                        onPress={() => setTypeFilter(prev => prev === 'logistics' ? 'all' : 'logistics')}
+                        activeOpacity={0.8}
+                    >
+                        <Ionicons name="cube" size={13} color={typeFilter === 'logistics' ? '#FFFFFF' : '#7C3AED'} style={{ marginRight: 5 }} />
+                        <Text style={[s.typeTabText, typeFilter === 'logistics' && s.typeTabTextActive]}>
+                            Logistics ({typeCounts.logistics})
+                        </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                        style={[s.typeTab, typeFilter === 'situational' && s.typeTabActiveSituational]}
+                        onPress={() => setTypeFilter(prev => prev === 'situational' ? 'all' : 'situational')}
+                        activeOpacity={0.8}
+                    >
+                        <Ionicons name="document-text" size={13} color={typeFilter === 'situational' ? '#FFFFFF' : '#2563EB'} style={{ marginRight: 5 }} />
+                        <Text style={[s.typeTabText, typeFilter === 'situational' && s.typeTabTextActive]}>
+                            Situational Reports ({typeCounts.situational})
+                        </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                        style={[s.typeTab, typeFilter === 'escalation' && s.typeTabActiveEscalation]}
+                        onPress={() => setTypeFilter(prev => prev === 'escalation' ? 'all' : 'escalation')}
+                        activeOpacity={0.8}
+                    >
+                        <Ionicons name="radio" size={13} color={typeFilter === 'escalation' ? '#FFFFFF' : '#DC2626'} style={{ marginRight: 5 }} />
+                        <Text style={[s.typeTabText, typeFilter === 'escalation' && s.typeTabTextActive]}>
+                            Escalations ({typeCounts.escalation})
+                        </Text>
+                    </TouchableOpacity>
+                </ScrollView>
+
+                {/* ── STATUS QUICK FILTER CHIPS (HORIZONTAL SCROLL) ── */}
+                <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    style={s.statusScroll}
+                    contentContainerStyle={s.statusScrollContent}
+                >
+                    <TouchableOpacity
+                        style={[s.statusChip, statusFilter === 'ALL' && s.statusChipActive]}
+                        onPress={() => setStatusFilter('ALL')}
+                        activeOpacity={0.8}
+                    >
+                        <Text style={[s.statusChipText, statusFilter === 'ALL' && s.statusChipTextActive]}>
+                            All Status
+                        </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                        style={[s.statusChip, statusFilter === 'IN_TRANSIT' && s.statusChipActiveInTransit]}
+                        onPress={() => setStatusFilter(prev => prev === 'IN_TRANSIT' ? 'ALL' : 'IN_TRANSIT')}
+                        activeOpacity={0.8}
+                    >
+                        <Ionicons name="airplane-outline" size={12} color={statusFilter === 'IN_TRANSIT' ? '#FFFFFF' : '#D97706'} style={{ marginRight: 4 }} />
+                        <Text style={[s.statusChipText, statusFilter === 'IN_TRANSIT' && s.statusChipTextActiveWhite]}>
+                            In Transit ({statusCounts.inTransit})
+                        </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                        style={[s.statusChip, statusFilter === 'RECEIVED' && s.statusChipActiveReceived]}
+                        onPress={() => setStatusFilter(prev => prev === 'RECEIVED' ? 'ALL' : 'RECEIVED')}
+                        activeOpacity={0.8}
+                    >
+                        <Ionicons name="checkmark-done" size={12} color={statusFilter === 'RECEIVED' ? '#FFFFFF' : '#2563EB'} style={{ marginRight: 4 }} />
+                        <Text style={[s.statusChipText, statusFilter === 'RECEIVED' && s.statusChipTextActiveWhite]}>
+                            Received ({statusCounts.received})
+                        </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                        style={[s.statusChip, statusFilter === 'OVERDUE' && s.statusChipActiveOverdue]}
+                        onPress={() => setStatusFilter(prev => prev === 'OVERDUE' ? 'ALL' : 'OVERDUE')}
+                        activeOpacity={0.8}
+                    >
+                        <Ionicons name="alert-circle" size={12} color={statusFilter === 'OVERDUE' ? '#FFFFFF' : '#DC2626'} style={{ marginRight: 4 }} />
+                        <Text style={[s.statusChipText, statusFilter === 'OVERDUE' && s.statusChipTextActiveWhite]}>
+                            Overdue ({statusCounts.overdue})
+                        </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                        style={[s.statusChip, statusFilter === 'RETURNED' && s.statusChipActiveReturned]}
+                        onPress={() => setStatusFilter(prev => prev === 'RETURNED' ? 'ALL' : 'RETURNED')}
+                        activeOpacity={0.8}
+                    >
+                        <Ionicons name="archive-outline" size={12} color={statusFilter === 'RETURNED' ? '#FFFFFF' : '#7C3AED'} style={{ marginRight: 4 }} />
+                        <Text style={[s.statusChipText, statusFilter === 'RETURNED' && s.statusChipTextActiveWhite]}>
+                            Returned ({statusCounts.returned})
+                        </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                        style={[s.statusChip, statusFilter === 'PENDING' && s.statusChipActivePending]}
+                        onPress={() => setStatusFilter(prev => prev === 'PENDING' ? 'ALL' : 'PENDING')}
+                        activeOpacity={0.8}
+                    >
+                        <Ionicons name="hourglass-outline" size={12} color={statusFilter === 'PENDING' ? '#FFFFFF' : '#EA580C'} style={{ marginRight: 4 }} />
+                        <Text style={[s.statusChipText, statusFilter === 'PENDING' && s.statusChipTextActiveWhite]}>
+                            Pending ({statusCounts.pending})
+                        </Text>
+                    </TouchableOpacity>
+                </ScrollView>
+
+                {/* ── ACTIVE FILTER BANNER & RESULTS COUNT (NO CLEAR BUTTON) ── */}
+                <View style={s.resultsMetaRow}>
+                    <Text style={s.resultsMetaText}>
+                        Showing <Text style={{ fontWeight: '800', color: '#0F172A' }}>{filteredHistory.length}</Text> of {history.length} records
+                        {isAnyFilterActive && (
+                            <Text style={{ color: '#2563EB', fontWeight: '600' }}> • Tap active chip to deselect</Text>
+                        )}
+                    </Text>
+                </View>
+
                 {loading ? (
                     <View style={s.loadingContainer}>
                         <ActivityIndicator size="large" color="#2563EB" />
                         <Text style={s.loadingText}>Loading records...</Text>
                     </View>
-                ) : history.length === 0 ? (
+                ) : filteredHistory.length === 0 ? (
                     <View style={s.emptyState}>
                         <View style={s.emptyIconWrap}>
-                            <Ionicons name="document-text-outline" size={40} color="#2563EB" />
+                            <Ionicons name="filter-outline" size={40} color="#94A3B8" />
                         </View>
-                        <Text style={s.emptyStateTitle}>No Submissions Yet</Text>
-                        <Text style={s.emptyStateText}>Your submitted reports and logistics requests will appear here.</Text>
+                        <Text style={s.emptyStateTitle}>
+                            {history.length === 0 ? 'No Submissions Yet' : 'No Records Match Filter'}
+                        </Text>
+                        <Text style={s.emptyStateText}>
+                            {history.length === 0
+                                ? 'Your submitted reports and logistics requests will appear here.'
+                                : 'No submissions found matching your search or selected filters.'}
+                        </Text>
+                        {isAnyFilterActive && (
+                            <TouchableOpacity style={s.resetActionBtn} onPress={resetFilters} activeOpacity={0.8}>
+                                <Ionicons name="refresh" size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
+                                <Text style={s.resetActionBtnText}>Clear All Filters</Text>
+                            </TouchableOpacity>
+                        )}
                     </View>
                 ) : (
-                    history.map((item) => {
-                        const tc = getTypeConfig(item.type);
-                        const sc = getStatusColor(item.status);
-                        return (
-                            <TouchableOpacity
-                                key={item.id}
-                                style={s.historyCard}
-                                activeOpacity={0.7}
-                                onPress={() => handleSelect(item)}
-                                onLongPress={() => setDeleteCandidate(item)}
-                                delayLongPress={500}
-                            >
-                                {/* Colored left accent line */}
-                                <View style={[s.cardAccentLine, { backgroundColor: tc.gradientLine }]} />
+                    <>
+                        {paginatedHistory.map((item) => {
+                            const tc = getTypeConfig(item.type);
+                            const sc = getStatusColor(item.status);
+                            return (
+                                <TouchableOpacity
+                                    key={item.id}
+                                    style={s.historyCard}
+                                    activeOpacity={0.7}
+                                    onPress={() => handleSelect(item)}
+                                    onLongPress={() => setDeleteCandidate(item)}
+                                    delayLongPress={500}
+                                >
+                                    {/* Colored left accent line */}
+                                    <View style={[s.cardAccentLine, { backgroundColor: tc.gradientLine }]} />
 
-                                {/* Icon */}
-                                <View style={[s.iconCircle, { backgroundColor: tc.bg }]}>
-                                    <Ionicons name={tc.icon} size={22} color={tc.color} />
-                                </View>
-
-                                {/* Content */}
-                                <View style={s.cardContent}>
-                                    <Text style={s.cardTitle} numberOfLines={1}>{item.title}</Text>
-                                    <View style={s.cardMeta}>
-                                        <Ionicons name="time-outline" size={11} color="#94A3B8" />
-                                        <Text style={s.cardSubtitle}> {formatDate(item.timestamp)}</Text>
+                                    {/* Icon */}
+                                    <View style={[s.iconCircle, { backgroundColor: tc.bg }]}>
+                                        <Ionicons name={tc.icon} size={22} color={tc.color} />
                                     </View>
-                                    <View style={s.cardTypeTag}>
-                                        <Text style={[s.cardTypeText, { color: tc.color }]}>{tc.label}</Text>
+
+                                    {/* Content */}
+                                    <View style={s.cardContent}>
+                                        <Text style={s.cardTitle} numberOfLines={1}>{item.title}</Text>
+                                        <View style={s.cardMeta}>
+                                            <Ionicons name="time-outline" size={11} color="#94A3B8" />
+                                            <Text style={s.cardSubtitle}> {formatDate(item.timestamp)}</Text>
+                                        </View>
+                                        <View style={s.cardTypeTag}>
+                                            <Text style={[s.cardTypeText, { color: tc.color }]}>{tc.label}</Text>
+                                        </View>
                                     </View>
+
+                                    {/* Status badge */}
+                                    <View style={[s.badge, { backgroundColor: sc.bg, borderColor: sc.border, borderWidth: 1 }]}>
+                                        <View style={[s.badgeDot, { backgroundColor: sc.dot }]} />
+                                        <Text style={[s.badgeText, { color: sc.text }]}>{formatStatusUI(item.status)}</Text>
+                                    </View>
+
+                                    {/* Arrow */}
+                                    <Ionicons name="chevron-forward" size={16} color="#CBD5E1" style={{ marginLeft: 4 }} />
+                                </TouchableOpacity>
+                            );
+                        })}
+
+                        {/* ── PAGINATION CONTROLS ── */}
+                        {totalPages > 1 && (
+                            <View style={s.paginationContainer}>
+                                <TouchableOpacity
+                                    style={[s.pageNavBtn, safePage === 1 && s.pageNavBtnDisabled]}
+                                    onPress={() => setCurrentPage(p => Math.max(1, p - 1))}
+                                    disabled={safePage === 1}
+                                    activeOpacity={0.7}
+                                >
+                                    <Ionicons name="chevron-back" size={16} color={safePage === 1 ? '#CBD5E1' : '#2563EB'} />
+                                    <Text style={[s.pageNavBtnText, safePage === 1 && s.pageNavBtnTextDisabled]}>Prev</Text>
+                                </TouchableOpacity>
+
+                                <View style={s.pagePillsRow}>
+                                    {Array.from({ length: totalPages }).map((_, idx) => {
+                                        const p = idx + 1;
+                                        const isCurrent = p === safePage;
+                                        return (
+                                            <TouchableOpacity
+                                                key={p}
+                                                style={[s.pageNumberPill, isCurrent && s.pageNumberPillActive]}
+                                                onPress={() => setCurrentPage(p)}
+                                                activeOpacity={0.8}
+                                            >
+                                                <Text style={[s.pageNumberText, isCurrent && s.pageNumberTextActive]}>
+                                                    {p}
+                                                </Text>
+                                            </TouchableOpacity>
+                                        );
+                                    })}
                                 </View>
 
-                                {/* Status badge */}
-                                <View style={[s.badge, { backgroundColor: sc.bg, borderColor: sc.border, borderWidth: 1 }]}>
-                                    <View style={[s.badgeDot, { backgroundColor: sc.dot }]} />
-                                    <Text style={[s.badgeText, { color: sc.text }]}>{formatStatusUI(item.status)}</Text>
-                                </View>
-
-                                {/* Arrow */}
-                                <Ionicons name="chevron-forward" size={16} color="#CBD5E1" style={{ marginLeft: 4 }} />
-                            </TouchableOpacity>
-                        );
-                    })
+                                <TouchableOpacity
+                                    style={[s.pageNavBtn, safePage === totalPages && s.pageNavBtnDisabled]}
+                                    onPress={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                                    disabled={safePage === totalPages}
+                                    activeOpacity={0.7}
+                                >
+                                    <Text style={[s.pageNavBtnText, safePage === totalPages && s.pageNavBtnTextDisabled]}>Next</Text>
+                                    <Ionicons name="chevron-forward" size={16} color={safePage === totalPages ? '#CBD5E1' : '#2563EB'} />
+                                </TouchableOpacity>
+                            </View>
+                        )}
+                        <Text style={s.paginationInfoText}>
+                            Page {safePage} of {totalPages} • Showing {Math.min(filteredHistory.length, (safePage - 1) * itemsPerPage + 1)}–{Math.min(safePage * itemsPerPage, filteredHistory.length)} of {filteredHistory.length}
+                        </Text>
+                    </>
                 )}
             </ScrollView>
 
@@ -520,28 +947,71 @@ export default function LguHistoryScreen() {
                                                     <View key={alloc.allocation_id} style={s.allocCard}>
                                                         <View style={s.allocCardHeader}>
                                                             <Ionicons name="cube-outline" size={16} color="#7C3AED" />
-                                                            <Text style={s.allocCardTitle}>{alloc.batch || `Allocation ${idx + 1}`}</Text>
+                                                            <Text style={s.allocCardTitle}>{formatBatchTitle(alloc.batch, idx)}</Text>
                                                             <View style={[s.allocQtyBadge]}>
                                                                 <Text style={s.allocQtyText}>×{alloc.quantity_allocated}</Text>
                                                             </View>
                                                         </View>
 
+                                                        {/* ── PROGRESSIVE TIMELINE ── */}
                                                         <View style={s.allocTimeline}>
-                                                            {[{ label: 'Dispatched', val: alloc.dispatched_at, icon: 'rocket-outline' as const },
-                                                              { label: 'Delivered', val: alloc.delivered_at, icon: 'location-outline' as const },
-                                                              { label: 'Received', val: alloc.received_at, icon: 'checkmark-circle-outline' as const },
-                                                              { label: 'Expected Return', val: alloc.expected_return_date, icon: 'calendar-outline' as const },
-                                                              { label: 'Returned', val: alloc.returned_at, icon: 'arrow-undo-outline' as const },
-                                                            ].map((row, i) => (
-                                                                <View key={i} style={s.timelineRow}>
-                                                                    <Ionicons name={row.icon} size={13} color={row.val ? '#2563EB' : '#CBD5E1'} />
-                                                                    <Text style={[s.timelineLabel, !row.val && { color: '#CBD5E1' }]}>{row.label}</Text>
-                                                                    <Text style={[s.timelineVal, !row.val && { color: '#CBD5E1' }]}>{row.val ? formatDate(row.val) : '—'}</Text>
+                                                            {/* 1. Dispatched — always visible */}
+                                                            <View style={s.timelineRow}>
+                                                                <View style={[s.timelineDot, alloc.dispatched_at ? s.timelineDotActive : s.timelineDotInactive]} />
+                                                                <Ionicons name="rocket-outline" size={13} color={alloc.dispatched_at ? '#2563EB' : '#CBD5E1'} />
+                                                                <Text style={[s.timelineLabel, !alloc.dispatched_at && { color: '#CBD5E1' }]}>Dispatched</Text>
+                                                                <Text style={[s.timelineVal, !alloc.dispatched_at && { color: '#CBD5E1' }]}>{alloc.dispatched_at ? formatDate(alloc.dispatched_at) : '—'}</Text>
+                                                            </View>
+
+                                                            {/* 2. Delivered — preserved, syncs with received */}
+                                                            <View style={s.timelineRow}>
+                                                                <View style={[s.timelineDot, (alloc.delivered_at || alloc.received_at) ? { backgroundColor: '#2563EB' } : s.timelineDotInactive]} />
+                                                                <Ionicons name="location-outline" size={13} color={(alloc.delivered_at || alloc.received_at) ? '#2563EB' : '#CBD5E1'} />
+                                                                <Text style={[s.timelineLabel, !(alloc.delivered_at || alloc.received_at) && { color: '#CBD5E1' }]}>Delivered</Text>
+                                                                <Text style={[s.timelineVal, !(alloc.delivered_at || alloc.received_at) && { color: '#CBD5E1' }]}>
+                                                                    {(alloc.delivered_at || alloc.received_at) ? formatDate(alloc.delivered_at || alloc.received_at) : (alloc.dispatched_at ? 'In Transit...' : '—')}
+                                                                </Text>
+                                                            </View>
+
+                                                            {/* 3. Received — visible once dispatched */}
+                                                            <View style={s.timelineRow}>
+                                                                <View style={[s.timelineDot, alloc.received_at ? { backgroundColor: '#059669' } : s.timelineDotInactive]} />
+                                                                <Ionicons name="checkmark-circle-outline" size={13} color={alloc.received_at ? '#059669' : '#CBD5E1'} />
+                                                                <Text style={[s.timelineLabel, !alloc.received_at && { color: '#CBD5E1' }]}>Received</Text>
+                                                                <Text style={[s.timelineVal, !alloc.received_at && { color: '#CBD5E1' }]}>{alloc.received_at ? formatDate(alloc.received_at) : (alloc.dispatched_at ? 'Awaiting confirmation' : '—')}</Text>
+                                                            </View>
+
+                                                            {/* 4. Expected Return — ONLY visible after received */}
+                                                            {alloc.received_at && (() => {
+                                                                const expDateStr = alloc.expected_return_date || new Date(new Date(alloc.received_at).getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
+                                                                const expDate = new Date(expDateStr);
+                                                                const isOverdue = !alloc.returned_at && !isNaN(expDate.getTime()) && (new Date().getTime() > expDate.getTime());
+                                                                return (
+                                                                    <View style={s.timelineRow}>
+                                                                        <View style={[s.timelineDot, { backgroundColor: isOverdue ? '#DC2626' : '#D97706' }]} />
+                                                                        <Ionicons name={isOverdue ? "alert-circle-outline" : "calendar-outline"} size={13} color={isOverdue ? "#DC2626" : "#D97706"} />
+                                                                        <Text style={[s.timelineLabel, { color: isOverdue ? '#DC2626' : '#D97706', fontWeight: '700' }]}>
+                                                                            {isOverdue ? 'Expected Return (OVERDUE)' : 'Expected Return'}
+                                                                        </Text>
+                                                                        <Text style={[s.timelineVal, { color: isOverdue ? '#DC2626' : '#D97706', fontWeight: '700' }]}>
+                                                                            {formatDate(expDateStr)}
+                                                                        </Text>
+                                                                    </View>
+                                                                );
+                                                            })()}
+
+                                                            {/* 5. Returned — ONLY visible after received */}
+                                                            {alloc.received_at && (
+                                                                <View style={s.timelineRow}>
+                                                                    <View style={[s.timelineDot, alloc.returned_at ? { backgroundColor: '#7C3AED' } : s.timelineDotInactive]} />
+                                                                    <Ionicons name="arrow-undo-outline" size={13} color={alloc.returned_at ? '#7C3AED' : '#CBD5E1'} />
+                                                                    <Text style={[s.timelineLabel, !alloc.returned_at && { color: '#CBD5E1' }]}>Returned</Text>
+                                                                    <Text style={[s.timelineVal, !alloc.returned_at && { color: '#CBD5E1' }]}>{alloc.returned_at ? formatDate(alloc.returned_at) : '—'}</Text>
                                                                 </View>
-                                                            ))}
+                                                            )}
                                                         </View>
 
-                                                        {/* Action Button */}
+                                                        {/* ── ACTION BUTTONS ── */}
                                                         {alloc.returned_at ? (
                                                             <View style={s.allocDoneTag}>
                                                                 <Ionicons name="checkmark-circle" size={16} color="#059669" />
@@ -562,8 +1032,8 @@ export default function LguHistoryScreen() {
                                                                 onPress={() => handleUpdateAllocation(alloc.allocation_id, 'receive')}
                                                                 activeOpacity={0.8}
                                                             >
-                                                                <Ionicons name="checkmark-circle-outline" size={16} color="#FFF" />
-                                                                <Text style={s.actionBtnText}>Mark as Received</Text>
+                                                                <Ionicons name="checkmark-done-circle-outline" size={16} color="#FFF" />
+                                                                <Text style={s.actionBtnText}>Mark as Delivered & Received</Text>
                                                             </TouchableOpacity>
                                                         ) : (
                                                             <View style={s.allocPendingTag}>
@@ -773,6 +1243,271 @@ const s = StyleSheet.create({
         textAlign: 'center',
         lineHeight: 20,
     },
+    resetActionBtn: {
+        marginTop: 18,
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#2563EB',
+        paddingVertical: 10,
+        paddingHorizontal: 20,
+        borderRadius: 14,
+        shadowColor: '#2563EB',
+        shadowOpacity: 0.25,
+        shadowRadius: 6,
+        shadowOffset: { width: 0, height: 3 },
+        elevation: 3,
+    },
+    resetActionBtnText: {
+        color: '#FFFFFF',
+        fontWeight: '700',
+        fontSize: 13,
+    },
+
+    // Search Bar
+    searchBarWrapper: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#FFFFFF',
+        borderRadius: 14,
+        borderWidth: 1,
+        borderColor: '#E2E8F0',
+        paddingHorizontal: 12,
+        height: 44,
+        marginBottom: 10,
+        shadowColor: '#64748B',
+        shadowOpacity: 0.04,
+        shadowRadius: 6,
+        shadowOffset: { width: 0, height: 2 },
+        elevation: 1,
+    },
+    searchInput: {
+        flex: 1,
+        fontSize: 13,
+        color: '#0F172A',
+        fontWeight: '500',
+    },
+
+    // Type Filter Tabs (Scrollable)
+    typeScroll: {
+        height: 38,
+        maxHeight: 38,
+        marginBottom: 8,
+        flexGrow: 0,
+    },
+    typeScrollContent: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        paddingRight: 16,
+    },
+    typeTab: {
+        height: 32,
+        paddingHorizontal: 14,
+        borderRadius: 16,
+        backgroundColor: '#FFFFFF',
+        borderWidth: 1,
+        borderColor: '#E2E8F0',
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        alignSelf: 'center',
+    },
+    typeTabActive: {
+        backgroundColor: '#1E293B',
+        borderColor: '#1E293B',
+    },
+    typeTabActiveLogistics: {
+        backgroundColor: '#7C3AED',
+        borderColor: '#7C3AED',
+    },
+    typeTabActiveSituational: {
+        backgroundColor: '#2563EB',
+        borderColor: '#2563EB',
+    },
+    typeTabActiveEscalation: {
+        backgroundColor: '#DC2626',
+        borderColor: '#DC2626',
+    },
+    typeTabText: {
+        fontSize: 12,
+        fontWeight: '600',
+        color: '#64748B',
+    },
+    typeTabTextActive: {
+        color: '#FFFFFF',
+        fontWeight: '800',
+    },
+    typeTabTextActiveLogistics: {
+        color: '#FFFFFF',
+        fontWeight: '800',
+    },
+    typeTabTextActiveSituational: {
+        color: '#FFFFFF',
+        fontWeight: '800',
+    },
+    typeTabTextActiveEscalation: {
+        color: '#FFFFFF',
+        fontWeight: '800',
+    },
+
+    // Status Filter Chips (Scrollable)
+    statusScroll: {
+        height: 36,
+        maxHeight: 36,
+        marginBottom: 10,
+        flexGrow: 0,
+    },
+    statusScrollContent: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        paddingRight: 16,
+    },
+    statusChip: {
+        height: 30,
+        paddingHorizontal: 12,
+        borderRadius: 15,
+        backgroundColor: '#FFFFFF',
+        borderWidth: 1,
+        borderColor: '#E2E8F0',
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        alignSelf: 'center',
+    },
+    statusChipActive: {
+        backgroundColor: '#1E293B',
+        borderColor: '#1E293B',
+    },
+    statusChipActiveInTransit: {
+        backgroundColor: '#D97706',
+        borderColor: '#D97706',
+    },
+    statusChipActiveReceived: {
+        backgroundColor: '#2563EB',
+        borderColor: '#2563EB',
+    },
+    statusChipActiveOverdue: {
+        backgroundColor: '#DC2626',
+        borderColor: '#DC2626',
+    },
+    statusChipActiveReturned: {
+        backgroundColor: '#7C3AED',
+        borderColor: '#7C3AED',
+    },
+    statusChipActivePending: {
+        backgroundColor: '#EA580C',
+        borderColor: '#EA580C',
+    },
+    statusChipText: {
+        fontSize: 11,
+        fontWeight: '600',
+        color: '#64748B',
+    },
+    statusChipTextActive: {
+        color: '#FFFFFF',
+        fontWeight: '700',
+    },
+    statusChipTextActiveWhite: {
+        color: '#FFFFFF',
+        fontWeight: '700',
+    },
+
+    // Meta results row
+    resultsMetaRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        marginBottom: 12,
+        paddingHorizontal: 4,
+    },
+    resultsMetaText: {
+        fontSize: 12,
+        color: '#64748B',
+        fontWeight: '500',
+    },
+    clearFilterBtn: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#FEE2E2',
+        paddingHorizontal: 10,
+        paddingVertical: 4,
+        borderRadius: 12,
+    },
+    clearFilterBtnText: {
+        fontSize: 11,
+        color: '#DC2626',
+        fontWeight: '700',
+    },
+
+    // Pagination
+    paginationContainer: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 12,
+        marginTop: 14,
+        marginBottom: 8,
+    },
+    pageNavBtn: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#EFF6FF',
+        paddingHorizontal: 12,
+        paddingVertical: 8,
+        borderRadius: 10,
+        borderWidth: 1,
+        borderColor: '#BFDBFE',
+    },
+    pageNavBtnDisabled: {
+        backgroundColor: '#F8FAFC',
+        borderColor: '#E2E8F0',
+    },
+    pageNavBtnText: {
+        fontSize: 12,
+        fontWeight: '700',
+        color: '#2563EB',
+    },
+    pageNavBtnTextDisabled: {
+        color: '#CBD5E1',
+    },
+    pagePillsRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+    },
+    pageNumberPill: {
+        minWidth: 32,
+        height: 32,
+        borderRadius: 8,
+        backgroundColor: '#F1F5F9',
+        justifyContent: 'center',
+        alignItems: 'center',
+        paddingHorizontal: 6,
+    },
+    pageNumberPillActive: {
+        backgroundColor: '#2563EB',
+        shadowColor: '#2563EB',
+        shadowOpacity: 0.3,
+        shadowRadius: 4,
+        shadowOffset: { width: 0, height: 2 },
+        elevation: 2,
+    },
+    pageNumberText: {
+        fontSize: 12,
+        fontWeight: '700',
+        color: '#64748B',
+    },
+    pageNumberTextActive: {
+        color: '#FFFFFF',
+    },
+    paginationInfoText: {
+        textAlign: 'center',
+        fontSize: 11,
+        fontWeight: '600',
+        color: '#94A3B8',
+        marginBottom: 24,
+    },
 
     // Cards
     historyCard: {
@@ -980,6 +1715,17 @@ const s = StyleSheet.create({
         fontSize: 12,
         fontWeight: '600',
         color: '#0F172A',
+    },
+    timelineDot: {
+        width: 8,
+        height: 8,
+        borderRadius: 4,
+    },
+    timelineDotActive: {
+        backgroundColor: '#2563EB',
+    },
+    timelineDotInactive: {
+        backgroundColor: '#E2E8F0',
     },
     allocDoneTag: {
         flexDirection: 'row',

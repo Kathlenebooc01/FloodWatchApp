@@ -3,7 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import * as Linking from 'expo-linking';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import React, { useState, useEffect, useCallback } from 'react';
 import {
     ScrollView,
@@ -22,6 +22,16 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { getCurrentFullAddress } from '@/utils/location';
 import { supabase } from '@/utils/supabase';
+import {
+    parseDropOffAndNotes,
+    formatReadableDateTime as formatDateTimeHelper,
+    computeReturnStatus,
+    computeDeliveryStatus,
+    isMarkAsReceivedEnabled,
+    buildRequestReason,
+    ReturnStatusInfo,
+    DeliveryStatusType,
+} from '@/utils/logisticsHelpers';
 
 // ── TYPES ──
 
@@ -59,12 +69,22 @@ export interface LogisticsRequestData {
     fullId: string;
     title: string;
     status: string;
+    rawStatus: string;
     urgency: string;
     timeAgo: string;
     rawCreatedAt: string;
     desc: string;
     dropoff: string;
     items: Record<string, number>;
+    resourceTypes: string[];
+    deliveryStatus: DeliveryStatusType;
+    canReceive: boolean;
+    receivedAt?: string;
+    deliveredAt?: string;
+    expectedReturnDate?: string;
+    actualReturnDate?: string;
+    returnStatus: ReturnStatusInfo;
+    muniName?: string;
     docStatus: LogisticsDocStatus;
     docCreatedAt?: string;
     docUpdatedAt?: string;
@@ -190,36 +210,34 @@ const formatStatusUI = (status: string) => {
     const s = status.toLowerCase();
     if (s === 'closed') return 'Closed';
     if (s === 'received') return 'Received';
+    if (s === 'delivered') return 'Delivered';
+    if (s === 'returned') return 'Returned';
     if (s.includes('pending')) return 'Pending';
     if (s === 'ready_for_lgu') return 'Ready for LGU';
-    if (s === 'in_progress') return 'In Progress';
+    if (s === 'in_progress' || s === 'preparing') return 'In Progress';
     if (s === 'verified' || s === 'accepted' || s === 'confirmed') return 'Confirmed';
     if (s === 'resolved') return 'Resolved';
     if (s === 'rejected') return 'Rejected';
-    if (s === 'dispatched') return 'Dispatched';
+    if (s === 'dispatched' || s === 'in_transit' || s === 'in transit') return 'In Transit';
     return status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 };
 
-const isRequestReceived = (status: string): boolean => {
-    if (!status) return false;
-    const s = status.toLowerCase().trim();
-    if (s.includes('pending') || s === 'rejected' || s === 'cancelled') return false;
-    if (
-        s === 'received' ||
-        s === 'delivered' ||
-        s === 'returned' ||
-        s === 'completed' ||
-        s === 'ready_for_lgu' ||
-        s === 'in_progress' ||
-        s === 'confirmed' ||
-        s === 'verified' ||
-        s === 'resolved' ||
-        s === 'closed'
-    ) {
-        return true;
+const isRequestReceived = (
+    statusOrReq?: string | { status?: string | null; deliveryStatus?: string | null; receivedAt?: string | null } | null,
+    deliveryStatus?: string | null,
+    receivedAt?: string | null
+): boolean => {
+    if (!statusOrReq) return false;
+    if (typeof statusOrReq === 'object') {
+        if (statusOrReq.receivedAt) return true;
+        if (statusOrReq.deliveryStatus === 'Received') return true;
+        const s = (statusOrReq.status || '').toLowerCase().trim();
+        return s === 'received' || s === 'returned' || s === 'closed' || s === 'completed';
     }
-    // If not pending, rejected or cancelled, treat as received/processed
-    return true;
+    if (receivedAt) return true;
+    if (deliveryStatus === 'Received') return true;
+    const s = statusOrReq.toLowerCase().trim();
+    return s === 'received' || s === 'returned' || s === 'closed' || s === 'completed';
 };
 
 // Admin client helper to bypass RLS for closing
@@ -241,7 +259,18 @@ export default function LogisticsLguScreen() {
     const [requests, setRequests] = useState<LogisticsRequestData[]>([]);
     const [loadingRequests, setLoadingRequests] = useState(true);
     const [searchQuery, setSearchQuery] = useState('');
-    const [activeFilter, setActiveFilter] = useState<'all' | 'docs_pending' | 'docs_completed' | 'closed'>('all');
+    const [activeFilter, setActiveFilter] = useState<string>('all');
+
+    // ── ADVANCED FILTER STATE ──
+    const [filterModalVisible, setFilterModalVisible] = useState(false);
+    const [filterStatus, setFilterStatus] = useState<string>('ALL');
+    const [filterUrgency, setFilterUrgency] = useState<string>('ALL');
+    const [filterDelivery, setFilterDelivery] = useState<string>('ALL');
+    const [filterReturn, setFilterReturn] = useState<string>('ALL');
+    const [filterDoc, setFilterDoc] = useState<string>('ALL');
+    const [filterResourceType, setFilterResourceType] = useState<string>('ALL');
+    const [filterReturnDue, setFilterReturnDue] = useState<string>('ALL');
+    const [filterDateRequested, setFilterDateRequested] = useState<string>('ALL');
 
     // ── DETAIL MODAL ──
     const [selectedRequest, setSelectedRequest] = useState<LogisticsRequestData | null>(null);
@@ -274,10 +303,7 @@ export default function LogisticsLguScreen() {
         missingFields: [],
     });
 
-    // ── CLOSE REQUEST GUARD & CONFIRMATION MODALS ──
-    const [guardModalRequest, setGuardModalRequest] = useState<LogisticsRequestData | null>(null);
-    const [closeConfirmRequest, setCloseConfirmRequest] = useState<LogisticsRequestData | null>(null);
-    const [isClosing, setIsClosing] = useState(false);
+
 
     // ── SUCCESS MODAL ──
     const [successModalData, setSuccessModalData] = useState<{ title: string; message: string } | null>(null);
@@ -296,8 +322,8 @@ export default function LogisticsLguScreen() {
     const [errorModal, setErrorModal] = useState({ visible: false, title: '', message: '' });
 
     // ── FETCH LOGISTICS REQUESTS & HYDRATE DOCUMENTATION ──
-    const fetchRequests = useCallback(async () => {
-        setLoadingRequests(true);
+    const fetchRequests = useCallback(async (silent = false) => {
+        if (!silent) setLoadingRequests(true);
         try {
             const { data: { user } } = await supabase.auth.getUser();
             if (!user) {
@@ -307,7 +333,7 @@ export default function LogisticsLguScreen() {
 
             const { data, error } = await supabase
                 .from('resource_requests')
-                .select('*, resource_request_items(quantity_requested, utilities(name))')
+                .select('*, resource_request_items(quantity_requested, expected_return_date, utilities(name, type)), resource_allocations(*), municipality_or_city(name)')
                 .eq('requested_by', user.id)
                 .order('created_at', { ascending: false });
 
@@ -316,20 +342,88 @@ export default function LogisticsLguScreen() {
             const mapped: LogisticsRequestData[] = await Promise.all(
                 (data || []).map(async (req: any) => {
                     const itemsObj: Record<string, number> = {};
+                    const resourceTypesSet = new Set<string>();
+                    let itemExpectedReturn: string | undefined = undefined;
+
                     req.resource_request_items?.forEach((item: any) => {
                         if (item.utilities?.name) {
                             itemsObj[item.utilities.name] = item.quantity_requested;
+                        }
+                        if (item.utilities?.type) {
+                            resourceTypesSet.add(item.utilities.type);
+                        }
+                        if (item.expected_return_date && !itemExpectedReturn) {
+                            itemExpectedReturn = item.expected_return_date;
                         }
                     });
 
                     const shortId = req.request_id.substring(0, 8).toUpperCase();
 
-                    // Determine urgency from request_reason
-                    const reason = req.request_reason || '';
-                    let urgencyStr = 'MEDIUM';
-                    if (reason.toUpperCase().includes('HIGH')) urgencyStr = 'HIGH';
-                    else if (reason.toUpperCase().includes('LOW')) urgencyStr = 'LOW';
-                    else if (reason.toUpperCase().includes('CRITICAL')) urgencyStr = 'CRITICAL';
+                    // Parse drop-off and clean notes
+                    let cachedDropoff = await AsyncStorage.getItem(`@dropoff_location_${req.request_id}`);
+                    if (!cachedDropoff) {
+                        cachedDropoff = await AsyncStorage.getItem(`@dropoff_location_${shortId}`);
+                    }
+
+                    const parsed = parseDropOffAndNotes(
+                        req.request_reason,
+                        cachedDropoff || req.drop_off_address,
+                        req.municipality_or_city?.name
+                    );
+
+                    let urgencyStr = parsed.urgency || 'MEDIUM';
+                    if (!parsed.urgency) {
+                        const reason = (req.request_reason || '').toUpperCase();
+                        if (reason.includes('CRITICAL')) urgencyStr = 'CRITICAL';
+                        else if (reason.includes('HIGH')) urgencyStr = 'HIGH';
+                        else if (reason.includes('LOW')) urgencyStr = 'LOW';
+                    }
+
+                    // Allocations info
+                    const alloc = (req.resource_allocations && req.resource_allocations.length > 0) ? req.resource_allocations[0] : null;
+                    const returnedAt = alloc?.returned_at;
+                    const receivedAt = alloc?.received_at;
+                    const deliveredAt = alloc?.delivered_at;
+
+                    const deliveryStatus = computeDeliveryStatus(req.status, req.resource_allocations);
+                    const canReceive = isMarkAsReceivedEnabled(deliveryStatus, req.status);
+                    const isReceived = isRequestReceived(req.status, deliveryStatus, receivedAt);
+
+                    // Same as History: once received by LGU, calculate expected return date if not yet set (+7 days from received date)
+                    let effectiveExpectedReturn = alloc?.expected_return_date || itemExpectedReturn;
+                    if (isReceived && !effectiveExpectedReturn && receivedAt) {
+                        const fallbackDate = new Date(new Date(receivedAt).getTime() + 7 * 24 * 60 * 60 * 1000);
+                        effectiveExpectedReturn = fallbackDate.toISOString();
+                    }
+
+                    const returnStatus = computeReturnStatus(effectiveExpectedReturn, returnedAt, isReceived ? 'Received' : req.status);
+
+                    // Overdue notification trigger for LGU
+                    if (isReceived && returnStatus.isOverdue) {
+                        const notifKey = `@notified_overdue_${req.request_id}`;
+                        AsyncStorage.getItem(notifKey).then(async (already) => {
+                            if (!already) {
+                                const { data: { user } } = await supabase.auth.getUser();
+                                if (user) {
+                                    await supabase.from('notifications').insert({
+                                        user_id: user.id,
+                                        target_role: 'lgu',
+                                        type: 'Alerts',
+                                        title: 'Resource Return Overdue!',
+                                        message: `Logistics items for Request #${shortId} are overdue for return to PDRRMO. Please process return immediately.`,
+                                        is_read: false
+                                    });
+                                    await AsyncStorage.setItem(notifKey, 'true');
+                                }
+                            }
+                        }).catch(() => {});
+                    }
+
+                    const isTrulyReturned = !!returnedAt || (req.status || '').toLowerCase() === 'returned';
+                    let computedStatus = req.status || 'Pending';
+                    if (isTrulyReturned) computedStatus = 'Returned';
+                    else if (isReceived) computedStatus = 'Received';
+                    else if (deliveryStatus === 'In Transit' || deliveryStatus === 'Delivered') computedStatus = 'In Transit';
 
                     // Load persisted documentation from AsyncStorage
                     let docStatus: LogisticsDocStatus = 'Pending';
@@ -343,11 +437,11 @@ export default function LogisticsLguScreen() {
                             savedDoc = await AsyncStorage.getItem(`${DOC_STORAGE_PREFIX}${shortId}`);
                         }
                         if (savedDoc) {
-                            const parsed: LogisticsDocumentation = JSON.parse(savedDoc);
-                            docStatus = parsed.status || docStatus;
-                            docCreatedAt = parsed.createdAt;
-                            docUpdatedAt = parsed.updatedAt;
-                            documentation = parsed;
+                            const parsedDoc: LogisticsDocumentation = JSON.parse(savedDoc);
+                            docStatus = parsedDoc.status || docStatus;
+                            docCreatedAt = parsedDoc.createdAt;
+                            docUpdatedAt = parsedDoc.updatedAt;
+                            documentation = parsedDoc;
                         }
                     } catch (e) {
                         console.warn('Error reading logistics documentation storage:', e);
@@ -357,13 +451,23 @@ export default function LogisticsLguScreen() {
                         id: shortId,
                         fullId: req.request_id,
                         title: 'Logistics & Support Request',
-                        status: formatStatusUI(req.status),
+                        status: formatStatusUI(computedStatus),
+                        rawStatus: computedStatus,
                         urgency: urgencyStr,
                         timeAgo: getTimeAgo(req.created_at),
                         rawCreatedAt: req.created_at,
-                        desc: req.request_reason || 'Resource request submitted.',
-                        dropoff: req.drop_off_address || 'Coordinate',
+                        desc: parsed.cleanNotes,
+                        dropoff: parsed.dropoff,
                         items: itemsObj,
+                        resourceTypes: Array.from(resourceTypesSet),
+                        deliveryStatus,
+                        canReceive,
+                        receivedAt,
+                        deliveredAt,
+                        expectedReturnDate: effectiveExpectedReturn,
+                        actualReturnDate: returnedAt,
+                        returnStatus,
+                        muniName: req.municipality_or_city?.name,
                         docStatus,
                         docCreatedAt,
                         docUpdatedAt,
@@ -373,24 +477,59 @@ export default function LogisticsLguScreen() {
             );
 
             setRequests(mapped);
+
+            // Silently sync open modal details in REAL TIME if open
+            setSelectedRequest(prev => {
+                if (!prev) return null;
+                const updated = mapped.find(m => m.fullId === prev.fullId || m.id === prev.id);
+                return updated || prev;
+            });
         } catch (err) {
             console.error('Error fetching logistics requests:', err);
         } finally {
-            setLoadingRequests(false);
+            if (!silent) setLoadingRequests(false);
         }
     }, []);
+
+    // Refresh immediately when screen comes into focus
+    useFocusEffect(
+        useCallback(() => {
+            fetchRequests(true);
+        }, [fetchRequests])
+    );
 
     useEffect(() => {
         fetchRequests();
 
-        const channel = supabase.channel(`lgu-logistics-requests-${Date.now()}`)
+        // 1. Realtime subscriptions to all logistics tables
+        const reqChannel = supabase.channel(`lgu-logistics-req-${Date.now()}`)
             .on('postgres_changes' as any, { event: '*', schema: 'public', table: 'resource_requests' }, () => {
-                fetchRequests();
+                fetchRequests(true);
             })
             .subscribe();
 
+        const allocChannel = supabase.channel(`lgu-logistics-alloc-${Date.now()}`)
+            .on('postgres_changes' as any, { event: '*', schema: 'public', table: 'resource_allocations' }, () => {
+                fetchRequests(true);
+            })
+            .subscribe();
+
+        const itemsChannel = supabase.channel(`lgu-logistics-items-${Date.now()}`)
+            .on('postgres_changes' as any, { event: '*', schema: 'public', table: 'resource_request_items' }, () => {
+                fetchRequests(true);
+            })
+            .subscribe();
+
+        // 2. High-reliability polling heartbeat (every 3.5s) to guarantee real-time sync without manual refresh
+        const intervalId = setInterval(() => {
+            fetchRequests(true);
+        }, 3500);
+
         return () => {
-            supabase.removeChannel(channel);
+            supabase.removeChannel(reqChannel);
+            supabase.removeChannel(allocChannel);
+            supabase.removeChannel(itemsChannel);
+            clearInterval(intervalId);
         };
     }, [fetchRequests]);
 
@@ -484,19 +623,26 @@ export default function LogisticsLguScreen() {
                 geographyPoint = `POINT(${locationCoords.lng} ${locationCoords.lat})`;
             }
 
+            const cleanDropoff = dropoff.trim();
+            const payloadReason = buildRequestReason(cleanDropoff, additional, urgency);
+
             const { data: requestRow, error: requestError } = await supabase
                 .from('resource_requests')
                 .insert({
                     municipality_id: municipalityId,
                     requested_by: user.id,
                     status: 'Pending',
-                    request_reason: additional || `${urgency} Urgency Request`,
+                    request_reason: payloadReason,
                     drop_off_address: geographyPoint
                 })
                 .select('request_id')
                 .single();
 
             if (requestError) throw requestError;
+
+            // Cache the human-readable drop-off location
+            await AsyncStorage.setItem(`@dropoff_location_${requestRow.request_id}`, cleanDropoff);
+            await AsyncStorage.setItem(`@dropoff_location_${requestRow.request_id.substring(0, 8).toUpperCase()}`, cleanDropoff);
 
             const requestItems = selectedItemIds.map(uId => {
                 const expectedReturn = new Date();
@@ -691,62 +837,15 @@ export default function LogisticsLguScreen() {
         }
     };
 
-    // ── CLOSE LOGISTICS REQUEST TRIGGER ──
-    const handleAttemptClose = (request: LogisticsRequestData) => {
-        if (request.docStatus !== 'Completed') {
-            setGuardModalRequest(request);
-        } else {
-            setCloseConfirmRequest(request);
-        }
-    };
 
-    // ── EXECUTE CLOSE REQUEST ──
-    const handleConfirmClose = async () => {
-        if (!closeConfirmRequest) return;
-        setIsClosing(true);
-
-        try {
-            const target = closeConfirmRequest;
-            const now = new Date().toISOString();
-
-            const adminSupabase = getAdminClient();
-            const { error } = await adminSupabase.from('resource_requests')
-                .update({
-                    status: 'completed',
-                })
-                .eq('request_id', target.fullId);
-
-            if (error) throw error;
-
-            setRequests(prev => prev.map(req => {
-                if (req.fullId === target.fullId) {
-                    return { ...req, status: 'Closed' };
-                }
-                return req;
-            }));
-
-            if (selectedRequest && selectedRequest.fullId === target.fullId) {
-                setSelectedRequest(prev => prev ? { ...prev, status: 'Closed' } : null);
-            }
-
-            setCloseConfirmRequest(null);
-            setSuccessModalData({
-                title: "Request Closed ✓",
-                message: `Logistics Request #${target.id} has been successfully closed. All required support documentation has been archived with full timestamp history.`,
-            });
-        } catch (err: any) {
-            console.error('Error closing logistics request:', err);
-            Alert.alert('Error', err.message || 'Could not close logistics request.');
-        } finally {
-            setIsClosing(false);
-        }
-    };
 
     // ── CONFIRM UTILITIES RECEIVED BY LGU ──
     const handleMarkAsReceived = async (request: LogisticsRequestData) => {
         setIsMarkingReceived(true);
         try {
+            const nowIso = new Date().toISOString();
             const adminSupabase = getAdminClient();
+
             const { error } = await adminSupabase
                 .from('resource_requests')
                 .update({ status: 'Received' })
@@ -761,29 +860,121 @@ export default function LogisticsLguScreen() {
                 if (userError) throw userError;
             }
 
+            const exp = new Date();
+            exp.setDate(exp.getDate() + 7);
+            const effectiveExpReturn = request.expectedReturnDate || exp.toISOString();
+
+            // Also record received_at, delivered_at, and expected_return_date in resource_allocations (mag dungan sila)
+            try {
+                await adminSupabase
+                    .from('resource_allocations')
+                    .update({ 
+                        received_at: nowIso, 
+                        delivered_at: nowIso,
+                        expected_return_date: effectiveExpReturn,
+                        batch: 'Received' 
+                    })
+                    .eq('request_id', request.fullId);
+            } catch (aErr) {
+                console.warn('Could not update resource_allocations received_at/delivered_at', aErr);
+            }
+
+            const updatedReturnStatus = computeReturnStatus(effectiveExpReturn, request.actualReturnDate, 'Received');
+
             // Immediately update local requests list
             setRequests(prev => prev.map(r => {
                 if (r.fullId === request.fullId || r.id === request.id) {
-                    return { ...r, status: 'Received' };
+                    return {
+                        ...r,
+                        status: 'Received',
+                        rawStatus: 'Received',
+                        deliveryStatus: 'Received',
+                        canReceive: false,
+                        receivedAt: nowIso,
+                        deliveredAt: nowIso,
+                        expectedReturnDate: effectiveExpReturn,
+                        returnStatus: updatedReturnStatus,
+                    };
                 }
                 return r;
             }));
 
             // Immediately update selected request if open
             if (selectedRequest && (selectedRequest.fullId === request.fullId || selectedRequest.id === request.id)) {
-                setSelectedRequest(prev => prev ? { ...prev, status: 'Received' } : null);
+                setSelectedRequest(prev => prev ? {
+                    ...prev,
+                    status: 'Received',
+                    rawStatus: 'Received',
+                    deliveryStatus: 'Received',
+                    canReceive: false,
+                    receivedAt: nowIso,
+                    deliveredAt: nowIso,
+                    expectedReturnDate: effectiveExpReturn,
+                    returnStatus: updatedReturnStatus,
+                } : null);
             }
 
             setNotReceivedModal(null);
             setSuccessModalData({
-                title: "Utilities Received ✓",
-                message: `Utilities for Request #${request.id} have been confirmed as received by the LGU. Documentation is now unlocked and ready to be created!`,
+                title: "Resource Received ✓",
+                message: `Logistics items for Request #${request.id} have been marked as Received at the Drop-off Point (${request.dropoff}) on ${formatDateTimeHelper(nowIso)}. Documentation is now unlocked!`,
             });
         } catch (err: any) {
             console.error('Error marking as received:', err);
             Alert.alert('Update Failed', err.message || 'Could not update receipt status.');
         } finally {
             setIsMarkingReceived(false);
+        }
+    };
+
+    // ── RETURN RESOURCE TO PDRRMO ──
+    const handleMarkAsReturned = async (request: LogisticsRequestData) => {
+        try {
+            const nowIso = new Date().toISOString();
+            const adminSupabase = getAdminClient();
+
+            await adminSupabase
+                .from('resource_requests')
+                .update({ status: 'Returned' })
+                .eq('request_id', request.fullId);
+
+            await adminSupabase
+                .from('resource_allocations')
+                .update({ returned_at: nowIso, batch: 'Returned' })
+                .eq('request_id', request.fullId);
+
+            const updatedReturnStatus = computeReturnStatus(request.expectedReturnDate, nowIso, 'Returned');
+
+            setRequests(prev => prev.map(r => {
+                if (r.fullId === request.fullId || r.id === request.id) {
+                    return {
+                        ...r,
+                        status: 'Returned',
+                        rawStatus: 'Returned',
+                        actualReturnDate: nowIso,
+                        returnStatus: updatedReturnStatus,
+                    };
+                }
+                return r;
+            }));
+
+            if (selectedRequest && (selectedRequest.fullId === request.fullId || selectedRequest.id === request.id)) {
+                setSelectedRequest(prev => prev ? {
+                    ...prev,
+                    status: 'Returned',
+                    rawStatus: 'Returned',
+                    actualReturnDate: nowIso,
+                    returnStatus: updatedReturnStatus,
+                } : null);
+            }
+
+            setSuccessModalData({
+                title: "Resource Returned ✓",
+                message: `Resource for Request #${request.id} has been marked as returned to PDRRMO on ${formatReadableDate(nowIso)}. Actual Return Date recorded.`,
+            });
+        } catch (err: any) {
+            console.error('Error returning resource:', err);
+            Alert.alert('Update Failed', err.message || 'Could not mark resource as returned.');
         }
     };
 
@@ -948,25 +1139,90 @@ export default function LogisticsLguScreen() {
     };
 
     // ── FILTER COMPUTATION ──
-    const docsPendingCount = requests.filter(r => r.docStatus !== 'Completed' && r.status?.toLowerCase() !== 'closed').length;
+    const inTransitCount = requests.filter(r => (r.deliveryStatus === 'In Transit' || r.deliveryStatus === 'Delivered' || r.status?.toLowerCase() === 'in transit') && !isRequestReceived(r)).length;
+    const readyToReceiveCount = requests.filter(r => r.canReceive).length;
+    const overdueCount = requests.filter(r => r.returnStatus?.isOverdue).length;
+    const receivedCount = requests.filter(r => isRequestReceived(r) && !r.actualReturnDate && r.status?.toLowerCase() !== 'returned' && r.returnStatus?.status !== 'Returned').length;
+    const docsPendingCount = requests.filter(r => (r.docStatus === 'Pending' || r.docStatus === 'Draft') && r.status?.toLowerCase() !== 'closed').length;
     const docsCompletedCount = requests.filter(r => r.docStatus === 'Completed' && r.status?.toLowerCase() !== 'closed').length;
     const closedCount = requests.filter(r => r.status?.toLowerCase() === 'closed').length;
+    const returnedCount = requests.filter(r => r.status?.toLowerCase() === 'returned' || !!r.actualReturnDate || r.returnStatus?.status === 'Returned' || r.status?.toLowerCase() === 'closed').length;
+
+    const activeAdvancedFilterCount = [
+        filterStatus !== 'ALL',
+        filterUrgency !== 'ALL',
+        filterDelivery !== 'ALL',
+        filterReturn !== 'ALL',
+        filterDoc !== 'ALL',
+        filterResourceType !== 'ALL',
+        filterReturnDue !== 'ALL',
+        filterDateRequested !== 'ALL',
+    ].filter(Boolean).length;
+
+    const resetAllFilters = () => {
+        setActiveFilter('all');
+        setFilterStatus('ALL');
+        setFilterUrgency('ALL');
+        setFilterDelivery('ALL');
+        setFilterReturn('ALL');
+        setFilterDoc('ALL');
+        setFilterResourceType('ALL');
+        setFilterReturnDue('ALL');
+        setFilterDateRequested('ALL');
+        setSearchQuery('');
+    };
 
     const filteredRequests = requests.filter(req => {
-        const query = searchQuery.toLowerCase();
+        const query = searchQuery.toLowerCase().trim();
         const matchTitle = req.title.toLowerCase().includes(query);
         const matchDesc = req.desc.toLowerCase().includes(query);
         const matchId = req.id.toLowerCase().includes(query);
         const matchDocStatus = req.docStatus.toLowerCase().includes(query);
+        const matchDropoff = req.dropoff?.toLowerCase().includes(query);
 
-        if (query && !matchTitle && !matchDesc && !matchId && !matchDocStatus) {
+        if (query && !matchTitle && !matchDesc && !matchId && !matchDocStatus && !matchDropoff) {
             return false;
         }
 
-        if (activeFilter === 'all') return true;
-        if (activeFilter === 'docs_pending') return req.docStatus === 'Pending' || req.docStatus === 'Draft';
-        if (activeFilter === 'docs_completed') return req.docStatus === 'Completed';
-        if (activeFilter === 'closed') return req.status?.toLowerCase() === 'closed';
+        // Quick active tab / chip filter
+        if (activeFilter === 'in_transit') {
+            const isTransit = (req.deliveryStatus === 'In Transit' || req.deliveryStatus === 'Delivered' || req.status?.toLowerCase() === 'in transit') && !isRequestReceived(req);
+            if (!isTransit) return false;
+        } else if (activeFilter === 'ready_to_receive') {
+            if (!req.canReceive) return false;
+        } else if (activeFilter === 'overdue') {
+            if (!req.returnStatus?.isOverdue) return false;
+        } else if (activeFilter === 'received') {
+            if (!isRequestReceived(req) || req.actualReturnDate || req.status?.toLowerCase() === 'returned' || req.returnStatus?.status === 'Returned') return false;
+        } else if (activeFilter === 'docs_pending') {
+            if ((req.docStatus !== 'Pending' && req.docStatus !== 'Draft') || req.status?.toLowerCase() === 'closed') return false;
+        } else if (activeFilter === 'docs_completed') {
+            if (req.docStatus !== 'Completed' || req.status?.toLowerCase() === 'closed') return false;
+        } else if (activeFilter === 'returned' || activeFilter === 'closed') {
+            const isRet = req.status?.toLowerCase() === 'returned' || !!req.actualReturnDate || req.returnStatus?.status === 'Returned' || req.status?.toLowerCase() === 'closed';
+            if (!isRet) return false;
+        }
+
+        // Advanced filters
+        if (filterStatus !== 'ALL' && req.rawStatus?.toLowerCase() !== filterStatus.toLowerCase()) return false;
+        if (filterUrgency !== 'ALL' && req.urgency?.toUpperCase() !== filterUrgency.toUpperCase()) return false;
+        if (filterDelivery !== 'ALL' && req.deliveryStatus !== filterDelivery) return false;
+        if (filterReturn !== 'ALL' && req.returnStatus?.status !== filterReturn) return false;
+        if (filterDoc !== 'ALL' && req.docStatus !== filterDoc) return false;
+        if (filterResourceType !== 'ALL') {
+            const hasType = req.resourceTypes?.some(t => t.toLowerCase() === filterResourceType.toLowerCase());
+            if (!hasType) return false;
+        }
+        if (filterReturnDue === 'Overdue' && !req.returnStatus?.isOverdue) return false;
+        if (filterReturnDue === 'Upcoming' && (req.returnStatus?.isOverdue || req.returnStatus?.status !== 'Pending Return')) return false;
+        if (filterDateRequested !== 'ALL') {
+            const now = new Date();
+            const created = new Date(req.rawCreatedAt);
+            const diffDays = Math.floor((now.getTime() - created.getTime()) / (1000 * 60 * 60 * 24));
+            if (filterDateRequested === 'Today' && diffDays !== 0) return false;
+            if (filterDateRequested === 'Last7Days' && diffDays > 7) return false;
+            if (filterDateRequested === 'Last30Days' && diffDays > 30) return false;
+        }
 
         return true;
     });
@@ -1037,12 +1293,30 @@ export default function LogisticsLguScreen() {
                                 </TouchableOpacity>
                             )}
                         </View>
+                        <TouchableOpacity
+                            style={[s.filterIconBtn, activeAdvancedFilterCount > 0 && s.filterIconBtnActive]}
+                            onPress={() => setFilterModalVisible(true)}
+                            activeOpacity={0.8}
+                        >
+                            <Ionicons name="options-outline" size={20} color={activeAdvancedFilterCount > 0 ? '#FFFFFF' : '#2563EB'} />
+                            {activeAdvancedFilterCount > 0 && (
+                                <View style={s.filterBadgeDot}>
+                                    <Text style={s.filterBadgeDotText}>{activeAdvancedFilterCount}</Text>
+                                </View>
+                            )}
+                        </TouchableOpacity>
                     </View>
 
                     {/* ── STATS CARDS ── */}
                     <View style={s.statsGrid}>
                         <TouchableOpacity
-                            style={[s.statCardHalf, { borderColor: activeFilter === 'docs_pending' ? '#F59E0B' : 'transparent' }]}
+                            style={[
+                                s.statCardHalf,
+                                {
+                                    borderColor: activeFilter === 'docs_pending' ? '#D97706' : 'transparent',
+                                    backgroundColor: activeFilter === 'docs_pending' ? '#FEF3C7' : '#FFFFFF',
+                                }
+                            ]}
                             activeOpacity={0.9}
                             onPress={() => setActiveFilter(prev => prev === 'docs_pending' ? 'all' : 'docs_pending')}
                         >
@@ -1051,11 +1325,17 @@ export default function LogisticsLguScreen() {
                                 <Ionicons name="hourglass-outline" size={16} color="#D97706" />
                             </View>
                             <Text style={[s.statValue, { color: '#D97706' }]}>{docsPendingCount}</Text>
-                            <Text style={s.statSub}>Closing Locked</Text>
+                            <Text style={s.statSub}>{activeFilter === 'docs_pending' ? 'Filter Active' : 'Closing Locked'}</Text>
                         </TouchableOpacity>
 
                         <TouchableOpacity
-                            style={[s.statCardHalf, { borderColor: activeFilter === 'docs_completed' ? '#059669' : 'transparent' }]}
+                            style={[
+                                s.statCardHalf,
+                                {
+                                    borderColor: activeFilter === 'docs_completed' ? '#059669' : 'transparent',
+                                    backgroundColor: activeFilter === 'docs_completed' ? '#ECFDF5' : '#FFFFFF',
+                                }
+                            ]}
                             activeOpacity={0.9}
                             onPress={() => setActiveFilter(prev => prev === 'docs_completed' ? 'all' : 'docs_completed')}
                         >
@@ -1064,33 +1344,45 @@ export default function LogisticsLguScreen() {
                                 <Ionicons name="document-text-outline" size={16} color="#059669" />
                             </View>
                             <Text style={[s.statValue, { color: '#059669' }]}>{docsCompletedCount}</Text>
-                            <Text style={s.statSub}>Ready to Close</Text>
+                            <Text style={s.statSub}>{activeFilter === 'docs_completed' ? 'Filter Active' : 'Ready to Close'}</Text>
                         </TouchableOpacity>
 
                         <TouchableOpacity
-                            style={[s.statCardHalf, { borderColor: activeFilter === 'all' ? '#2563EB' : 'transparent' }]}
+                            style={[
+                                s.statCardHalf,
+                                {
+                                    borderColor: activeFilter === 'ready_to_receive' ? '#2563EB' : 'transparent',
+                                    backgroundColor: activeFilter === 'ready_to_receive' ? '#EFF6FF' : '#FFFFFF',
+                                }
+                            ]}
                             activeOpacity={0.9}
-                            onPress={() => setActiveFilter('all')}
+                            onPress={() => setActiveFilter(prev => prev === 'ready_to_receive' ? 'all' : 'ready_to_receive')}
                         >
                             <View style={s.statHeader}>
-                                <Text style={s.statLabel}>ALL REQUESTS</Text>
-                                <Ionicons name="cube-outline" size={16} color="#7C3AED" />
+                                <Text style={[s.statLabel, { color: '#2563EB' }]}>READY TO RECEIVE</Text>
+                                <Ionicons name="checkmark-done-circle-outline" size={16} color="#2563EB" />
                             </View>
-                            <Text style={s.statValue}>{requests.length}</Text>
-                            <Text style={s.statSub}>Total Submitted</Text>
+                            <Text style={[s.statValue, { color: '#2563EB' }]}>{readyToReceiveCount}</Text>
+                            <Text style={s.statSub}>{activeFilter === 'ready_to_receive' ? 'Filter Active' : 'Awaiting Confirmation'}</Text>
                         </TouchableOpacity>
 
                         <TouchableOpacity
-                            style={[s.statCardHalf, { borderColor: activeFilter === 'closed' ? '#64748B' : 'transparent' }]}
+                            style={[
+                                s.statCardHalf,
+                                {
+                                    borderColor: activeFilter === 'overdue' ? '#DC2626' : 'transparent',
+                                    backgroundColor: activeFilter === 'overdue' ? '#FEF2F2' : '#FFFFFF',
+                                }
+                            ]}
                             activeOpacity={0.9}
-                            onPress={() => setActiveFilter(prev => prev === 'closed' ? 'all' : 'closed')}
+                            onPress={() => setActiveFilter(prev => prev === 'overdue' ? 'all' : 'overdue')}
                         >
                             <View style={s.statHeader}>
-                                <Text style={s.statLabel}>CLOSED</Text>
-                                <Ionicons name="lock-closed-outline" size={16} color="#64748B" />
+                                <Text style={[s.statLabel, { color: '#DC2626' }]}>OVERDUE RETURNS</Text>
+                                <Ionicons name="alert-circle-outline" size={16} color="#DC2626" />
                             </View>
-                            <Text style={s.statValue}>{closedCount}</Text>
-                            <Text style={s.statSub}>Archived Records</Text>
+                            <Text style={[s.statValue, { color: '#DC2626' }]}>{overdueCount}</Text>
+                            <Text style={s.statSub}>{activeFilter === 'overdue' ? 'Filter Active' : 'Return Past Due'}</Text>
                         </TouchableOpacity>
                     </View>
 
@@ -1101,20 +1393,55 @@ export default function LogisticsLguScreen() {
                         style={s.filterScrollView}
                         contentContainerStyle={s.filterRowScroll}
                     >
-                        {(['all', 'docs_pending', 'docs_completed', 'closed'] as const).map(f => (
-                            <TouchableOpacity
-                                key={f}
-                                style={[s.filterChip, activeFilter === f && s.filterChipActive]}
-                                onPress={() => setActiveFilter(f)}
-                            >
-                                <Text style={[s.filterChipText, activeFilter === f && s.filterChipTextActive]}>
-                                    {f === 'all' ? 'All Requests' :
-                                     f === 'docs_pending' ? 'Docs Pending/Draft' :
-                                     f === 'docs_completed' ? 'Docs Completed' : 'Closed'}
-                                </Text>
-                            </TouchableOpacity>
-                        ))}
+                        {[
+                            { id: 'all', label: 'All Requests', icon: 'layers-outline' as const, count: requests.length, color: '#1E293B' },
+                            { id: 'in_transit', label: 'In Transit', icon: 'airplane-outline' as const, count: inTransitCount, color: '#D97706' },
+                            { id: 'ready_to_receive', label: 'Ready to Receive', icon: 'checkmark-circle-outline' as const, count: readyToReceiveCount, color: '#2563EB' },
+                            { id: 'overdue', label: 'Overdue Returns', icon: 'alert-circle-outline' as const, count: overdueCount, color: '#DC2626' },
+                            { id: 'received', label: 'Received / Active', icon: 'cube-outline' as const, count: receivedCount, color: '#059669' },
+                            { id: 'docs_pending', label: 'Docs Pending', icon: 'hourglass-outline' as const, count: docsPendingCount, color: '#D97706' },
+                            { id: 'docs_completed', label: 'Docs Completed', icon: 'document-text-outline' as const, count: docsCompletedCount, color: '#059669' },
+                            { id: 'returned', label: 'Returned', icon: 'archive-outline' as const, count: returnedCount, color: '#64748B' },
+                        ].map(chip => {
+                            const isActive = activeFilter === chip.id;
+                            return (
+                                <TouchableOpacity
+                                    key={chip.id}
+                                    style={[
+                                        s.filterChip,
+                                        isActive && {
+                                            backgroundColor: chip.id === 'all' ? '#1E293B' : chip.color,
+                                            borderColor: chip.id === 'all' ? '#1E293B' : chip.color,
+                                        }
+                                    ]}
+                                    onPress={() => setActiveFilter(prev => prev === chip.id && chip.id !== 'all' ? 'all' : chip.id)}
+                                    activeOpacity={0.8}
+                                >
+                                    <Ionicons
+                                        name={chip.icon}
+                                        size={13}
+                                        color={isActive ? '#FFFFFF' : chip.color}
+                                        style={{ marginRight: 5 }}
+                                    />
+                                    <Text style={[s.filterChipText, isActive && { color: '#FFFFFF', fontWeight: '800' }]}>
+                                        {chip.label} ({chip.count})
+                                    </Text>
+                                </TouchableOpacity>
+                            );
+                        })}
                     </ScrollView>
+
+                    {/* ── FILTER STATUS & RESULTS BANNER (NO CLEAR BUTTON) ── */}
+                    <View style={s.logisticsResultsRow}>
+                        <Text style={s.logisticsResultsText}>
+                            Showing <Text style={{ fontWeight: '800', color: '#0F172A' }}>{filteredRequests.length}</Text> of {requests.length} requests
+                            {activeFilter !== 'all' && (
+                                <Text style={{ color: '#2563EB', fontWeight: '700' }}>
+                                    {' '}• {activeFilter.replace(/_/g, ' ').toUpperCase()} (tap chip to deselect)
+                                </Text>
+                            )}
+                        </Text>
+                    </View>
 
                     {/* ── REQUEST CARDS ── */}
                     {loadingRequests ? (
@@ -1123,14 +1450,19 @@ export default function LogisticsLguScreen() {
                             <Text style={{ marginTop: 10, color: '#64748B', fontWeight: '600' }}>Loading requests & documentation...</Text>
                         </View>
                     ) : filteredRequests.length === 0 ? (
-                        <View style={{ marginTop: 40, alignItems: 'center' }}>
-                            <Ionicons name="cube-outline" size={48} color="#CBD5E1" />
-                            <Text style={{ marginTop: 10, color: '#94A3B8', fontWeight: '600' }}>No matching requests found.</Text>
+                        <View style={s.emptyFilterView}>
+                            <Ionicons name="filter-outline" size={44} color="#94A3B8" />
+                            <Text style={s.emptyFilterTitle}>No Matching Requests</Text>
+                            <Text style={s.emptyFilterDesc}>
+                                No logistics requests match your active filter or search query.
+                            </Text>
                             <TouchableOpacity
-                                style={{ marginTop: 16, paddingVertical: 10, paddingHorizontal: 20, backgroundColor: '#EFF6FF', borderRadius: 12 }}
-                                onPress={() => setViewMode('create')}
+                                style={s.emptyFilterResetBtn}
+                                onPress={resetAllFilters}
+                                activeOpacity={0.8}
                             >
-                                <Text style={{ color: '#2563EB', fontWeight: '700', fontSize: 14 }}>+ Create New Request</Text>
+                                <Ionicons name="refresh" size={15} color="#FFFFFF" style={{ marginRight: 6 }} />
+                                <Text style={s.emptyFilterResetBtnText}>Clear All Filters</Text>
                             </TouchableOpacity>
                         </View>
                     ) : (
@@ -1230,16 +1562,79 @@ export default function LogisticsLguScreen() {
                                     {/* Description */}
                                     <Text style={s.cardDesc} numberOfLines={2}>{item.desc}</Text>
 
-                                    {/* Notice if utilities are not yet received */}
-                                    {!isReceived && !isClosed && (
-                                        <View style={s.awaitingDeliveryNotice}>
-                                            <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center' }}>
-                                                <Ionicons name="time-outline" size={15} color="#D97706" style={{ marginRight: 6 }} />
-                                                <Text style={s.awaitingDeliveryNoticeText}>
-                                                    Awaiting utility delivery from PDRRMO
+                                    {/* ── DELIVERY STATUS ROW ── */}
+                                    <View style={s.cardDeliveryRow}>
+                                        <View style={[s.deliveryStatusPill, {
+                                            backgroundColor:
+                                                item.deliveryStatus === 'Received' ? '#ECFDF5' :
+                                                item.deliveryStatus === 'Delivered' ? '#EFF6FF' :
+                                                item.deliveryStatus === 'In Transit' ? '#FFF7ED' : '#F8FAFC',
+                                            borderColor:
+                                                item.deliveryStatus === 'Received' ? '#A7F3D0' :
+                                                item.deliveryStatus === 'Delivered' ? '#BFDBFE' :
+                                                item.deliveryStatus === 'In Transit' ? '#FED7AA' : '#E2E8F0',
+                                        }]}>
+                                            <Ionicons
+                                                name={
+                                                    item.deliveryStatus === 'Received' ? 'checkmark-done-circle' :
+                                                    item.deliveryStatus === 'Delivered' ? 'location' :
+                                                    item.deliveryStatus === 'In Transit' ? 'car-outline' : 'hourglass-outline'
+                                                }
+                                                size={12}
+                                                color={
+                                                    item.deliveryStatus === 'Received' ? '#059669' :
+                                                    item.deliveryStatus === 'Delivered' ? '#2563EB' :
+                                                    item.deliveryStatus === 'In Transit' ? '#EA580C' : '#64748B'
+                                                }
+                                                style={{ marginRight: 4 }}
+                                            />
+                                            <Text style={[s.deliveryStatusPillText, {
+                                                color:
+                                                    item.deliveryStatus === 'Received' ? '#059669' :
+                                                    item.deliveryStatus === 'Delivered' ? '#2563EB' :
+                                                    item.deliveryStatus === 'In Transit' ? '#EA580C' : '#64748B'
+                                            }]}>
+                                                {item.deliveryStatus}
+                                            </Text>
+                                        </View>
+                                        {/* Expected Return Status Pill — only shown once received */}
+                                        {isReceived && item.returnStatus.status !== 'No Return Required' && (
+                                            <View style={[s.deliveryStatusPill, {
+                                                backgroundColor: item.returnStatus.bgColor,
+                                                borderColor: item.returnStatus.borderColor,
+                                            }]}>
+                                                <Ionicons
+                                                    name={item.returnStatus.isOverdue ? 'alert-circle' : 'return-down-back-outline'}
+                                                    size={12}
+                                                    color={item.returnStatus.textColor}
+                                                    style={{ marginRight: 4 }}
+                                                />
+                                                <Text style={[s.deliveryStatusPillText, { color: item.returnStatus.textColor }]}>
+                                                    {item.returnStatus.label}
                                                 </Text>
                                             </View>
-                                        </View>
+                                        )}
+                                    </View>
+
+                                    {/* Mark as Delivered & Received button — only shown when canReceive */}
+                                    {item.canReceive && (
+                                        <TouchableOpacity
+                                            style={s.markReceivedBtn}
+                                            activeOpacity={0.85}
+                                            onPress={() => {
+                                                Alert.alert(
+                                                    'Confirm Delivery & Receipt',
+                                                    `Mark this delivery for Request #${item.id} as delivered and received at ${item.dropoff}?`,
+                                                    [
+                                                        { text: 'Cancel', style: 'cancel' },
+                                                        { text: 'Mark as Delivered & Received', style: 'default', onPress: () => handleMarkAsReceived(item) },
+                                                    ]
+                                                );
+                                            }}
+                                        >
+                                            <Ionicons name="checkmark-done-circle-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+                                            <Text style={s.markReceivedBtnText}>Mark as Delivered & Received</Text>
+                                        </TouchableOpacity>
                                     )}
 
                                     {/* ── DUAL ACTION BAR ── */}
@@ -1275,35 +1670,7 @@ export default function LogisticsLguScreen() {
                                             </Text>
                                         </TouchableOpacity>
 
-                                        {/* Button 2: Close Request (Guarded) */}
-                                        {isClosed ? (
-                                            <View style={[s.actionHalfBtn, s.closedBtn]}>
-                                                <Ionicons name="checkmark-done" size={16} color="#059669" style={{ marginRight: 6 }} />
-                                                <Text style={s.closedBtnText}>Request Closed</Text>
-                                            </View>
-                                        ) : (
-                                            <TouchableOpacity
-                                                style={[
-                                                    s.actionHalfBtn,
-                                                    item.docStatus === 'Completed' ? s.closeBtnReady : s.closeBtnLocked
-                                                ]}
-                                                activeOpacity={0.8}
-                                                onPress={() => handleAttemptClose(item)}
-                                            >
-                                                <Ionicons
-                                                    name={item.docStatus === 'Completed' ? "lock-closed-outline" : "alert-circle-outline"}
-                                                    size={16}
-                                                    color={item.docStatus === 'Completed' ? "#FFFFFF" : "#64748B"}
-                                                    style={{ marginRight: 6 }}
-                                                />
-                                                <Text style={[
-                                                    s.closeBtnText,
-                                                    item.docStatus === 'Completed' ? s.closeBtnTextReady : s.closeBtnTextLocked
-                                                ]}>
-                                                    Close Request
-                                                </Text>
-                                            </TouchableOpacity>
-                                        )}
+
                                     </View>
                                 </TouchableOpacity>
                             );
@@ -1563,7 +1930,7 @@ export default function LogisticsLguScreen() {
                                                     </View>
                                                 )}
                                             </View>
-                                        ) : !isRequestReceived(selectedRequest.status) && selectedRequest.docStatus !== 'Completed' ? (
+                                        ) : !isRequestReceived(selectedRequest) && selectedRequest.docStatus !== 'Completed' ? (
                                             <View style={s.docNotReceivedWarning}>
                                                 <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
                                                     <Ionicons name="time-outline" size={18} color="#D97706" style={{ marginRight: 6 }} />
@@ -1586,10 +1953,10 @@ export default function LogisticsLguScreen() {
                                         <TouchableOpacity
                                             style={[
                                                 s.docManageBtn,
-                                                !isRequestReceived(selectedRequest.status) && selectedRequest.docStatus !== 'Completed' && s.docManageBtnDisabled
+                                                !isRequestReceived(selectedRequest) && selectedRequest.docStatus !== 'Completed' && s.docManageBtnDisabled
                                             ]}
                                             onPress={() => {
-                                                if (!isRequestReceived(selectedRequest.status) && selectedRequest.docStatus !== 'Completed') {
+                                                if (!isRequestReceived(selectedRequest) && selectedRequest.docStatus !== 'Completed') {
                                                     setNotReceivedModal(selectedRequest);
                                                 } else {
                                                     setSelectedRequest(null);
@@ -1599,18 +1966,18 @@ export default function LogisticsLguScreen() {
                                         >
                                             <Ionicons
                                                 name={
-                                                    !isRequestReceived(selectedRequest.status) && selectedRequest.docStatus !== 'Completed' ? "lock-closed" :
+                                                    !isRequestReceived(selectedRequest) && selectedRequest.docStatus !== 'Completed' ? "lock-closed" :
                                                     selectedRequest.docStatus === 'Completed' ? "document-text-outline" : "create-outline"
                                                 }
                                                 size={16}
-                                                color={!isRequestReceived(selectedRequest.status) && selectedRequest.docStatus !== 'Completed' ? "#94A3B8" : "#7C3AED"}
+                                                color={!isRequestReceived(selectedRequest) && selectedRequest.docStatus !== 'Completed' ? "#94A3B8" : "#7C3AED"}
                                                 style={{ marginRight: 6 }}
                                             />
                                             <Text style={[
                                                 s.docManageBtnText,
-                                                { color: !isRequestReceived(selectedRequest.status) && selectedRequest.docStatus !== 'Completed' ? '#94A3B8' : '#7C3AED' }
+                                                { color: !isRequestReceived(selectedRequest) && selectedRequest.docStatus !== 'Completed' ? '#94A3B8' : '#7C3AED' }
                                             ]}>
-                                                {!isRequestReceived(selectedRequest.status) && selectedRequest.docStatus !== 'Completed'
+                                                {!isRequestReceived(selectedRequest) && selectedRequest.docStatus !== 'Completed'
                                                     ? 'Create Docs (Locked - Awaiting Utilities)'
                                                     : selectedRequest.docStatus === 'Completed'
                                                     ? 'View Completed Documentation'
@@ -1632,6 +1999,143 @@ export default function LogisticsLguScreen() {
                                                 ))}
                                             </View>
                                         </View>
+                                    )}
+
+                                    {/* Drop-off Point Info Box */}
+                                    <View style={[s.infoBox, { marginTop: 16, alignItems: 'flex-start' }]}>
+                                        <View style={[s.infoBoxIcon, { backgroundColor: '#EFF6FF' }]}>
+                                            <Ionicons name="location" size={22} color="#2563EB" />
+                                        </View>
+                                        <View style={{ flex: 1 }}>
+                                            <Text style={s.infoBoxLabel}>DROP-OFF POINT</Text>
+                                            <Text style={[s.infoBoxValue, { lineHeight: 22, marginTop: 4 }]}>
+                                                {selectedRequest.dropoff}
+                                            </Text>
+                                        </View>
+                                    </View>
+
+                                    {/* Delivery & Return Status Box */}
+                                    <View style={[s.infoBox, { marginTop: 16, alignItems: 'flex-start', flexDirection: 'column', gap: 12 }]}>
+                                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                            <View style={[s.infoBoxIcon, { backgroundColor: '#F0FDF4', marginRight: 12 }]}>
+                                                <Ionicons name="car-sport-outline" size={22} color="#059669" />
+                                            </View>
+                                            <View style={{ flex: 1 }}>
+                                                <Text style={s.infoBoxLabel}>DELIVERY STATUS</Text>
+                                                <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
+                                                    <View style={[s.deliveryStatusPill, {
+                                                        backgroundColor:
+                                                            selectedRequest.deliveryStatus === 'Received' ? '#ECFDF5' :
+                                                            selectedRequest.deliveryStatus === 'Delivered' ? '#EFF6FF' :
+                                                            selectedRequest.deliveryStatus === 'In Transit' ? '#FFF7ED' : '#F8FAFC',
+                                                        borderColor:
+                                                            selectedRequest.deliveryStatus === 'Received' ? '#A7F3D0' :
+                                                            selectedRequest.deliveryStatus === 'Delivered' ? '#BFDBFE' :
+                                                            selectedRequest.deliveryStatus === 'In Transit' ? '#FED7AA' : '#E2E8F0',
+                                                    }]}>
+                                                        <Ionicons
+                                                            name={
+                                                                selectedRequest.deliveryStatus === 'Received' ? 'checkmark-done-circle' :
+                                                                selectedRequest.deliveryStatus === 'Delivered' ? 'location' :
+                                                                selectedRequest.deliveryStatus === 'In Transit' ? 'car-outline' : 'hourglass-outline'
+                                                            }
+                                                            size={13}
+                                                            color={
+                                                                selectedRequest.deliveryStatus === 'Received' ? '#059669' :
+                                                                selectedRequest.deliveryStatus === 'Delivered' ? '#2563EB' :
+                                                                selectedRequest.deliveryStatus === 'In Transit' ? '#EA580C' : '#64748B'
+                                                            }
+                                                            style={{ marginRight: 5 }}
+                                                        />
+                                                        <Text style={[s.deliveryStatusPillText, {
+                                                            color:
+                                                                selectedRequest.deliveryStatus === 'Received' ? '#059669' :
+                                                                selectedRequest.deliveryStatus === 'Delivered' ? '#2563EB' :
+                                                                selectedRequest.deliveryStatus === 'In Transit' ? '#EA580C' : '#64748B'
+                                                        }]}>{selectedRequest.deliveryStatus}</Text>
+                                                    </View>
+                                                </View>
+                                                {selectedRequest.receivedAt && (
+                                                    <Text style={{ fontSize: 11, color: '#059669', marginTop: 4, fontWeight: '600' }}>
+                                                        Received on {formatDateTimeHelper(selectedRequest.receivedAt)}
+                                                    </Text>
+                                                )}
+                                                {selectedRequest.deliveredAt && !selectedRequest.receivedAt && (
+                                                    <Text style={{ fontSize: 11, color: '#2563EB', marginTop: 4, fontWeight: '600' }}>
+                                                        Delivered on {formatDateTimeHelper(selectedRequest.deliveredAt)}
+                                                    </Text>
+                                                )}
+                                            </View>
+                                        </View>
+
+                                        {/* Return Status Row — only shown once received */}
+                                        {isRequestReceived(selectedRequest) && (
+                                            <View style={{ flexDirection: 'row', alignItems: 'flex-start', paddingTop: 12, borderTopWidth: 1, borderTopColor: '#F1F5F9', width: '100%' }}>
+                                                <View style={[s.infoBoxIcon, { backgroundColor: selectedRequest.returnStatus.isOverdue ? '#FEF2F2' : '#FFF7ED', marginRight: 12 }]}>
+                                                    <Ionicons name={selectedRequest.returnStatus.isOverdue ? "alert-circle" : "return-down-back-outline"} size={22} color={selectedRequest.returnStatus.isOverdue ? "#DC2626" : "#EA580C"} />
+                                                </View>
+                                                <View style={{ flex: 1 }}>
+                                                    <Text style={s.infoBoxLabel}>RETURN STATUS</Text>
+                                                    <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
+                                                        <View style={[s.deliveryStatusPill, {
+                                                            backgroundColor: selectedRequest.returnStatus.bgColor,
+                                                            borderColor: selectedRequest.returnStatus.borderColor,
+                                                        }]}>
+                                                            <Ionicons
+                                                                name={selectedRequest.returnStatus.isOverdue ? 'alert-circle' : 'return-down-back-outline'}
+                                                                size={13}
+                                                                color={selectedRequest.returnStatus.textColor}
+                                                                style={{ marginRight: 5 }}
+                                                            />
+                                                            <Text style={[s.deliveryStatusPillText, { color: selectedRequest.returnStatus.textColor }]}>
+                                                                {selectedRequest.returnStatus.label}
+                                                            </Text>
+                                                        </View>
+                                                    </View>
+                                                    <Text style={{ fontSize: 11, color: '#64748B', marginTop: 6, fontWeight: '500' }}>
+                                                        Expected Return: <Text style={{ fontWeight: '700', color: selectedRequest.returnStatus.isOverdue ? '#DC2626' : '#0F172A' }}>
+                                                            {selectedRequest.returnStatus.expectedDateFormatted && selectedRequest.returnStatus.expectedDateFormatted !== 'No Return Required'
+                                                                ? selectedRequest.returnStatus.expectedDateFormatted
+                                                                : formatReadableDate(selectedRequest.expectedReturnDate || new Date(new Date(selectedRequest.receivedAt || new Date()).getTime() + 7 * 24 * 60 * 60 * 1000).toISOString())}
+                                                        </Text>
+                                                    </Text>
+                                                    {selectedRequest.returnStatus.actualDateFormatted && (
+                                                        <Text style={{ fontSize: 11, color: '#059669', marginTop: 2, fontWeight: '600' }}>
+                                                            Actual Return: {selectedRequest.returnStatus.actualDateFormatted}
+                                                        </Text>
+                                                    )}
+                                                </View>
+                                            </View>
+                                        )}
+                                    </View>
+
+                                    {/* Mark as Delivered & Received — Detail Modal Action */}
+                                    {selectedRequest.canReceive && (
+                                        <TouchableOpacity
+                                            style={[s.markReceivedBtn, { marginTop: 16 }]}
+                                            activeOpacity={0.85}
+                                            onPress={() => {
+                                                Alert.alert(
+                                                    'Confirm Delivery & Receipt',
+                                                    `Mark this delivery for Request #${selectedRequest.id} as delivered and received at ${selectedRequest.dropoff}?`,
+                                                    [
+                                                        { text: 'Cancel', style: 'cancel' },
+                                                        {
+                                                            text: 'Mark as Delivered & Received',
+                                                            style: 'default',
+                                                            onPress: () => {
+                                                                const req = selectedRequest;
+                                                                setSelectedRequest(null);
+                                                                handleMarkAsReceived(req);
+                                                            }
+                                                        },
+                                                    ]
+                                                );
+                                            }}
+                                        >
+                                            <Ionicons name="checkmark-done-circle-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+                                            <Text style={s.markReceivedBtnText}>Mark as Delivered & Received</Text>
+                                        </TouchableOpacity>
                                     )}
 
                                     {/* Description Info Box */}
@@ -1667,37 +2171,7 @@ export default function LogisticsLguScreen() {
                                 </TouchableOpacity>
                             </View>
 
-                            {/* Floating Bottom Action Bar */}
-                            <View style={s.premiumActionBar}>
-                                {selectedRequest.status?.toLowerCase() === 'closed' ? (
-                                    <View style={[s.premiumActionBtn, { backgroundColor: '#F1F5F9' }]}>
-                                        <Ionicons name="checkmark-done-circle" size={20} color="#059669" style={{ marginRight: 10 }} />
-                                        <Text style={[s.premiumActionBtnText, { color: '#059669' }]}>Request Closed & Archived</Text>
-                                    </View>
-                                ) : (
-                                    <TouchableOpacity
-                                        style={[
-                                            s.premiumActionBtn,
-                                            selectedRequest.docStatus === 'Completed' ? s.premiumActionBtnPrimary : { backgroundColor: '#475569' }
-                                        ]}
-                                        activeOpacity={0.9}
-                                        onPress={() => {
-                                            setSelectedRequest(null);
-                                            handleAttemptClose(selectedRequest);
-                                        }}
-                                    >
-                                        <Ionicons
-                                            name={selectedRequest.docStatus === 'Completed' ? "checkmark-circle-outline" : "lock-closed-outline"}
-                                            size={20}
-                                            color="#FFFFFF"
-                                            style={{ marginRight: 10 }}
-                                        />
-                                        <Text style={s.premiumActionBtnTextPrimary}>
-                                            {selectedRequest.docStatus === 'Completed' ? "Close Logistics Request" : "Close Request (Docs Required)"}
-                                        </Text>
-                                    </TouchableOpacity>
-                                )}
-                            </View>
+
                         </View>
                     </View>
                 )}
@@ -2153,79 +2627,7 @@ export default function LogisticsLguScreen() {
                 </View>
             </Modal>
 
-            {/* ── MODAL: CLOSING GUARD WARNING ── */}
-            <Modal
-                visible={!!guardModalRequest}
-                transparent
-                animationType="fade"
-                onRequestClose={() => setGuardModalRequest(null)}
-            >
-                <View style={s.modalOverlay}>
-                    <View style={s.requiredFieldsCard}>
-                        {/* Glowing Icon Header */}
-                        <View style={[s.reqIconOuterRing, { borderColor: '#FEE2E2', backgroundColor: '#FEF2F2' }]}>
-                            <View style={[s.reqIconInnerCircle, { backgroundColor: '#FEE2E2' }]}>
-                                <Ionicons name="lock-closed" size={36} color="#DC2626" />
-                            </View>
-                        </View>
 
-                        {/* Pill Tag */}
-                        <View style={[s.reqPillTag, { backgroundColor: '#FEF2F2', borderColor: '#FECACA' }]}>
-                            <Ionicons name="shield-half-outline" size={12} color="#DC2626" style={{ marginRight: 5 }} />
-                            <Text style={[s.reqPillTagText, { color: '#DC2626' }]}>PROTOCOL COMPLIANCE GUARD</Text>
-                        </View>
-
-                        <Text style={s.reqModalTitle}>Documentation Required</Text>
-                        <Text style={s.reqModalSubtitle}>
-                            Logistics Request <Text style={{ fontWeight: '800', color: '#0F172A' }}>#{guardModalRequest?.id}</Text> cannot be closed while required documentation is still <Text style={{ color: '#DC2626', fontWeight: '800' }}>{guardModalRequest?.docStatus.toUpperCase()}</Text>.
-                        </Text>
-
-                        {/* Information Card */}
-                        <View style={s.missingFieldsList}>
-                            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8, paddingBottom: 8, borderBottomWidth: 1, borderBottomColor: '#E2E8F0' }}>
-                                <Text style={{ fontSize: 11, fontWeight: '700', color: '#475569' }}>Documentation Status:</Text>
-                                <View style={[
-                                    s.docStatusPill,
-                                    guardModalRequest?.docStatus === 'Draft' ? s.docPillDraft : s.docPillPending
-                                ]}>
-                                    <Text style={[
-                                        s.docStatusPillText,
-                                        guardModalRequest?.docStatus === 'Draft' ? s.docTextDraft : s.docTextPending
-                                    ]}>
-                                        {(guardModalRequest?.docStatus || 'Pending').toUpperCase()}
-                                    </Text>
-                                </View>
-                            </View>
-                            <Text style={{ fontSize: 11, color: '#64748B', lineHeight: 16 }}>
-                                Mandatory protocol requires official recording of support type, actions taken by personnel, recipient area, and outcome before closing.
-                            </Text>
-                        </View>
-
-                        {/* Action Buttons */}
-                        <View style={{ width: '100%', gap: 10, marginTop: 4 }}>
-                            <TouchableOpacity
-                                style={s.reqActionBtn}
-                                activeOpacity={0.88}
-                                onPress={() => {
-                                    const target = guardModalRequest;
-                                    setGuardModalRequest(null);
-                                    if (target) openDocumentationModal(target);
-                                }}
-                            >
-                                <Ionicons name="create-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-                                <Text style={s.reqActionBtnText}>Complete Documentation Now</Text>
-                            </TouchableOpacity>
-
-                            <TouchableOpacity
-                                style={s.guardCancelBtn}
-                                onPress={() => setGuardModalRequest(null)}
-                            >
-                                <Text style={s.guardCancelBtnText}>Dismiss & Keep Open</Text>
-                            </TouchableOpacity>
-                        </View>
-                    </View>
-                </View>
-            </Modal>
 
             {/* ── MODAL: UTILITIES NOT RECEIVED WARNING ── */}
             <Modal
@@ -2279,53 +2681,7 @@ export default function LogisticsLguScreen() {
                 </View>
             </Modal>
 
-            {/* ── MODAL: CLOSE CONFIRMATION ── */}
-            <Modal
-                visible={!!closeConfirmRequest}
-                transparent
-                animationType="fade"
-                onRequestClose={() => !isClosing && setCloseConfirmRequest(null)}
-            >
-                <View style={s.modalOverlay}>
-                    <View style={s.guardModalCard}>
-                        <View style={[s.guardIconCircle, { backgroundColor: '#ECFDF5' }]}>
-                            <Ionicons name="checkmark-done-circle" size={44} color="#059669" />
-                        </View>
-                        <Text style={s.guardTitle}>Close Logistics Request</Text>
-                        <Text style={s.guardMessage}>
-                            Required documentation is <Text style={{ color: '#059669', fontWeight: '800' }}>COMPLETED</Text> for Request <Text style={{ fontWeight: '800' }}>#{closeConfirmRequest?.id}</Text>.
-                        </Text>
-                        <Text style={s.guardSubMessage}>
-                            Are you sure you want to officially close and archive this logistics request? This marks the operation as successfully finalized.
-                        </Text>
 
-                        <View style={{ width: '100%', gap: 10, marginTop: 10 }}>
-                            <TouchableOpacity
-                                style={[s.guardProceedBtn, { backgroundColor: '#059669' }]}
-                                onPress={handleConfirmClose}
-                                disabled={isClosing}
-                            >
-                                {isClosing ? (
-                                    <ActivityIndicator size="small" color="#FFFFFF" />
-                                ) : (
-                                    <>
-                                        <Ionicons name="lock-closed" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-                                        <Text style={s.guardProceedBtnText}>Confirm & Close Request</Text>
-                                    </>
-                                )}
-                            </TouchableOpacity>
-
-                            <TouchableOpacity
-                                style={s.guardCancelBtn}
-                                onPress={() => setCloseConfirmRequest(null)}
-                                disabled={isClosing}
-                            >
-                                <Text style={s.guardCancelBtnText}>Cancel</Text>
-                            </TouchableOpacity>
-                        </View>
-                    </View>
-                </View>
-            </Modal>
 
             {/* ── ITEMS MODAL (for Create mode) ── */}
             <Modal visible={showItemsModal} transparent animationType="slide">
@@ -2377,6 +2733,167 @@ export default function LogisticsLguScreen() {
                         >
                             <Text style={s.itemsModalDoneBtnText}>Done Selection</Text>
                         </TouchableOpacity>
+                    </View>
+                </View>
+            </Modal>
+
+            {/* ── ADVANCED FILTER MODAL (REFINED & INTUITIVE) ── */}
+            <Modal
+                visible={filterModalVisible}
+                transparent
+                animationType="slide"
+                onRequestClose={() => setFilterModalVisible(false)}
+            >
+                <View style={s.modalOverlayDark}>
+                    <View style={[s.docModalSheet, { maxHeight: '88%' }]}>
+                        {/* Header */}
+                        <View style={[s.docModalHeader, { borderBottomWidth: 1, borderBottomColor: '#F1F5F9', paddingBottom: 14 }]}>
+                            <View style={{ flex: 1 }}>
+                                <Text style={s.docModalSubtitle}>FILTER & REFINE</Text>
+                                <Text style={s.docModalTitle}>Filter Requests</Text>
+                            </View>
+                            <TouchableOpacity style={s.docCloseBtn} onPress={() => setFilterModalVisible(false)}>
+                                <Ionicons name="close" size={20} color="#475569" />
+                            </TouchableOpacity>
+                        </View>
+
+                        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 30 }}>
+                            {/* Filter Summary Banner if any active */}
+                            {(activeFilter !== 'all' || filterUrgency !== 'ALL' || filterDateRequested !== 'ALL' || searchQuery.trim() !== '') && (
+                                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: 14 }}>
+                                    <Text style={{ fontSize: 12, color: '#2563EB', fontWeight: '700' }}>
+                                        Filters active • {filteredRequests.length} matching
+                                    </Text>
+                                    <TouchableOpacity onPress={resetAllFilters}>
+                                        <Text style={{ fontSize: 12, color: '#EF4444', fontWeight: '700' }}>Clear All</Text>
+                                    </TouchableOpacity>
+                                </View>
+                            )}
+
+                            {/* Group 1: Workflow & Delivery Status */}
+                            <View style={s.filterGroupContainer}>
+                                <Text style={s.filterGroupLabel}>WORKFLOW & DELIVERY STATUS</Text>
+                                <View style={s.filterGroupRow}>
+                                    {[
+                                        { id: 'all', label: 'All Requests', icon: 'layers-outline' as const, count: requests.length, color: '#1E293B' },
+                                        { id: 'in_transit', label: 'In Transit', icon: 'airplane-outline' as const, count: inTransitCount, color: '#D97706' },
+                                        { id: 'ready_to_receive', label: 'Ready to Receive', icon: 'checkmark-circle-outline' as const, count: readyToReceiveCount, color: '#2563EB' },
+                                        { id: 'overdue', label: 'Overdue Returns', icon: 'alert-circle-outline' as const, count: overdueCount, color: '#DC2626' },
+                                        { id: 'received', label: 'Received / Active', icon: 'cube-outline' as const, count: receivedCount, color: '#059669' },
+                                        { id: 'docs_pending', label: 'Docs Pending', icon: 'hourglass-outline' as const, count: docsPendingCount, color: '#D97706' },
+                                        { id: 'docs_completed', label: 'Docs Completed', icon: 'document-text-outline' as const, count: docsCompletedCount, color: '#059669' },
+                                        { id: 'returned', label: 'Returned / Closed', icon: 'archive-outline' as const, count: returnedCount, color: '#64748B' },
+                                    ].map(item => {
+                                        const isActive = activeFilter === item.id;
+                                        return (
+                                            <TouchableOpacity
+                                                key={item.id}
+                                                style={[
+                                                    s.filterGroupChip,
+                                                    isActive && {
+                                                        backgroundColor: item.id === 'all' ? '#1E293B' : item.color,
+                                                        borderColor: item.id === 'all' ? '#1E293B' : item.color,
+                                                    }
+                                                ]}
+                                                onPress={() => setActiveFilter(item.id)}
+                                                activeOpacity={0.8}
+                                            >
+                                                <Ionicons
+                                                    name={item.icon}
+                                                    size={13}
+                                                    color={isActive ? '#FFFFFF' : item.color}
+                                                    style={{ marginRight: 5 }}
+                                                />
+                                                <Text style={[s.filterGroupChipText, isActive && { color: '#FFFFFF', fontWeight: '800' }]}>
+                                                    {item.label} ({item.count})
+                                                </Text>
+                                            </TouchableOpacity>
+                                        );
+                                    })}
+                                </View>
+                            </View>
+
+                            {/* Group 2: Urgency Level */}
+                            <View style={s.filterGroupContainer}>
+                                <Text style={s.filterGroupLabel}>URGENCY LEVEL</Text>
+                                <View style={s.filterGroupRow}>
+                                    {[
+                                        { id: 'ALL', label: 'All Urgency', color: '#64748B' },
+                                        { id: 'CRITICAL', label: 'Critical', color: '#DC2626' },
+                                        { id: 'HIGH', label: 'High', color: '#EA580C' },
+                                        { id: 'MEDIUM', label: 'Medium', color: '#D97706' },
+                                        { id: 'LOW', label: 'Low', color: '#16A34A' },
+                                    ].map(opt => {
+                                        const isActive = filterUrgency === opt.id;
+                                        return (
+                                            <TouchableOpacity
+                                                key={opt.id}
+                                                style={[
+                                                    s.filterGroupChip,
+                                                    { borderColor: isActive ? opt.color : '#E2E8F0' },
+                                                    isActive && { backgroundColor: opt.color, borderColor: opt.color }
+                                                ]}
+                                                onPress={() => setFilterUrgency(opt.id)}
+                                                activeOpacity={0.8}
+                                            >
+                                                <Text style={[s.filterGroupChipText, isActive && { color: '#FFFFFF', fontWeight: '800' }]}>
+                                                    {opt.label}
+                                                </Text>
+                                            </TouchableOpacity>
+                                        );
+                                    })}
+                                </View>
+                            </View>
+
+                            {/* Group 3: Date Requested */}
+                            <View style={s.filterGroupContainer}>
+                                <Text style={s.filterGroupLabel}>DATE REQUESTED</Text>
+                                <View style={s.filterGroupRow}>
+                                    {[
+                                        { id: 'ALL', label: 'All Time' },
+                                        { id: 'Today', label: 'Today' },
+                                        { id: 'Last7Days', label: 'Last 7 Days' },
+                                        { id: 'Last30Days', label: 'Last 30 Days' },
+                                    ].map(opt => {
+                                        const isActive = filterDateRequested === opt.id;
+                                        return (
+                                            <TouchableOpacity
+                                                key={opt.id}
+                                                style={[s.filterGroupChip, isActive && s.filterGroupChipActive]}
+                                                onPress={() => setFilterDateRequested(opt.id)}
+                                                activeOpacity={0.8}
+                                            >
+                                                <Text style={[s.filterGroupChipText, isActive && s.filterGroupChipTextActive]}>
+                                                    {opt.label}
+                                                </Text>
+                                            </TouchableOpacity>
+                                        );
+                                    })}
+                                </View>
+                            </View>
+                        </ScrollView>
+
+                        {/* Apply / Reset bottom bar */}
+                        <View style={[s.docModalFooter, { paddingHorizontal: 20, paddingVertical: 14, gap: 10, borderTopWidth: 1, borderTopColor: '#F1F5F9' }]}>
+                            {(activeFilter !== 'all' || filterUrgency !== 'ALL' || filterDateRequested !== 'ALL' || searchQuery.trim() !== '') && (
+                                <TouchableOpacity
+                                    style={[s.docDraftBtn, { flex: 1 }]}
+                                    onPress={() => { resetAllFilters(); setFilterModalVisible(false); }}
+                                    activeOpacity={0.8}
+                                >
+                                    <Ionicons name="refresh-outline" size={16} color="#DC2626" style={{ marginRight: 6 }} />
+                                    <Text style={[s.docDraftBtnText, { color: '#DC2626' }]}>Reset All</Text>
+                                </TouchableOpacity>
+                            )}
+                            <TouchableOpacity
+                                style={[s.docSubmitBtn, { flex: 2 }]}
+                                onPress={() => setFilterModalVisible(false)}
+                                activeOpacity={0.8}
+                            >
+                                <Ionicons name="checkmark-circle-outline" size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
+                                <Text style={s.docSubmitBtnText}>Apply Filters ({filteredRequests.length})</Text>
+                            </TouchableOpacity>
+                        </View>
                     </View>
                 </View>
             </Modal>
@@ -2785,6 +3302,78 @@ const s = StyleSheet.create({
     },
     filterChipTextActive: {
         color: '#FFFFFF',
+    },
+
+    // Results Row Banner
+    logisticsResultsRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        marginBottom: 14,
+        paddingHorizontal: 4,
+    },
+    logisticsResultsText: {
+        fontSize: 12,
+        color: '#64748B',
+        fontWeight: '500',
+    },
+    clearLogisticsFilterBtn: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#FEE2E2',
+        paddingHorizontal: 10,
+        paddingVertical: 5,
+        borderRadius: 12,
+    },
+    clearLogisticsFilterBtnText: {
+        fontSize: 11,
+        color: '#DC2626',
+        fontWeight: '700',
+    },
+
+    // Empty Filter State
+    emptyFilterView: {
+        marginTop: 40,
+        alignItems: 'center',
+        paddingHorizontal: 24,
+        paddingVertical: 32,
+        backgroundColor: '#FFFFFF',
+        borderRadius: 20,
+        borderWidth: 1,
+        borderColor: '#E2E8F0',
+    },
+    emptyFilterTitle: {
+        marginTop: 12,
+        color: '#0F172A',
+        fontWeight: '800',
+        fontSize: 16,
+    },
+    emptyFilterDesc: {
+        marginTop: 6,
+        color: '#94A3B8',
+        fontWeight: '500',
+        fontSize: 13,
+        textAlign: 'center',
+        lineHeight: 18,
+    },
+    emptyFilterResetBtn: {
+        marginTop: 16,
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingVertical: 10,
+        paddingHorizontal: 20,
+        backgroundColor: '#2563EB',
+        borderRadius: 14,
+        shadowColor: '#2563EB',
+        shadowOpacity: 0.25,
+        shadowRadius: 6,
+        shadowOffset: { width: 0, height: 3 },
+        elevation: 3,
+    },
+    emptyFilterResetBtnText: {
+        color: '#FFFFFF',
+        fontWeight: '700',
+        fontSize: 13,
     },
 
     // Request Cards (List View)
@@ -3591,6 +4180,40 @@ const s = StyleSheet.create({
     },
 
     // Doc Action Buttons
+    docModalFooter: {
+        flexDirection: 'row',
+        borderTopWidth: 1,
+        borderTopColor: '#E2E8F0',
+        backgroundColor: '#FFFFFF',
+    },
+    docDraftBtn: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: 48,
+        borderRadius: 12,
+        backgroundColor: '#F1F5F9',
+        borderWidth: 1,
+        borderColor: '#E2E8F0',
+    },
+    docDraftBtnText: {
+        fontSize: 13,
+        fontWeight: '700',
+        color: '#2563EB',
+    },
+    docSubmitBtn: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: 48,
+        borderRadius: 12,
+        backgroundColor: '#2563EB',
+    },
+    docSubmitBtnText: {
+        fontSize: 13,
+        fontWeight: '700',
+        color: '#FFFFFF',
+    },
     docActionRowBottom: {
         flexDirection: 'row',
         gap: 10,
@@ -4514,5 +5137,129 @@ const s = StyleSheet.create({
     docManageBtnDisabled: {
         backgroundColor: '#F1F5F9',
         borderColor: '#E2E8F0',
+    },
+
+    // Filter icon button (search row)
+    filterIconBtn: {
+        width: 44,
+        height: 44,
+        borderRadius: 12,
+        backgroundColor: '#EFF6FF',
+        borderWidth: 1,
+        borderColor: '#BFDBFE',
+        justifyContent: 'center',
+        alignItems: 'center',
+        marginLeft: 8,
+    },
+    filterIconBtnActive: {
+        backgroundColor: '#2563EB',
+        borderColor: '#2563EB',
+    },
+    filterBadgeDot: {
+        position: 'absolute',
+        top: -4,
+        right: -4,
+        width: 16,
+        height: 16,
+        borderRadius: 8,
+        backgroundColor: '#EF4444',
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    filterBadgeDotText: {
+        fontSize: 9,
+        color: '#FFFFFF',
+        fontWeight: '800',
+    },
+
+    // Delivery status pills (on cards)
+    cardDeliveryRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        gap: 6,
+        marginVertical: 8,
+    },
+    deliveryStatusPill: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: 8,
+        paddingVertical: 4,
+        borderRadius: 8,
+        borderWidth: 1,
+        borderColor: '#E2E8F0',
+        backgroundColor: '#F8FAFC',
+    },
+    deliveryStatusPillText: {
+        fontSize: 11,
+        fontWeight: '700',
+        color: '#64748B',
+    },
+
+    // Mark as Received button
+    markReceivedBtn: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: '#059669',
+        borderRadius: 10,
+        paddingVertical: 11,
+        paddingHorizontal: 16,
+        marginBottom: 10,
+        shadowColor: '#059669',
+        shadowOpacity: 0.25,
+        shadowRadius: 8,
+        shadowOffset: { width: 0, height: 3 },
+        elevation: 3,
+    },
+    markReceivedBtnText: {
+        fontSize: 14,
+        fontWeight: '800',
+        color: '#FFFFFF',
+        letterSpacing: 0.2,
+    },
+
+    // Advanced Filter Modal group styles
+    filterGroupContainer: {
+        paddingHorizontal: 20,
+        paddingTop: 18,
+        paddingBottom: 4,
+        borderBottomWidth: 1,
+        borderBottomColor: '#F1F5F9',
+    },
+    filterGroupLabel: {
+        fontSize: 10,
+        fontWeight: '800',
+        color: '#94A3B8',
+        letterSpacing: 1,
+        marginBottom: 10,
+    },
+    filterGroupRow: {
+        flexDirection: 'row',
+        flexWrap: 'wrap',
+        gap: 8,
+        paddingBottom: 12,
+    },
+    filterGroupChip: {
+        height: 32,
+        paddingHorizontal: 14,
+        borderRadius: 16,
+        backgroundColor: '#F8FAFC',
+        borderWidth: 1.5,
+        borderColor: '#E2E8F0',
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    filterGroupChipActive: {
+        backgroundColor: '#2563EB',
+        borderColor: '#2563EB',
+    },
+    filterGroupChipText: {
+        fontSize: 12,
+        fontWeight: '700',
+        color: '#64748B',
+    },
+    filterGroupChipTextActive: {
+        color: '#FFFFFF',
     },
 });
