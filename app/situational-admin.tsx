@@ -46,6 +46,9 @@ export interface EmergencyRequestParent {
     overallStatus: OverallStatus;
     submittedBy: string;
     submitterRole: string;
+    submitterId?: string;
+    isEscalation?: boolean;
+    hazardType?: string;
     createdAt: string;
     updatedAt: string;
     description: string;
@@ -326,6 +329,8 @@ export default function SituationalAdminScreen() {
                         overallStatus,
                         submittedBy: submitter?.full_name || 'LGU Disaster Coordinator',
                         submitterRole: submitter?.role ? submitter.role.toUpperCase() : 'LGU OFFICER',
+                        submitterId: rr.requested_by,
+                        isEscalation: false,
                         createdAt,
                         updatedAt,
                         description: `Emergency resource allocation and operational reinforcement requested by local authorities in ${muniName}. Critical infrastructure and community sectors require provincial assistance.`,
@@ -433,6 +438,9 @@ export default function SituationalAdminScreen() {
                         overallStatus,
                         submittedBy: submitter?.full_name || 'LGU Responder',
                         submitterRole: submitter?.role ? submitter.role.toUpperCase() : 'LGU OFFICER',
+                        submitterId: ir.user_id,
+                        isEscalation: isEscalation,
+                        hazardType: rawHazard,
                         createdAt,
                         updatedAt,
                         description: cleanDesc || 'Official situational update filed by local government unit.',
@@ -579,6 +587,57 @@ export default function SituationalAdminScreen() {
                 })
                 .eq('report_id', targetRequest.id);
 
+            // Determine if this is an escalation report
+            let isEsc = !!targetRequest.isEscalation ||
+                (targetRequest.title || '').toLowerCase().includes('escalat') ||
+                (targetRequest.description || '').toLowerCase().includes('escalat');
+            let targetUserId = targetRequest.submitterId;
+
+            if (!targetUserId || !isEsc) {
+                const { data: incCheck } = await adminSupabase
+                    .from('incident_report')
+                    .select('user_id, hazard_type, description')
+                    .eq('report_id', targetRequest.id)
+                    .maybeSingle();
+                if (incCheck) {
+                    if (!targetUserId) targetUserId = incCheck.user_id;
+                    if ((incCheck.hazard_type || '').toLowerCase().includes('escalat') ||
+                        (incCheck.description || '').toLowerCase().includes('escalat')) {
+                        isEsc = true;
+                    }
+                }
+            }
+
+            // Insert notification for LGU side
+            if (newStatus === 'Accepted') {
+                const notifTitle = isEsc
+                    ? '🚨 Escalation Report Accepted'
+                    : 'Request Accepted ✅';
+                const notifMsg = isEsc
+                    ? `PDRRMO has accepted your Support Escalation report (${targetRequest.requestNumber || 'Regional Support'}). Provincial reinforcement and emergency response teams are deployed to ${targetRequest.municipality || 'your sector'}. [REF:${targetRequest.id}]`
+                    : `PDRRMO has accepted your emergency request (${targetRequest.requestNumber}). Coordination and response protocols have been activated. [REF:${targetRequest.id}]`;
+
+                await adminSupabase.from('notifications').insert({
+                    user_id: targetUserId || null,
+                    target_role: 'lgu',
+                    type: isEsc ? 'Emergency' : 'Updates',
+                    title: notifTitle,
+                    message: notifMsg,
+                    is_read: false,
+                    created_at: new Date().toISOString(),
+                });
+            } else if (newStatus === 'Rejected') {
+                await adminSupabase.from('notifications').insert({
+                    user_id: targetUserId || null,
+                    target_role: 'lgu',
+                    type: 'Emergency',
+                    title: isEsc ? 'Escalation Report Declined' : 'Request Declined',
+                    message: `PDRRMO reviewed your request (${targetRequest.requestNumber}) and was unable to accept it at this time.`,
+                    is_read: false,
+                    created_at: new Date().toISOString(),
+                });
+            }
+
             // Update local state optimistically
             setRequests(prev => prev.map(r => {
                 if (r.id === targetRequest.id) {
@@ -596,8 +655,10 @@ export default function SituationalAdminScreen() {
             }
 
             setFeedbackModal({
-                title: `Request ${newStatus}`,
-                message: `LGU Emergency Request ${targetRequest.requestNumber} status has been updated to "${newStatus}". All responders and LGU coordinators have been alerted.`,
+                title: isEsc && newStatus === 'Accepted' ? 'Escalation Accepted 🚨' : `Request ${newStatus}`,
+                message: isEsc && newStatus === 'Accepted'
+                    ? `Support Escalation ${targetRequest.requestNumber} accepted! LGU emergency units have been notified in red emergency priority.`
+                    : `LGU Emergency Request ${targetRequest.requestNumber} status has been updated to "${newStatus}". All responders and LGU coordinators have been alerted.`,
                 type: 'success',
             });
         } catch (err: any) {
