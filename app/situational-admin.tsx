@@ -581,7 +581,7 @@ export default function SituationalAdminScreen() {
             await adminSupabase
                 .from('incident_report')
                 .update({
-                    status: newStatus === 'Accepted' ? 'accepted' : (newStatus === 'Rejected' ? 'rejected' : newStatus),
+                    status: newStatus === 'Accepted' ? 'Verified' : (newStatus === 'Rejected' ? 'Rejected' : newStatus),
                     reviewed_by: user?.id || null,
                     reviewed_at: new Date().toISOString(),
                 })

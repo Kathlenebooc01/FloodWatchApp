@@ -16,6 +16,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { supabase } from '@/utils/supabase';
 import { parseDropOffAndNotes } from '@/utils/logisticsHelpers';
+import { linkedReportId, readableReportText, reportContext } from '@/utils/situational-report';
 
 export interface Allocation {
     allocation_id: string;
@@ -45,6 +46,8 @@ export interface HistoryItem {
     urgency?: string;
     // Specifics for situational
     documentName?: string;
+    linkedReportId?: string | null;
+    linkedSituationalReport?: boolean;
 }
 
 const formatStatusUI = (status: string) => {
@@ -139,9 +142,12 @@ export default function LguHistoryScreen() {
                             id: row.report_id,
                             type: (isEscalation ? 'escalation' : 'situational') as any,
                             timestamp: row.created_at,
-                            title: cleanHazard,
+                            title: readableReportText(cleanHazard),
                             status: row.status || 'Pending',
-                            desc: row.description,
+                            desc: reportContext(row.description),
+                            linkedReportId: linkedReportId(row.description),
+                            linkedSituationalReport: (row.description || '').includes('[Linked Situational Report:'),
+                            documentName: row.description?.match(/\[Attached Document: (.+?)\]/)?.[1],
                         };
                     });
                 }
@@ -893,13 +899,22 @@ export default function LguHistoryScreen() {
                                             <Text style={s.detailValue}>{tc.label}</Text>
                                         </View>
 
+                                        {selectedItem.type === 'situational' && !!selectedItem.linkedReportId && (
+                                            <View style={s.detailRow}>
+                                                <View style={s.detailLabelRow}>
+                                                    <Ionicons name="git-network-outline" size={14} color="#94A3B8" />
+                                                    <Text style={s.detailLabel}> Linked Report</Text>
+                                                </View>
+                                                <Text style={[s.detailValue, { color: '#2563EB' }]}>{selectedItem.linkedSituationalReport ? 'SIT' : 'INC'}-{selectedItem.linkedReportId.slice(0, 8).toUpperCase()}</Text>
+                                            </View>
+                                        )}
                                         {selectedItem.type === 'situational' && !!selectedItem.documentName && (
                                             <View style={s.detailRow}>
                                                 <View style={s.detailLabelRow}>
                                                     <Ionicons name="document-attach-outline" size={14} color="#94A3B8" />
                                                     <Text style={s.detailLabel}> Document</Text>
                                                 </View>
-                                                <Text style={[s.detailValue, { color: '#2563EB' }]} numberOfLines={1}>{selectedItem.documentName}</Text>
+                                                <Text style={[s.detailValue, { color: '#2563EB' }]} numberOfLines={1}>{readableReportText(selectedItem.documentName)}</Text>
                                             </View>
                                         )}
                                     </View>

@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
     ScrollView,
     StyleSheet,
@@ -11,39 +11,107 @@ import {
     TouchableOpacity,
     View,
     Platform,
-    Alert,
     Modal,
     ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { supabase } from '@/utils/supabase';
+import { SituationalReportLinker, situationalReference } from '@/components/situational-report-linker';
+import { ReportSubjectPicker } from '@/components/report-subject-picker';
+import { useSituationalReports } from '@/hooks/use-situational-reports';
+import { situationalStatus, situationalTitle, readableReportText } from '@/utils/situational-report';
 
-const TITLE_OPTIONS = [
-    'Flooding Situation Update',
-    'Evacuation Center Status',
-    'Road Clearing Operations',
-    'Relief Goods Distribution',
-    'Rescue Operations Update',
-    'Power & Utilities Status',
-    'Other...'
-];
+import { getSituationalReportContext, submitSituationalReport, SituationalReportContext } from '@/utils/situational-report-api';
 
 const STATUS_OPTIONS = ['Ongoing', 'Resolved', 'Pending Escalation'];
 
 export default function SituationalLguScreen() {
     const router = useRouter();
+    const { reports, linkCounts, loading, error: reportsError, reload } = useSituationalReports();
+    const [showLinkModal, setShowLinkModal] = useState(false);
+    const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
+    const selectedReport = reports.find(report => report.report_id === selectedReportId);
     const [title, setTitle] = useState('');
+    const [showSubjectPicker, setShowSubjectPicker] = useState(false);
+    const [isOtherTitle, setIsOtherTitle] = useState(false);
+    const [customTitle, setCustomTitle] = useState('');
     const [status, setStatus] = useState('Ongoing');
     const [description, setDescription] = useState('');
     const [document, setDocument] = useState<any>(null);
 
     // Dropdown states
-    const [showTitleModal, setShowTitleModal] = useState(false);
     const [showStatusModal, setShowStatusModal] = useState(false);
-    const [isOtherTitle, setIsOtherTitle] = useState(false);
     const [showSuccessModal, setShowSuccessModal] = useState(false);
     const [errorModal, setErrorModal] = useState({ visible: false, title: '', message: '' });
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [parentContext, setParentContext] = useState<SituationalReportContext | null>(null);
+    const [isLoadingParent, setIsLoadingParent] = useState(false);
+    const selectedIdRef = useRef<string | null>(null);
+    const selectionGeneration = useRef(0);
+    const standaloneStatus = useRef('Ongoing');
+    const submissionInFlight = useRef(false);
+    const reportIsNewer = selectedReport?.situation_updated_at &&
+        (!parentContext?.latest_update_at || new Date(selectedReport.situation_updated_at).getTime() > new Date(parentContext.latest_update_at).getTime());
+    const currentParentStatus = selectedReportId
+        ? (reportIsNewer && selectedReport ? situationalStatus(selectedReport) : parentContext?.current_status || '') : '';
+    const effectiveTitle = selectedReportId
+        ? (reportIsNewer && selectedReport ? situationalTitle(selectedReport.hazard_type) : readableReportText(parentContext?.title) || (selectedReport ? situationalTitle(selectedReport.hazard_type) : '')) : title;
+    const effectiveStatus = selectedReportId && status === currentParentStatus ? '' : status;
+    const availableStatuses = selectedReportId ? STATUS_OPTIONS.filter(option => option !== currentParentStatus) : STATUS_OPTIONS;
+
+    const refreshParent = async (id: string) => {
+        const generation = selectionGeneration.current;
+        const context = await getSituationalReportContext(id);
+        if (selectedIdRef.current === id && selectionGeneration.current === generation) setParentContext(context);
+        return context;
+    };
+
+    const handleLinkReport = async (id: string) => {
+        if (!selectedIdRef.current) standaloneStatus.current = status;
+        const generation = ++selectionGeneration.current;
+        selectedIdRef.current = id;
+        setSelectedReportId(id);
+        setParentContext(null);
+        setStatus('');
+        setShowSubjectPicker(false);
+        setShowStatusModal(false);
+        setIsLoadingParent(true);
+        try {
+            await refreshParent(id);
+        } catch (error) {
+            if (generation === selectionGeneration.current) {
+                selectedIdRef.current = null;
+                setSelectedReportId(null);
+                setStatus(standaloneStatus.current);
+                setErrorModal({ visible: true, title: 'Report unavailable', message: error instanceof Error ? error.message : 'Could not retrieve the selected report.' });
+            }
+        } finally {
+            if (generation === selectionGeneration.current) setIsLoadingParent(false);
+        }
+    };
+
+    const handleRemoveLink = () => {
+        selectionGeneration.current++;
+        selectedIdRef.current = null;
+        setSelectedReportId(null);
+        setParentContext(null);
+        setIsLoadingParent(false);
+        setStatus(standaloneStatus.current);
+    };
+
+    const handleOpenStatus = async () => {
+        if (!selectedReportId) { setShowStatusModal(true); return; }
+        const id = selectedReportId;
+        setIsLoadingParent(true);
+        try {
+            await refreshParent(id);
+            if (selectedIdRef.current === id) setShowStatusModal(true);
+        } catch (error) {
+            setErrorModal({ visible: true, title: 'Status unavailable', message: error instanceof Error ? error.message : 'Could not retrieve the current report status.' });
+        } finally {
+            if (selectedIdRef.current === id) setIsLoadingParent(false);
+        }
+    };
 
     const handleDocumentPick = async () => {
         try {
@@ -68,30 +136,30 @@ export default function SituationalLguScreen() {
     };
 
     const handleSubmit = async () => {
-        if (!title.trim() || !description.trim()) {
+        if (submissionInFlight.current || isLoadingParent) return;
+        if (!effectiveTitle.trim() || !description.trim()) {
             setErrorModal({ visible: true, title: 'Required Fields', message: 'Please fill in the title and description to proceed.' });
             return;
         }
 
+        if (!STATUS_OPTIONS.includes(effectiveStatus)) {
+            setErrorModal({ visible: true, title: 'Select Status', message: selectedReportId ? 'Select a status different from the current status of the linked report.' : 'Please select an initial status.' });
+            return;
+        }
+        submissionInFlight.current = true;
         setIsSubmitting(true);
 
         try {
             const { data: { session } } = await supabase.auth.getSession();
             
-            let municipalityId = null;
-            if (session?.user) {
-                const { data: profile } = await supabase.from('profiles').select('municipality_id').eq('id', session.user.id).single();
-                municipalityId = profile?.municipality_id;
+            if (!session?.user) throw new Error('Please sign in to submit a situational report.');
+            let expectedStatus: string | null = null;
+            if (selectedReportId) {
+                const latest = await refreshParent(selectedReportId);
+                expectedStatus = latest.current_status;
+                if (effectiveStatus === latest.current_status) throw new Error('This is already the current status of the linked report. Please select a different status.');
             }
-
-            if (!municipalityId) {
-                const { data: validMunis } = await supabase.from('municipality_or_city').select('municipality_id').limit(1);
-                if (validMunis && validMunis.length > 0) {
-                    municipalityId = validMunis[0].municipality_id;
-                }
-            }
-            
-            let finalDescription = `[Field Status: ${status}]\n${description}`;
+            let documentPath: string | null = null;
             if (document && document.name && document.uri) {
                 try {
                     const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
@@ -107,7 +175,8 @@ export default function SituationalLguScreen() {
                     const uploadRes = await fetch(uploadUrl, {
                         method: 'POST',
                         headers: {
-                            'Authorization': `Bearer ${ANON_KEY}`,
+                            'Authorization': `Bearer ${session.access_token}`,
+                            'apikey': ANON_KEY,
                             'Content-Type': document.mimeType || 'application/pdf',
                             'x-upsert': 'true'
                         },
@@ -120,7 +189,7 @@ export default function SituationalLguScreen() {
                         throw new Error('Failed to upload the PDF to Supabase storage.');
                     }
                     
-                    finalDescription += `\n\n[Attached Document: ${uniqueFileName}]`;
+                    documentPath = uniqueFileName;
                 } catch (uploadErr) {
                     console.error('Upload Error:', uploadErr);
                     setErrorModal({ visible: true, title: 'Upload Failed', message: 'Failed to upload the attached PDF.' });
@@ -129,43 +198,35 @@ export default function SituationalLguScreen() {
                 }
             }
 
-            const { error: supabaseError } = await supabase
-                .from('incident_report')
-                .insert({
-                    user_id: session?.user?.id || null,
-                    report_type: 'moderate_report', 
-                    hazard_type: '[SITUATIONAL] ' + title,
-                    description: finalDescription,
-                    status: 'Pending_AI',
-                    municipality_id: municipalityId,
-                    created_at: new Date().toISOString(),
-                });
-
-            if (supabaseError) {
-                console.error("Supabase insert error:", supabaseError);
-                throw supabaseError;
-            }
+            const savedReport = await submitSituationalReport({
+                title: effectiveTitle, status: effectiveStatus, description,
+                parentId: selectedReportId, expectedStatus, documentPath,
+            });
 
             // Save to History (Local)
             const newItem = {
-                id: 'sit-' + Date.now(),
+                id: savedReport!.report_id,
+                linkedReportId: selectedReportId,
                 type: 'situational',
                 timestamp: new Date().toISOString(),
-                title: title,
-                status: status,
+                title: situationalTitle(savedReport.hazard_type),
+                status: savedReport.situation_status || effectiveStatus,
                 desc: description,
                 documentName: document ? document.name : undefined,
             };
-            const existing = await AsyncStorage.getItem('lgu_reports_history');
-            const history = existing ? JSON.parse(existing) : [];
-            history.push(newItem);
-            await AsyncStorage.setItem('lgu_reports_history', JSON.stringify(history));
+            try {
+                const existing = await AsyncStorage.getItem('lgu_reports_history');
+                const history = existing ? JSON.parse(existing) : [];
+                history.push(newItem);
+                await AsyncStorage.setItem('lgu_reports_history', JSON.stringify(history));
+            } catch (cacheError) { console.warn('Report saved; local history cache could not be updated', cacheError); }
             
             setShowSuccessModal(true);
         } catch (err) {
             console.error('Failed to submit report', err);
-            setErrorModal({ visible: true, title: 'Error', message: 'Failed to submit report to backend.' });
+            setErrorModal({ visible: true, title: 'Error', message: err instanceof Error ? err.message : 'Failed to submit report to backend.' });
         } finally {
+            submissionInFlight.current = false;
             setIsSubmitting(false);
         }
     };
@@ -196,49 +257,56 @@ export default function SituationalLguScreen() {
                 {/* ── TITLE FIELDS ── */}
                 <View style={s.fieldContainer}>
                     <Text style={s.label}>TITLE OR SUBJECT</Text>
-                    <TouchableOpacity 
-                        style={s.inputWrapper} 
-                        activeOpacity={0.7}
-                        onPress={() => setShowTitleModal(true)}
-                    >
-                        <TextInput
-                            style={s.input}
-                            placeholder="Select a subject..."
-                            placeholderTextColor="#94A3B8"
-                            value={isOtherTitle ? 'Other...' : title}
-                            editable={false}
-                            pointerEvents="none"
-                        />
-                        <Ionicons name="chevron-down" size={20} color="#64748B" style={s.dropdownIcon} />
-                    </TouchableOpacity>
+                    <View style={s.inputWrapper}>
+                        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Choose title or subject" style={s.subjectTrigger} disabled={!!selectedReportId || isSubmitting} accessibilityState={{ disabled: !!selectedReportId || isSubmitting }} onPress={() => { if (!selectedReportId) setShowSubjectPicker(true); }}>
+                            <View style={s.subjectIcon}><Ionicons name={isOtherTitle && !selectedReportId ? 'create-outline' : 'clipboard-outline'} size={21} color="#0954E8" /></View>
+                            <View style={{ flex: 1 }}><Text style={[s.subjectValue, !effectiveTitle && !(isOtherTitle && !selectedReportId) && { color: '#94A3B8' }]}>{isOtherTitle && !selectedReportId ? 'Other - Custom Subject' : effectiveTitle || 'Choose a report subject'}</Text><Text style={s.subjectHint}>{selectedReportId ? 'Automatically selected from the linked report' : isOtherTitle ? 'Write your own title below' : 'Browse subjects by category'}</Text></View>
+                            <Ionicons name="chevron-down" size={18} color="#64748B" />
+                        </TouchableOpacity>
+                    </View>
                 </View>
 
-                {isOtherTitle && (
-                    <View style={s.fieldContainer}>
-                        <Text style={s.label}>SPECIFY OTHER TITLE</Text>
-                        <View style={s.inputWrapper}>
-                            <TextInput
-                                style={s.input}
-                                placeholder="Type custom title here..."
-                                placeholderTextColor="#94A3B8"
-                                value={title}
-                                onChangeText={setTitle}
-                                autoFocus
-                            />
+                {isOtherTitle && !selectedReportId && <View style={s.customTitleCard}>
+                    <View style={s.customLabel}><Ionicons name="create-outline" size={16} color="#0954E8" /><Text style={s.customLabelText}>YOUR CUSTOM SUBJECT</Text></View>
+                    <TextInput accessibilityLabel="Custom report subject" autoFocus style={s.customInput} placeholder="Enter your own title or subject..." placeholderTextColor="#94A3B8" value={customTitle} onChangeText={value => { setCustomTitle(value); setTitle(value); }} />
+                    <Text style={s.subjectHint}>Give your report a clear, specific title.</Text>
+                </View>}
+
+                <View style={s.fieldContainer}>
+                    <View style={s.linkHeading}><Text style={s.label}>LINK TO EXISTING REPORT <Text style={s.optional}>(optional)</Text></Text><Text style={s.hierarchy}>HIERARCHY</Text></View>
+                    {selectedReport ? <View style={s.parentCard}>
+                        <View style={s.parentIcon}><Ionicons name="git-network-outline" size={22} color="#0954E8" /></View>
+                        <View style={{ flex: 1 }}>
+                            <Text style={s.parentLabel}>PARENT SITUATIONAL REPORT</Text>
+                            <Text style={s.parentTitle}>{effectiveTitle}</Text>
+                            <Text style={s.parentMeta}>{situationalReference(selectedReport.report_id)} | LGU Situational Report</Text>
+                            <Text style={s.parentStatus}>{currentParentStatus || situationalStatus(selectedReport)}</Text>
                         </View>
-                    </View>
-                )}
+                        <TouchableOpacity accessibilityLabel="Change linked report" onPress={() => setShowLinkModal(true)}><Text style={s.changeLink}>Change</Text></TouchableOpacity>
+                        <TouchableOpacity accessibilityLabel="Remove linked report" onPress={handleRemoveLink}><Ionicons name="close" size={18} color="#64748B" /></TouchableOpacity>
+                    </View> : <TouchableOpacity style={s.linkButton} onPress={() => setShowLinkModal(true)}>
+                        <View style={s.parentIcon}><Ionicons name="git-network-outline" size={22} color="#0954E8" /></View>
+                        <Text style={s.linkButtonText}>Link to Existing Report</Text>
+                        <Ionicons name="chevron-forward" size={18} color="#64748B" />
+                    </TouchableOpacity>}
+                    {!!selectedReportId && !selectedReport && !loading && !reportsError && <Text style={{ color: '#B91C1C', fontSize: 12, marginTop: 6 }}>The previously selected report is no longer available. Select another report or remove the link.</Text>}
+                    {!!selectedReportId && !selectedReport && <TouchableOpacity onPress={() => setSelectedReportId(null)}><Text style={s.changeLink}>Remove unavailable link</Text></TouchableOpacity>}
+                    <Text style={s.linkHelp}>Nest this situational report under an existing LGU situational report to aggregate field updates.</Text>
+                </View>
 
                 <View style={s.fieldContainer}>
                     <Text style={s.label}>STATUS OF REPORT</Text>
                     <TouchableOpacity 
                         style={s.inputWrapper} 
                         activeOpacity={0.7}
-                        onPress={() => setShowStatusModal(true)}
+                        disabled={isLoadingParent || isSubmitting}
+                        onPress={() => { void handleOpenStatus(); }}
                     >
                         <TextInput
                             style={s.input}
-                            value={status}
+                            value={effectiveStatus}
+                            placeholder="Select a status..."
+                            placeholderTextColor="#94A3B8"
                             editable={false} // Simulating dropdown
                             pointerEvents="none"
                         />
@@ -270,7 +338,7 @@ export default function SituationalLguScreen() {
                             <Ionicons name="document-text-outline" size={24} color="#2563EB" />
                         </View>
                         <Text style={s.uploadTitle}>
-                            {document ? document.name : 'Tap to browse files'}
+                            {document ? readableReportText(document.name) : 'Tap to browse files'}
                         </Text>
                         <Text style={s.uploadSubtitle}>
                             {document ? `${(document.size / 1024 / 1024).toFixed(2)} MB` : 'Accepts PDF only (Max 10MB)'}
@@ -283,7 +351,7 @@ export default function SituationalLguScreen() {
                     style={[s.submitBtn, isSubmitting && { opacity: 0.7 }]} 
                     onPress={handleSubmit} 
                     activeOpacity={0.8}
-                    disabled={isSubmitting}
+                    disabled={isSubmitting || isLoadingParent}
                 >
                     {isSubmitting ? (
                         <ActivityIndicator color="#FFFFFF" style={s.submitIcon} />
@@ -300,44 +368,21 @@ export default function SituationalLguScreen() {
             </ScrollView>
 
             {/* ── MODALS FOR DROPDOWNS ── */}
-            {/* Title Selection Modal */}
-            <Modal visible={showTitleModal} transparent animationType="fade">
-                <TouchableOpacity style={s.modalOverlay} activeOpacity={1} onPress={() => setShowTitleModal(false)}>
-                    <View style={s.modalContent}>
-                        <Text style={s.modalHeader}>Select Subject</Text>
-                        {TITLE_OPTIONS.map((opt, i) => (
-                            <TouchableOpacity 
-                                key={i} 
-                                style={s.modalOption}
-                                onPress={() => {
-                                    if (opt === 'Other...') {
-                                        setIsOtherTitle(true);
-                                        setTitle(''); // Clear so they can type
-                                    } else {
-                                        setIsOtherTitle(false);
-                                        setTitle(opt);
-                                    }
-                                    setShowTitleModal(false);
-                                }}
-                            >
-                                <Text style={[
-                                    s.modalOptionText,
-                                    (title === opt || (isOtherTitle && opt === 'Other...')) && { color: '#2563EB', fontWeight: '700' }
-                                ]}>
-                                    {opt}
-                                </Text>
-                            </TouchableOpacity>
-                        ))}
-                    </View>
-                </TouchableOpacity>
-            </Modal>
+            {showSubjectPicker && !selectedReportId && <ReportSubjectPicker selected={isOtherTitle ? 'Other' : title} onClose={() => setShowSubjectPicker(false)} onSelect={subject => {
+                const other = subject === 'Other';
+                setIsOtherTitle(other);
+                setTitle(other ? customTitle : subject);
+                setShowSubjectPicker(false);
+            }} />}
+
+            {showLinkModal && <SituationalReportLinker visible reports={reports} selectedId={selectedReportId} linkCounts={linkCounts} loading={loading || isLoadingParent} error={reportsError} onClose={() => setShowLinkModal(false)} onLink={id => { void handleLinkReport(id); }} onRetry={() => { void reload(); }} />}
 
             {/* Status Selection Modal */}
-            <Modal visible={showStatusModal} transparent animationType="fade">
+            <Modal visible={showStatusModal} transparent animationType="fade" onRequestClose={() => setShowStatusModal(false)}>
                 <TouchableOpacity style={s.modalOverlay} activeOpacity={1} onPress={() => setShowStatusModal(false)}>
                     <View style={s.modalContent}>
                         <Text style={s.modalHeader}>Select Status</Text>
-                        {STATUS_OPTIONS.map((opt, i) => (
+                        {availableStatuses.map((opt, i) => (
                             <TouchableOpacity 
                                 key={i} 
                                 style={s.modalOption}
@@ -348,7 +393,7 @@ export default function SituationalLguScreen() {
                             >
                                 <Text style={[
                                     s.modalOptionText,
-                                    status === opt && { color: '#2563EB', fontWeight: '700' }
+                                    effectiveStatus === opt && { color: '#2563EB', fontWeight: '700' }
                                 ]}>
                                     {opt}
                                 </Text>
@@ -422,7 +467,28 @@ export default function SituationalLguScreen() {
 }
 
 const s = StyleSheet.create({
-    safe: { flex: 1, backgroundColor: '#F8FAFC' },
+    subjectTrigger: { flex: 1, minHeight: 70, flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12 },
+    subjectIcon: { width: 36, height: 36, borderRadius: 11, backgroundColor: '#E5EDFF', alignItems: 'center', justifyContent: 'center' },
+    subjectValue: { fontSize: 14, color: '#0F172A', fontWeight: '600', lineHeight: 20 },
+    subjectHint: { fontSize: 11, color: '#64748B', lineHeight: 17, marginTop: 3 },
+    customTitleCard: { marginBottom: 20, backgroundColor: '#EFF4FF', borderWidth: 1, borderColor: '#C9D9FE', borderRadius: 14, padding: 14 },
+    customLabel: { flexDirection: 'row', gap: 7, alignItems: 'center', marginBottom: 10 },
+    customLabelText: { fontSize: 10, fontWeight: '700', color: '#0954E8', letterSpacing: 0.8 },
+    customInput: { minHeight: 48, backgroundColor: '#FFF', borderRadius: 10, paddingHorizontal: 12, color: '#0F172A', fontSize: 14 },
+    linkHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+    optional: { fontSize: 10, fontWeight: '400', letterSpacing: 0 },
+    hierarchy: { backgroundColor: '#E6EDFC', color: '#0954E8', fontSize: 9, fontWeight: '700', padding: 4, borderRadius: 4, marginBottom: 8 },
+    parentCard: { flexDirection: 'row', alignItems: 'flex-start', gap: 9, padding: 12, borderWidth: 1, borderColor: '#E8EBF0', borderRadius: 12, backgroundColor: '#F5F6F8' },
+    parentIcon: { width: 34, height: 34, borderRadius: 9, backgroundColor: '#E1E9FB', alignItems: 'center', justifyContent: 'center' },
+    parentLabel: { fontSize: 9, color: '#64748B', letterSpacing: 0.7, marginBottom: 4 },
+    parentTitle: { fontSize: 13, fontWeight: '700', color: '#0F172A', lineHeight: 18 },
+    parentMeta: { fontSize: 10, color: '#64748B', lineHeight: 15, marginTop: 4 },
+    parentStatus: { alignSelf: 'flex-start', backgroundColor: '#FFF3C4', color: '#92400E', fontSize: 9, fontWeight: '600', paddingHorizontal: 7, paddingVertical: 3, borderRadius: 8, marginTop: 6 },
+    changeLink: { fontSize: 10, fontWeight: '700', color: '#0954E8', paddingTop: 3 },
+    linkButton: { flexDirection: 'row', alignItems: 'center', gap: 12, borderWidth: 1, borderColor: '#E8EBF0', borderRadius: 12, padding: 12, backgroundColor: '#F5F6F8' },
+    linkButtonText: { flex: 1, fontSize: 13, fontWeight: '600', color: '#0954E8' },
+    linkHelp: { fontSize: 10, lineHeight: 15, color: '#94A3B8', marginTop: 7 },
+    safe: { flex: 1, backgroundColor: '#F5F6F8' },
     scroll: {
         flexGrow: 1,
         paddingHorizontal: 20,
@@ -561,7 +627,7 @@ const s = StyleSheet.create({
         marginBottom: 8,
     },
     inputWrapper: {
-        backgroundColor: '#FFFFFF',
+        backgroundColor: '#F5F6F8',
         borderRadius: 12,
         borderWidth: 1,
         borderColor: '#E2E8F0',
@@ -584,18 +650,13 @@ const s = StyleSheet.create({
     },
     textArea: {
         flex: 1,
-        height: 120,
+        height: 150,
         fontSize: 15,
         color: '#0F172A',
     },
 
     // Document Upload
     uploadContainer: {
-        backgroundColor: '#FFFFFF',
-        borderWidth: 1,
-        borderColor: '#E2E8F0',
-        borderStyle: 'dashed',
-        borderRadius: 16,
         padding: 24,
         alignItems: 'center',
         justifyContent: 'center',
