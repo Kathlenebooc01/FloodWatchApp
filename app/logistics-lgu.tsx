@@ -4,7 +4,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import * as Linking from 'expo-linking';
 import { useRouter, useFocusEffect } from 'expo-router';
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
     ScrollView,
     StyleSheet,
@@ -36,6 +36,26 @@ import {
 // ── TYPES ──
 
 export type LogisticsDocStatus = 'Pending' | 'Draft' | 'Completed';
+type ManageDeliveryStage = 'Pending Delivery' | 'Dispatched' | 'Delivered' | 'Delivered and Received' | 'Returned';
+
+const getManageDeliveryStage = (status: string | null, allocations: any[]): ManageDeliveryStage => {
+    const raw = (status || '').toLowerCase().trim();
+    if (raw === 'returned' || raw === 'closed' || raw === 'completed' ||
+        (allocations.length > 0 && allocations.every(a => !!a.returned_at))) return 'Returned';
+    if (raw === 'received' || allocations.some(a => !!a.received_at)) return 'Delivered and Received';
+    if (raw === 'delivered' || allocations.some(a => !!a.delivered_at)) return 'Delivered';
+    if (['dispatched', 'in_transit', 'in transit', 'in_progress'].includes(raw) ||
+        allocations.some(a => !!a.dispatched_at)) return 'Dispatched';
+    return 'Pending Delivery';
+};
+
+const manageDeliveryStyle: Record<ManageDeliveryStage, { backgroundColor: string; borderColor: string; color: string; icon: string }> = {
+    'Pending Delivery': { backgroundColor: '#F8FAFC', borderColor: '#E2E8F0', color: '#64748B', icon: 'hourglass-outline' },
+    Dispatched: { backgroundColor: '#FFF7ED', borderColor: '#FED7AA', color: '#EA580C', icon: 'car-outline' },
+    Delivered: { backgroundColor: '#EFF6FF', borderColor: '#BFDBFE', color: '#2563EB', icon: 'location' },
+    'Delivered and Received': { backgroundColor: '#ECFDF5', borderColor: '#A7F3D0', color: '#059669', icon: 'checkmark-done-circle' },
+    Returned: { backgroundColor: '#F5F3FF', borderColor: '#DDD6FE', color: '#7C3AED', icon: 'return-down-back-outline' },
+};
 
 export interface LogisticsAttachment {
     id: string;
@@ -55,7 +75,7 @@ export interface LogisticsDocumentation {
     supportType: string;
     resourcesProvided: string;
     quantityUsed: string;
-    actionsTaken: string;
+    actionsTaken?: string;
     recipientArea: string;
     outcome: string;
     attachments?: LogisticsAttachment[];
@@ -78,6 +98,7 @@ export interface LogisticsRequestData {
     items: Record<string, number>;
     resourceTypes: string[];
     deliveryStatus: DeliveryStatusType;
+    manageDeliveryStage: ManageDeliveryStage;
     canReceive: boolean;
     receivedAt?: string;
     deliveredAt?: string;
@@ -114,6 +135,9 @@ const getIconForType = (type: string) => {
 };
 
 const DOC_STORAGE_PREFIX = '@lgu_logistics_doc_';
+const OTHER_DOCUMENT_CHOICE = 'Others (Please Specify)';
+const RECIPIENT_CHOICES = ['Affected households', 'Evacuation center', 'Barangay community', 'Disaster response personnel', 'Public facility', OTHER_DOCUMENT_CHOICE];
+const OUTCOME_CHOICES = ['Resources delivered and received', 'Request fulfilled', 'Partially fulfilled', 'Assistance provided to affected area', 'Pending further action', OTHER_DOCUMENT_CHOICE];
 
 // ── ATTACHMENT FORMAT UTILITIES ──
 const ALLOWED_EXTENSIONS = ['pdf', 'docx', 'xlsx', 'xls', 'doc', 'jpg', 'jpeg', 'png'];
@@ -281,9 +305,11 @@ export default function LogisticsLguScreen() {
     const [docSupportType, setDocSupportType] = useState('');
     const [docResourcesProvided, setDocResourcesProvided] = useState('');
     const [docQuantityUsed, setDocQuantityUsed] = useState('');
-    const [docActionsTaken, setDocActionsTaken] = useState('');
     const [docRecipientArea, setDocRecipientArea] = useState('');
     const [docOutcome, setDocOutcome] = useState('');
+    const [recipientChoice, setRecipientChoice] = useState('');
+    const [outcomeChoice, setOutcomeChoice] = useState('');
+    const [openDocChoice, setOpenDocChoice] = useState<'recipient' | 'outcome' | null>(null);
     const [docAttachments, setDocAttachments] = useState<LogisticsAttachment[]>([]);
     const [attachmentPickerModal, setAttachmentPickerModal] = useState(false);
     const [previewAttachment, setPreviewAttachment] = useState<LogisticsAttachment | null>(null);
@@ -321,8 +347,11 @@ export default function LogisticsLguScreen() {
     const [submitLoading, setSubmitLoading] = useState(false);
     const [errorModal, setErrorModal] = useState({ visible: false, title: '', message: '' });
 
+    const requestsFetchVersion = useRef(0);
+
     // ── FETCH LOGISTICS REQUESTS & HYDRATE DOCUMENTATION ──
     const fetchRequests = useCallback(async (silent = false) => {
+        const fetchVersion = ++requestsFetchVersion.current;
         if (!silent) setLoadingRequests(true);
         try {
             const { data: { user } } = await supabase.auth.getUser();
@@ -386,6 +415,7 @@ export default function LogisticsLguScreen() {
                     const deliveredAt = alloc?.delivered_at;
 
                     const deliveryStatus = computeDeliveryStatus(req.status, req.resource_allocations);
+                    const manageDeliveryStage = getManageDeliveryStage(req.status, req.resource_allocations || []);
                     const canReceive = isMarkAsReceivedEnabled(deliveryStatus, req.status);
                     const isReceived = isRequestReceived(req.status, deliveryStatus, receivedAt);
 
@@ -461,6 +491,7 @@ export default function LogisticsLguScreen() {
                         items: itemsObj,
                         resourceTypes: Array.from(resourceTypesSet),
                         deliveryStatus,
+                        manageDeliveryStage,
                         canReceive,
                         receivedAt,
                         deliveredAt,
@@ -476,6 +507,7 @@ export default function LogisticsLguScreen() {
                 })
             );
 
+            if (fetchVersion !== requestsFetchVersion.current) return;
             setRequests(mapped);
 
             // Silently sync open modal details in REAL TIME if open
@@ -487,7 +519,7 @@ export default function LogisticsLguScreen() {
         } catch (err) {
             console.error('Error fetching logistics requests:', err);
         } finally {
-            if (!silent) setLoadingRequests(false);
+            if (fetchVersion === requestsFetchVersion.current) setLoadingRequests(false);
         }
     }, []);
 
@@ -609,14 +641,7 @@ export default function LogisticsLguScreen() {
             const { data: profile } = await supabase.from('profiles').select('municipality_id').eq('id', user.id).single();
             let municipalityId = profile?.municipality_id;
 
-            if (!municipalityId) {
-                const { data: validMunis } = await supabase.from('municipality_or_city').select('municipality_id').limit(1);
-                if (validMunis && validMunis.length > 0) {
-                    municipalityId = validMunis[0].municipality_id;
-                } else {
-                    throw new Error("No municipality available in the database.");
-                }
-            }
+            if (!municipalityId) throw new Error('No municipality assigned. Please contact the PDRRMO.');
 
             let geographyPoint = null;
             if (locationCoords) {
@@ -721,12 +746,16 @@ export default function LogisticsLguScreen() {
         setDocResourcesProvided(activeDoc?.resourcesProvided || itemsSummary);
         setDocQuantityUsed(activeDoc?.quantityUsed || Object.values(request.items).reduce((a, b) => a + b, 0).toString() + ' total units');
 
-        // Fields 4-6: restored from saved draft or empty (user must fill)
-        setDocActionsTaken(activeDoc?.actionsTaken || '');
-        setDocRecipientArea(activeDoc?.recipientArea || '');
-        setDocOutcome(activeDoc?.outcome || '');
+        // Restore saved choices, including custom answers from older drafts.
+        const savedRecipient = activeDoc?.recipientArea || '';
+        const savedOutcome = activeDoc?.outcome || '';
+        setDocRecipientArea(savedRecipient);
+        setDocOutcome(savedOutcome);
+        setRecipientChoice(savedRecipient ? (RECIPIENT_CHOICES.includes(savedRecipient) ? savedRecipient : OTHER_DOCUMENT_CHOICE) : '');
+        setOutcomeChoice(savedOutcome ? (OUTCOME_CHOICES.includes(savedOutcome) ? savedOutcome : OTHER_DOCUMENT_CHOICE) : '');
+        setOpenDocChoice(null);
 
-        // Field 7: restored attachments
+        // Field 6: restored attachments
         setDocAttachments(activeDoc?.attachments || []);
 
         setDocModalVisible(true);
@@ -736,17 +765,14 @@ export default function LogisticsLguScreen() {
     const handleSaveDocumentation = async (mode: 'draft' | 'submit') => {
         if (!docTargetRequest) return;
 
-        // Validation for final submission (only fields 4, 5, 6 are required from the user)
+        // Validation for final submission (fields 4 and 5 are required from the user)
         if (mode === 'submit') {
             const missing: { id: string; label: string; number: number; hint: string }[] = [];
-            if (!docActionsTaken.trim()) {
-                missing.push({ id: 'actions', label: 'Actions Taken by Personnel', number: 4, hint: 'Detail the response actions, deployment \u0026 distribution efforts' });
-            }
             if (!docRecipientArea.trim()) {
-                missing.push({ id: 'recipient', label: 'Recipient / Area Served', number: 5, hint: 'Identify the person, community, or area that received support' });
+                missing.push({ id: 'recipient', label: 'Recipient / Area Served', number: 4, hint: 'Identify the person, community, or area that received support' });
             }
             if (!docOutcome.trim()) {
-                missing.push({ id: 'outcome', label: 'Outcome of Request', number: 6, hint: 'Record the final result \u0026 effectiveness of support provided' });
+                missing.push({ id: 'outcome', label: 'Outcome of Request', number: 5, hint: 'Record the final result \u0026 effectiveness of support provided' });
             }
 
             if (missing.length > 0) {
@@ -771,7 +797,6 @@ export default function LogisticsLguScreen() {
                 supportType: docSupportType.trim() || docTargetRequest.desc || 'Logistics Request',
                 resourcesProvided: docResourcesProvided.trim(),
                 quantityUsed: docQuantityUsed.trim(),
-                actionsTaken: docActionsTaken.trim(),
                 recipientArea: docRecipientArea.trim(),
                 outcome: docOutcome.trim(),
                 attachments: docAttachments,
@@ -889,6 +914,7 @@ export default function LogisticsLguScreen() {
                         status: 'Received',
                         rawStatus: 'Received',
                         deliveryStatus: 'Received',
+                        manageDeliveryStage: 'Delivered and Received',
                         canReceive: false,
                         receivedAt: nowIso,
                         deliveredAt: nowIso,
@@ -906,6 +932,7 @@ export default function LogisticsLguScreen() {
                     status: 'Received',
                     rawStatus: 'Received',
                     deliveryStatus: 'Received',
+                    manageDeliveryStage: 'Delivered and Received',
                     canReceive: false,
                     receivedAt: nowIso,
                     deliveredAt: nowIso,
@@ -951,6 +978,7 @@ export default function LogisticsLguScreen() {
                         ...r,
                         status: 'Returned',
                         rawStatus: 'Returned',
+                        manageDeliveryStage: 'Returned',
                         actualReturnDate: nowIso,
                         returnStatus: updatedReturnStatus,
                     };
@@ -963,6 +991,7 @@ export default function LogisticsLguScreen() {
                     ...prev,
                     status: 'Returned',
                     rawStatus: 'Returned',
+                    manageDeliveryStage: 'Returned',
                     actualReturnDate: nowIso,
                     returnStatus: updatedReturnStatus,
                 } : null);
@@ -1565,36 +1594,19 @@ export default function LogisticsLguScreen() {
                                     {/* ── DELIVERY STATUS ROW ── */}
                                     <View style={s.cardDeliveryRow}>
                                         <View style={[s.deliveryStatusPill, {
-                                            backgroundColor:
-                                                item.deliveryStatus === 'Received' ? '#ECFDF5' :
-                                                item.deliveryStatus === 'Delivered' ? '#EFF6FF' :
-                                                item.deliveryStatus === 'In Transit' ? '#FFF7ED' : '#F8FAFC',
-                                            borderColor:
-                                                item.deliveryStatus === 'Received' ? '#A7F3D0' :
-                                                item.deliveryStatus === 'Delivered' ? '#BFDBFE' :
-                                                item.deliveryStatus === 'In Transit' ? '#FED7AA' : '#E2E8F0',
+                                            backgroundColor: manageDeliveryStyle[item.manageDeliveryStage].backgroundColor,
+                                            borderColor: manageDeliveryStyle[item.manageDeliveryStage].borderColor,
                                         }]}>
                                             <Ionicons
-                                                name={
-                                                    item.deliveryStatus === 'Received' ? 'checkmark-done-circle' :
-                                                    item.deliveryStatus === 'Delivered' ? 'location' :
-                                                    item.deliveryStatus === 'In Transit' ? 'car-outline' : 'hourglass-outline'
-                                                }
+                                                name={manageDeliveryStyle[item.manageDeliveryStage].icon as any}
                                                 size={12}
-                                                color={
-                                                    item.deliveryStatus === 'Received' ? '#059669' :
-                                                    item.deliveryStatus === 'Delivered' ? '#2563EB' :
-                                                    item.deliveryStatus === 'In Transit' ? '#EA580C' : '#64748B'
-                                                }
+                                                color={manageDeliveryStyle[item.manageDeliveryStage].color}
                                                 style={{ marginRight: 4 }}
                                             />
                                             <Text style={[s.deliveryStatusPillText, {
-                                                color:
-                                                    item.deliveryStatus === 'Received' ? '#059669' :
-                                                    item.deliveryStatus === 'Delivered' ? '#2563EB' :
-                                                    item.deliveryStatus === 'In Transit' ? '#EA580C' : '#64748B'
+                                                color: manageDeliveryStyle[item.manageDeliveryStage].color,
                                             }]}>
-                                                {item.deliveryStatus}
+                                                {item.manageDeliveryStage}
                                             </Text>
                                         </View>
                                         {/* Expected Return Status Pill — only shown once received */}
@@ -1615,27 +1627,6 @@ export default function LogisticsLguScreen() {
                                             </View>
                                         )}
                                     </View>
-
-                                    {/* Mark as Delivered & Received button — only shown when canReceive */}
-                                    {item.canReceive && (
-                                        <TouchableOpacity
-                                            style={s.markReceivedBtn}
-                                            activeOpacity={0.85}
-                                            onPress={() => {
-                                                Alert.alert(
-                                                    'Confirm Delivery & Receipt',
-                                                    `Mark this delivery for Request #${item.id} as delivered and received at ${item.dropoff}?`,
-                                                    [
-                                                        { text: 'Cancel', style: 'cancel' },
-                                                        { text: 'Mark as Delivered & Received', style: 'default', onPress: () => handleMarkAsReceived(item) },
-                                                    ]
-                                                );
-                                            }}
-                                        >
-                                            <Ionicons name="checkmark-done-circle-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-                                            <Text style={s.markReceivedBtnText}>Mark as Delivered & Received</Text>
-                                        </TouchableOpacity>
-                                    )}
 
                                     {/* ── DUAL ACTION BAR ── */}
                                     <View style={s.cardActionRow}>
@@ -1889,8 +1880,8 @@ export default function LogisticsLguScreen() {
                                         {/* Documentation Content Preview */}
                                         {selectedRequest.documentation ? (
                                             <View style={s.docPreviewBox}>
-                                                <Text style={s.docPreviewLabel}>ACTIONS TAKEN:</Text>
-                                                <Text style={s.docPreviewText}>{selectedRequest.documentation.actionsTaken || 'Not specified'}</Text>
+                                                <Text style={s.docPreviewLabel}>RECIPIENT / AREA SERVED:</Text>
+                                                <Text style={s.docPreviewText}>{selectedRequest.documentation.recipientArea || 'Not specified'}</Text>
 
                                                 <Text style={[s.docPreviewLabel, { marginTop: 8 }]}>OUTCOME:</Text>
                                                 <Text style={s.docPreviewText}>{selectedRequest.documentation.outcome || 'Not specified'}</Text>
@@ -2024,35 +2015,18 @@ export default function LogisticsLguScreen() {
                                                 <Text style={s.infoBoxLabel}>DELIVERY STATUS</Text>
                                                 <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
                                                     <View style={[s.deliveryStatusPill, {
-                                                        backgroundColor:
-                                                            selectedRequest.deliveryStatus === 'Received' ? '#ECFDF5' :
-                                                            selectedRequest.deliveryStatus === 'Delivered' ? '#EFF6FF' :
-                                                            selectedRequest.deliveryStatus === 'In Transit' ? '#FFF7ED' : '#F8FAFC',
-                                                        borderColor:
-                                                            selectedRequest.deliveryStatus === 'Received' ? '#A7F3D0' :
-                                                            selectedRequest.deliveryStatus === 'Delivered' ? '#BFDBFE' :
-                                                            selectedRequest.deliveryStatus === 'In Transit' ? '#FED7AA' : '#E2E8F0',
+                                                        backgroundColor: manageDeliveryStyle[selectedRequest.manageDeliveryStage].backgroundColor,
+                                                        borderColor: manageDeliveryStyle[selectedRequest.manageDeliveryStage].borderColor,
                                                     }]}>
                                                         <Ionicons
-                                                            name={
-                                                                selectedRequest.deliveryStatus === 'Received' ? 'checkmark-done-circle' :
-                                                                selectedRequest.deliveryStatus === 'Delivered' ? 'location' :
-                                                                selectedRequest.deliveryStatus === 'In Transit' ? 'car-outline' : 'hourglass-outline'
-                                                            }
+                                                            name={manageDeliveryStyle[selectedRequest.manageDeliveryStage].icon as any}
                                                             size={13}
-                                                            color={
-                                                                selectedRequest.deliveryStatus === 'Received' ? '#059669' :
-                                                                selectedRequest.deliveryStatus === 'Delivered' ? '#2563EB' :
-                                                                selectedRequest.deliveryStatus === 'In Transit' ? '#EA580C' : '#64748B'
-                                                            }
+                                                            color={manageDeliveryStyle[selectedRequest.manageDeliveryStage].color}
                                                             style={{ marginRight: 5 }}
                                                         />
                                                         <Text style={[s.deliveryStatusPillText, {
-                                                            color:
-                                                                selectedRequest.deliveryStatus === 'Received' ? '#059669' :
-                                                                selectedRequest.deliveryStatus === 'Delivered' ? '#2563EB' :
-                                                                selectedRequest.deliveryStatus === 'In Transit' ? '#EA580C' : '#64748B'
-                                                        }]}>{selectedRequest.deliveryStatus}</Text>
+                                                            color: manageDeliveryStyle[selectedRequest.manageDeliveryStage].color,
+                                                        }]}>{selectedRequest.manageDeliveryStage}</Text>
                                                     </View>
                                                 </View>
                                                 {selectedRequest.receivedAt && (
@@ -2108,35 +2082,6 @@ export default function LogisticsLguScreen() {
                                             </View>
                                         )}
                                     </View>
-
-                                    {/* Mark as Delivered & Received — Detail Modal Action */}
-                                    {selectedRequest.canReceive && (
-                                        <TouchableOpacity
-                                            style={[s.markReceivedBtn, { marginTop: 16 }]}
-                                            activeOpacity={0.85}
-                                            onPress={() => {
-                                                Alert.alert(
-                                                    'Confirm Delivery & Receipt',
-                                                    `Mark this delivery for Request #${selectedRequest.id} as delivered and received at ${selectedRequest.dropoff}?`,
-                                                    [
-                                                        { text: 'Cancel', style: 'cancel' },
-                                                        {
-                                                            text: 'Mark as Delivered & Received',
-                                                            style: 'default',
-                                                            onPress: () => {
-                                                                const req = selectedRequest;
-                                                                setSelectedRequest(null);
-                                                                handleMarkAsReceived(req);
-                                                            }
-                                                        },
-                                                    ]
-                                                );
-                                            }}
-                                        >
-                                            <Ionicons name="checkmark-done-circle-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-                                            <Text style={s.markReceivedBtnText}>Mark as Delivered & Received</Text>
-                                        </TouchableOpacity>
-                                    )}
 
                                     {/* Description Info Box */}
                                     <View style={[s.infoBox, { marginTop: 16, alignItems: 'flex-start' }]}>
@@ -2293,10 +2238,10 @@ export default function LogisticsLguScreen() {
                                 selectTextOnFocus={false}
                             />
 
-                            {/* Field 4: Actions Taken by Personnel */}
+                            {/* Field 4: Recipient / Area Served */}
                             <View style={s.fieldLabelRow}>
                                 <Text style={s.inputLabelClean}>
-                                    4. ACTIONS TAKEN BY PERSONNEL {docTargetRequest?.docStatus !== 'Completed' && <Text style={s.requiredStar}>*</Text>}
+                                    4. RECIPIENT / AREA SERVED {docTargetRequest?.docStatus !== 'Completed' && <Text style={s.requiredStar}>*</Text>}
                                 </Text>
                                 {docTargetRequest?.docStatus === 'Completed' && (
                                     <View style={s.lockedPill}>
@@ -2305,58 +2250,41 @@ export default function LogisticsLguScreen() {
                                     </View>
                                 )}
                             </View>
-                            <TextInput
-                                style={[
-                                    s.textAreaInput,
-                                    docTargetRequest?.docStatus === 'Completed' && s.lockedInput,
-                                    docTargetRequest?.docStatus !== 'Completed' && attemptedDocSubmit && !docActionsTaken.trim() && s.inputErrorBorder
-                                ]}
-                                placeholder={docTargetRequest?.docStatus === 'Completed' ? 'No actions recorded.' : 'Detail response actions, deployment, distribution efforts, coordination...'}
-                                placeholderTextColor="#94A3B8"
-                                multiline
-                                numberOfLines={3}
-                                value={docActionsTaken}
-                                onChangeText={setDocActionsTaken}
-                                editable={docTargetRequest?.docStatus !== 'Completed'}
-                            />
-                            {docTargetRequest?.docStatus !== 'Completed' && attemptedDocSubmit && !docActionsTaken.trim() && (
-                                <Text style={s.fieldErrorText}>* Actions Taken by Personnel is required</Text>
+                            <TouchableOpacity
+                                style={[s.docChoiceButton, docTargetRequest?.docStatus === 'Completed' && s.lockedInput, attemptedDocSubmit && !docRecipientArea.trim() && s.inputErrorBorder]}
+                                onPress={() => setOpenDocChoice(openDocChoice === 'recipient' ? null : 'recipient')}
+                                disabled={docTargetRequest?.docStatus === 'Completed'}
+                            >
+                                <Text style={[s.docChoiceText, !recipientChoice && s.docChoicePlaceholder]}>{docTargetRequest?.docStatus === 'Completed' && recipientChoice === OTHER_DOCUMENT_CHOICE ? docRecipientArea : recipientChoice || 'Select recipient or area served'}</Text>
+                                <Ionicons name="chevron-down" size={18} color="#64748B" />
+                            </TouchableOpacity>
+                            {openDocChoice === 'recipient' && docTargetRequest?.docStatus !== 'Completed' && (
+                                <View style={s.docChoiceMenu}>
+                                    {RECIPIENT_CHOICES.map(choice => (
+                                        <TouchableOpacity key={choice} style={s.docChoiceOption} onPress={() => {
+                                            setRecipientChoice(choice);
+                                            setDocRecipientArea(choice === OTHER_DOCUMENT_CHOICE ? '' : choice);
+                                            setOpenDocChoice(null);
+                                        }}>
+                                            <Text style={s.docChoiceOptionText}>{choice}</Text>
+                                            {recipientChoice === choice && <Ionicons name="checkmark" size={17} color="#2563EB" />}
+                                        </TouchableOpacity>
+                                    ))}
+                                </View>
                             )}
-
-                            {/* Field 5: Recipient / Area Served */}
-                            <View style={s.fieldLabelRow}>
-                                <Text style={s.inputLabelClean}>
-                                    5. RECIPIENT / AREA SERVED {docTargetRequest?.docStatus !== 'Completed' && <Text style={s.requiredStar}>*</Text>}
-                                </Text>
-                                {docTargetRequest?.docStatus === 'Completed' && (
-                                    <View style={s.lockedPill}>
-                                        <Ionicons name="lock-closed" size={10} color="#64748B" style={{ marginRight: 3 }} />
-                                        <Text style={s.lockedPillText}>LOCKED</Text>
-                                    </View>
-                                )}
-                            </View>
-                            <TextInput
-                                style={[
-                                    s.textAreaInput,
-                                    docTargetRequest?.docStatus === 'Completed' && s.lockedInput,
-                                    docTargetRequest?.docStatus !== 'Completed' && attemptedDocSubmit && !docRecipientArea.trim() && s.inputErrorBorder
-                                ]}
-                                placeholder={docTargetRequest?.docStatus === 'Completed' ? 'No recipient recorded.' : 'Person, community, barangay, or area that received the support...'}
-                                placeholderTextColor="#94A3B8"
-                                multiline
-                                numberOfLines={2}
-                                value={docRecipientArea}
-                                onChangeText={setDocRecipientArea}
-                                editable={docTargetRequest?.docStatus !== 'Completed'}
-                            />
+                            {recipientChoice === OTHER_DOCUMENT_CHOICE && docTargetRequest?.docStatus !== 'Completed' && (
+                                <TextInput style={[s.textAreaInput, s.docCustomInput]}
+                                    placeholder="Specify recipient or area served" placeholderTextColor="#94A3B8" multiline
+                                    value={docRecipientArea} onChangeText={setDocRecipientArea} />
+                            )}
                             {docTargetRequest?.docStatus !== 'Completed' && attemptedDocSubmit && !docRecipientArea.trim() && (
                                 <Text style={s.fieldErrorText}>* Recipient / Area Served is required</Text>
                             )}
 
-                            {/* Field 6: Outcome of Request */}
+                            {/* Field 5: Outcome of Request */}
                             <View style={s.fieldLabelRow}>
                                 <Text style={s.inputLabelClean}>
-                                    6. OUTCOME OF REQUEST {docTargetRequest?.docStatus !== 'Completed' && <Text style={s.requiredStar}>*</Text>}
+                                    5. OUTCOME OF REQUEST {docTargetRequest?.docStatus !== 'Completed' && <Text style={s.requiredStar}>*</Text>}
                                 </Text>
                                 {docTargetRequest?.docStatus === 'Completed' && (
                                     <View style={s.lockedPill}>
@@ -2365,29 +2293,42 @@ export default function LogisticsLguScreen() {
                                     </View>
                                 )}
                             </View>
-                            <TextInput
-                                style={[
-                                    s.textAreaInput,
-                                    docTargetRequest?.docStatus === 'Completed' && s.lockedInput,
-                                    docTargetRequest?.docStatus !== 'Completed' && attemptedDocSubmit && !docOutcome.trim() && s.inputErrorBorder
-                                ]}
-                                placeholder={docTargetRequest?.docStatus === 'Completed' ? 'No outcome recorded.' : 'Final result: supplies delivered, evacuees sheltered, area secured, request fulfilled...'}
-                                placeholderTextColor="#94A3B8"
-                                multiline
-                                numberOfLines={3}
-                                value={docOutcome}
-                                onChangeText={setDocOutcome}
-                                editable={docTargetRequest?.docStatus !== 'Completed'}
-                            />
+                            <TouchableOpacity
+                                style={[s.docChoiceButton, docTargetRequest?.docStatus === 'Completed' && s.lockedInput, attemptedDocSubmit && !docOutcome.trim() && s.inputErrorBorder]}
+                                onPress={() => setOpenDocChoice(openDocChoice === 'outcome' ? null : 'outcome')}
+                                disabled={docTargetRequest?.docStatus === 'Completed'}
+                            >
+                                <Text style={[s.docChoiceText, !outcomeChoice && s.docChoicePlaceholder]}>{docTargetRequest?.docStatus === 'Completed' && outcomeChoice === OTHER_DOCUMENT_CHOICE ? docOutcome : outcomeChoice || 'Select outcome of request'}</Text>
+                                <Ionicons name="chevron-down" size={18} color="#64748B" />
+                            </TouchableOpacity>
+                            {openDocChoice === 'outcome' && docTargetRequest?.docStatus !== 'Completed' && (
+                                <View style={s.docChoiceMenu}>
+                                    {OUTCOME_CHOICES.map(choice => (
+                                        <TouchableOpacity key={choice} style={s.docChoiceOption} onPress={() => {
+                                            setOutcomeChoice(choice);
+                                            setDocOutcome(choice === OTHER_DOCUMENT_CHOICE ? '' : choice);
+                                            setOpenDocChoice(null);
+                                        }}>
+                                            <Text style={s.docChoiceOptionText}>{choice}</Text>
+                                            {outcomeChoice === choice && <Ionicons name="checkmark" size={17} color="#2563EB" />}
+                                        </TouchableOpacity>
+                                    ))}
+                                </View>
+                            )}
+                            {outcomeChoice === OTHER_DOCUMENT_CHOICE && docTargetRequest?.docStatus !== 'Completed' && (
+                                <TextInput style={[s.textAreaInput, s.docCustomInput]}
+                                    placeholder="Specify outcome of request" placeholderTextColor="#94A3B8" multiline
+                                    value={docOutcome} onChangeText={setDocOutcome} />
+                            )}
                             {docTargetRequest?.docStatus !== 'Completed' && attemptedDocSubmit && !docOutcome.trim() && (
                                 <Text style={s.fieldErrorText}>* Outcome of Request is required</Text>
                             )}
 
-                            {/* Field 7: Supporting Evidence & File Attachments */}
+                            {/* Field 6: Supporting Evidence & File Attachments */}
                             <View style={s.attachmentSectionContainer}>
                                 <View style={s.fieldLabelRow}>
                                     <View style={{ flex: 1 }}>
-                                        <Text style={s.inputLabelClean}>7. SUPPORTING EVIDENCE & ATTACHMENTS</Text>
+                                        <Text style={s.inputLabelClean}>6. SUPPORTING EVIDENCE & ATTACHMENTS</Text>
                                         <Text style={s.attachmentSubHint}>
                                             Attach photos, receipts, reports, delivery slips, or vouchers (PDF, DOCX, XLSX, JPG, JPEG, PNG).
                                         </Text>
@@ -4162,6 +4103,40 @@ const s = StyleSheet.create({
         color: '#0F172A',
         height: 48,
     },
+    docChoiceButton: {
+        minHeight: 48,
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        backgroundColor: '#F8FAFC',
+        borderRadius: 12,
+        borderWidth: 1,
+        borderColor: '#E2E8F0',
+        paddingHorizontal: 14,
+        paddingVertical: 11,
+    },
+    docChoiceText: { flex: 1, fontSize: 13, color: '#0F172A', marginRight: 8 },
+    docChoicePlaceholder: { color: '#94A3B8' },
+    docChoiceMenu: {
+        marginTop: 5,
+        borderWidth: 1,
+        borderColor: '#E2E8F0',
+        borderRadius: 12,
+        backgroundColor: '#FFFFFF',
+        overflow: 'hidden',
+    },
+    docChoiceOption: {
+        minHeight: 43,
+        paddingHorizontal: 14,
+        paddingVertical: 10,
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        borderBottomWidth: StyleSheet.hairlineWidth,
+        borderBottomColor: '#E2E8F0',
+    },
+    docChoiceOptionText: { flex: 1, fontSize: 13, color: '#334155' },
+    docCustomInput: { marginTop: 8 },
     lockedInput: {
         backgroundColor: '#F1F5F9',
         borderColor: '#E2E8F0',

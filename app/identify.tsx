@@ -8,7 +8,6 @@ import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, TouchableOpacit
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { supabase } from '@/utils/supabase';
-import { triggerNotificationBanner } from '@/components/notification-banner';
 
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL!;
 const ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY!;
@@ -177,25 +176,6 @@ export default function IdentityVerification() {
                 throw new Error('Failed to submit ID. Please try again.');
             }
 
-            // Insert 'In Progress' notification into notifications table so it appears in notifications list
-            await supabase.from('notifications').insert({
-                user_id: userId,
-                title: '⏳ ID Verification In Progress',
-                message: 'Your ID is currently being verified. We will notify you once complete.',
-                type: 'Updates',
-                is_read: false,
-                target_role: 'user',
-                created_at: new Date().toISOString(),
-            });
-
-            // Trigger banner popup immediately
-            triggerNotificationBanner({
-                id: `verify-pending-${Date.now()}`,
-                title: '⏳ ID Verification In Progress',
-                message: 'Your ID is currently being verified. We will notify you once complete.',
-                type: 'Updates',
-            }, true);
-
             // ── ID validation runs in background directly via Gemini AI ──
             if (verData?.id_verification_id) {
                 const capturedDocType = selectedDocType;
@@ -219,38 +199,48 @@ SCORING GUIDE for confidence_score (0 to 100):
 - 50-69: Uncertain — could be an ID but too many issues
 - 0-49: Not an ID, fake, screenshot, selfie, or unreadable
 
-APPROVE only if confidence_score >= 90.
-REJECT if confidence_score < 90.
+Assess the document format, visible information, image quality, and possible signs of tampering. Your assessment is advisory; only a PDRRMO Admin makes the final decision.
 
 Respond ONLY in this exact JSON format with no other text:
 {
   "ai_is_valid": true,
   "confidence_score": 95,
   "ai_insight": "Clear and genuine PhilSys National ID with visible QR code and details.",
-  "status": "approved"
+  "status": "appears_valid"
 }`;
 
                         const cleanBase64 = frontBase64.replace(/^data:image\/[a-zA-Z0-9.+]+;base64,/, '').trim();
-                        const resp = await fetch(
-                            `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${geminiKey}`,
-                            {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    contents: [{
-                                        parts: [
-                                            { inlineData: { mimeType: 'image/jpeg', data: cleanBase64 } },
-                                            { text: prompt }
-                                        ]
-                                    }],
-                                    generationConfig: { temperature: 0.1, maxOutputTokens: 2048, thinkingConfig: { thinkingBudget: 0 } }
-                                })
+                        if (!geminiKey) throw new Error('Gemini API key is not configured');
+                        const requestBody = JSON.stringify({
+                            contents: [{
+                                parts: [
+                                    { inlineData: { mimeType: 'image/jpeg', data: cleanBase64 } },
+                                    { text: prompt }
+                                ]
+                            }],
+                            generationConfig: { temperature: 0.1, maxOutputTokens: 2048, thinkingConfig: { thinkingBudget: 0 } }
+                        });
+                        let resp: Response | undefined;
+                        for (let attempt = 0; attempt < 3; attempt++) {
+                            resp = await fetch(
+                                `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${geminiKey}`,
+                                {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: requestBody,
+                                }
+                            );
+                            if (resp.ok) break;
+                            if (![429, 500, 502, 503, 504].includes(resp.status) || attempt === 2) {
+                                throw new Error(`Gemini status ${resp.status}`);
                             }
-                        );
-
-                        if (!resp.ok) {
-                            throw new Error(`Gemini status ${resp.status}`);
+                            const retryAfter = Number(resp.headers.get('Retry-After'));
+                            const delay = Number.isFinite(retryAfter) && retryAfter > 0
+                                ? Math.min(retryAfter * 1000, 5000)
+                                : 1000 * (2 ** attempt);
+                            await new Promise(resolve => setTimeout(resolve, delay));
                         }
+                        if (!resp?.ok) throw new Error('Gemini request failed');
 
                         const geminiJson = await resp.json();
                         const rawText = geminiJson?.candidates?.[0]?.content?.parts?.[0]?.text || '';
@@ -259,57 +249,21 @@ Respond ONLY in this exact JSON format with no other text:
 
                         const parsed = JSON.parse(jsonMatch[0]);
                         const confidence = Math.max(0, Math.min(100, Math.round(parsed.confidence_score ?? 0)));
-                        const isApproved = confidence >= 80 && (parsed.ai_is_valid || parsed.status === 'approved');
-                        const finalStatus = isApproved ? 'approved' : 'rejected';
+                        const appearsValid = confidence >= 90 && parsed.ai_is_valid === true;
 
                         // 1. Update id_verification row
                         await supabase
                             .from('id_verification')
                             .update({
-                                ai_is_valid: isApproved,
+                                ai_is_valid: appearsValid,
                                 ai_confidence_score: confidence,
                                 ai_insight: parsed.ai_insight || 'AI analysis completed.',
-                                status: finalStatus,
+                                status: 'pending',
                             })
-                            .eq('id_verification_id', capturedVerId);
+                            .eq('id_verification_id', capturedVerId)
+                            .eq('status', 'pending');
 
-                        // 2. Update profile and insert ONE final result notification
-                        if (isApproved) {
-                            await supabase
-                                .from('profiles')
-                                .update({ is_verified: true })
-                                .eq('id', userId);
-                            await AsyncStorage.setItem('identity_verified', 'true');
-
-                            // Insert once — realtime listener in notification-banner will auto-pop the banner
-                            await supabase.from('notifications').insert({
-                                user_id: userId,
-                                title: '✅ ID Verification Complete',
-                                message: 'Your identity has been successfully verified. You can now submit flood incident reports.',
-                                type: 'Updates',
-                                is_read: false,
-                                target_role: 'user',
-                                created_at: new Date().toISOString(),
-                            });
-                        } else {
-                            await supabase
-                                .from('profiles')
-                                .update({ is_verified: false })
-                                .eq('id', userId);
-                            await AsyncStorage.removeItem('identity_verified');
-
-                            // Insert once — realtime listener in notification-banner will auto-pop the banner
-                            await supabase.from('notifications').insert({
-                                user_id: userId,
-                                title: '❌ ID Verification Failed',
-                                message: 'Your ID could not be verified. Please make sure your ID is clear, all details are readable, and try again.',
-                                type: 'Updates',
-                                is_read: false,
-                                target_role: 'user',
-                                created_at: new Date().toISOString(),
-                            });
-                        }
-                        console.log(`✅ Direct AI Validation done: ${finalStatus} (${confidence}%)`);
+                        console.log(`AI ID assessment saved for admin review (${confidence}%)`);
                     } catch (aiErr: any) {
                         console.warn('⚠️ Direct AI error, falling back to manual review:', aiErr.message);
                         await supabase
@@ -320,7 +274,8 @@ Respond ONLY in this exact JSON format with no other text:
                                 ai_insight: 'AI validation unavailable. Pending manual review.',
                                 status: 'pending',
                             })
-                            .eq('id_verification_id', capturedVerId);
+                            .eq('id_verification_id', capturedVerId)
+                            .eq('status', 'pending');
                     }
                 };
 
@@ -453,7 +408,7 @@ Respond ONLY in this exact JSON format with no other text:
                 >
                     {submitting
                         ? <ActivityIndicator color="#FFFFFF" />
-                        : <Text style={styles.submitButtonText}>Verify & Submit</Text>
+                        : <Text style={styles.submitButtonText}>Submit for Review</Text>
                     }
                 </TouchableOpacity>
 

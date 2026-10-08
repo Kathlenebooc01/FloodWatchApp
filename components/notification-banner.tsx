@@ -3,12 +3,11 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     Animated,
-    Modal,
+    PanResponder,
     Platform,
-    StatusBar,
     StyleSheet,
     Text,
     TouchableOpacity,
@@ -102,50 +101,56 @@ export default function NotificationBanner() {
     const translateY = useRef(new Animated.Value(-300)).current;
     const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const shownIds = useRef<Set<string>>(new Set());
+    const currentBanner = useRef<BannerNotif | null>(null);
+    const bannerQueue = useRef<BannerNotif[]>([]);
+    const dismissing = useRef(false);
+    const suppressPress = useRef(false);
+    const dragOrigin = useRef(0);
     const userId = useRef<string | null>(null);
     const targetRole = useRef<string>('user');
     // Track the timestamp when we started watching — only pop banners NEWER than this
     const watchSince = useRef<string>(new Date().toISOString());
-    const lastTitleTimes = useRef<{ [key: string]: number }>({});
 
     const hideBanner = useCallback(() => {
+        if (dismissing.current || !currentBanner.current) return;
+        dismissing.current = true;
         if (hideTimer.current) {
             clearTimeout(hideTimer.current);
             hideTimer.current = null;
         }
         Animated.timing(translateY, {
             toValue: -300,
-            duration: 280,
+            duration: 240,
             useNativeDriver: true,
         }).start(() => {
-            setModalVisible(false);
-            setBanner(null);
+            dismissing.current = false;
+            const next = bannerQueue.current.shift() || null;
+            currentBanner.current = next;
+            if (next) {
+                translateY.setValue(-300);
+                setBanner(next);
+            } else {
+                setModalVisible(false);
+                setBanner(null);
+            }
         });
     }, [translateY]);
 
+    const scheduleAutoHide = useCallback((delay = 7000) => {
+        if (hideTimer.current) clearTimeout(hideTimer.current);
+        hideTimer.current = setTimeout(hideBanner, delay);
+    }, [hideBanner]);
+
     const showBanner = useCallback((notif: BannerNotif, force: boolean = false) => {
         if (!notif) return;
-        if (!force && shownIds.current.has(notif.id)) return;
-
-        // Deduplicate by normalized title within 12 seconds so multiple simultaneous triggers
-        // (e.g. notifications insert + id_verification update + profiles update) only pop up once
-        const normTitle = (notif.title || '').replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '').trim().toLowerCase();
-        const now = Date.now();
-        if (normTitle && lastTitleTimes.current[normTitle] && (now - lastTitleTimes.current[normTitle] < 12000)) {
-            console.log('🔇 Suppressed duplicate banner for title:', normTitle);
-            return;
-        }
-        if (normTitle) {
-            lastTitleTimes.current[normTitle] = now;
-        }
+        if (shownIds.current.has(notif.id)) return;
 
         shownIds.current.add(notif.id);
-
-        if (hideTimer.current) {
-            clearTimeout(hideTimer.current);
-            hideTimer.current = null;
+        if (currentBanner.current) {
+            bannerQueue.current.push(notif);
+            return;
         }
-
+        currentBanner.current = notif;
         setBanner(notif);
         translateY.setValue(-300);
         setModalVisible(true);
@@ -166,11 +171,32 @@ export default function NotificationBanner() {
             useNativeDriver: true,
         }).start();
 
-        if (hideTimer.current) clearTimeout(hideTimer.current);
-        hideTimer.current = setTimeout(() => {
-            hideBanner();
-        }, 7000);
+        scheduleAutoHide();
     }, [banner]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    const panResponder = useMemo(() => PanResponder.create({
+        onMoveShouldSetPanResponder: (_event, gesture) => gesture.dy < -5 && Math.abs(gesture.dy) > Math.abs(gesture.dx),
+        onPanResponderGrant: () => {
+            suppressPress.current = true;
+            translateY.stopAnimation(value => { dragOrigin.current = value; });
+            if (hideTimer.current) clearTimeout(hideTimer.current);
+        },
+        onPanResponderMove: (_event, gesture) => translateY.setValue(Math.min(0, dragOrigin.current + gesture.dy)),
+        onPanResponderRelease: (_event, gesture) => {
+            if (gesture.dy < -60 || gesture.vy < -0.8) {
+                hideBanner();
+            } else {
+                Animated.spring(translateY, { toValue: 0, tension: 100, friction: 10, useNativeDriver: true }).start();
+                scheduleAutoHide(4000);
+            }
+            setTimeout(() => { suppressPress.current = false; }, 200);
+        },
+        onPanResponderTerminate: () => {
+            Animated.spring(translateY, { toValue: 0, tension: 100, friction: 10, useNativeDriver: true }).start();
+            scheduleAutoHide(4000);
+            setTimeout(() => { suppressPress.current = false; }, 200);
+        },
+    }), [hideBanner, scheduleAutoHide, translateY]);
 
     // Register global trigger listener & flush pending queue
     useEffect(() => {
@@ -185,31 +211,6 @@ export default function NotificationBanner() {
         return () => {
             globalBannerListener = null;
         };
-    }, [showBanner]);
-
-    const handleVerificationStatusChange = useCallback((rawStatus: string, verId?: string) => {
-        const s = (rawStatus || '').toLowerCase().trim();
-        // Use a stable key so same status+verId never pops twice
-        const bannerKey = `ver_${verId || 'curr'}_${s}`;
-        if (shownIds.current.has(bannerKey)) return; // deduplicated
-        shownIds.current.add(bannerKey);
-
-        if (s === 'approved' || s === 'verified') {
-            showBanner({
-                id: bannerKey,
-                title: '\u2705 ID Verification Complete',
-                message: 'Your identity has been successfully verified. You can now submit flood incident reports.',
-                type: 'Updates',
-            });
-        } else if (s === 'rejected' || s === 'declined' || s === 'failed') {
-            showBanner({
-                id: bannerKey,
-                title: '\u274c ID Verification Failed',
-                message: 'Your ID could not be verified. Please make sure your ID photo is clear and try again.',
-                type: 'Updates',
-            });
-        }
-        // Note: 'pending' is shown via triggerNotificationBanner in identify.tsx only — not repeated here
     }, [showBanner]);
 
     // Fallback poll: ONLY fires for notifications created after this session started.
@@ -247,8 +248,6 @@ export default function NotificationBanner() {
 
     useEffect(() => {
         let channel: any = null;
-        let verifyChannel: any = null;
-        let profileChannel: any = null;
         let incidentChannel: any = null;
         let lguChannel: any = null;
         let pollInterval: ReturnType<typeof setInterval> | null = null;
@@ -257,8 +256,6 @@ export default function NotificationBanner() {
 
         const cleanupSubs = () => {
             if (channel) { supabase.removeChannel(channel); channel = null; }
-            if (verifyChannel) { supabase.removeChannel(verifyChannel); verifyChannel = null; }
-            if (profileChannel) { supabase.removeChannel(profileChannel); profileChannel = null; }
             if (incidentChannel) { supabase.removeChannel(incidentChannel); incidentChannel = null; }
             if (lguChannel) { supabase.removeChannel(lguChannel); lguChannel = null; }
             if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
@@ -431,45 +428,6 @@ export default function NotificationBanner() {
                 })
                 .subscribe();
 
-            // === Real-time: id_verification ===
-            verifyChannel = supabase
-                .channel(`banner-verify-${uid}-${ts}`)
-                .on('postgres_changes' as any, {
-                    event: '*',
-                    schema: 'public',
-                    table: 'id_verification',
-                }, (payload: any) => {
-                    const row = payload.new;
-                    if (row && row.user_id === uid) {
-                        handleVerificationStatusChange(row.status, row.id_verification_id);
-                    }
-                })
-                .subscribe();
-
-            // === Real-time: profiles — deduped via shownIds ===
-            profileChannel = supabase
-                .channel(`banner-profiles-${uid}-${ts}`)
-                .on('postgres_changes' as any, {
-                    event: 'UPDATE',
-                    schema: 'public',
-                    table: 'profiles',
-                }, (payload: any) => {
-                    const row = payload.new;
-                    if (row && row.id === uid && row.is_verified === true) {
-                        const key = `profile-verified-${uid}`;
-                        if (!shownIds.current.has(key)) {
-                            shownIds.current.add(key);
-                            showBanner({
-                                id: key,
-                                title: '\u2705 ID Verification Complete',
-                                message: 'Your identity has been successfully verified. You can now submit flood incident reports.',
-                                type: 'Updates',
-                            });
-                        }
-                    }
-                })
-                .subscribe();
-
             // === Real-time: incident_report ===
             incidentChannel = supabase
                 .channel(`banner-incidents-${uid}-${ts}`)
@@ -523,32 +481,27 @@ export default function NotificationBanner() {
             cleanupSubs();
             if (hideTimer.current) clearTimeout(hideTimer.current);
         };
-    }, [showBanner, poll, handleVerificationStatusChange]);
+    }, [showBanner, poll]);
 
     const style = getBannerStyle(banner?.title || '', banner?.type || '');
-    const TOP = Platform.OS === 'ios' ? 54 : (StatusBar.currentHeight || 24) + 10;
+    const TOP = Platform.OS === 'ios' ? 54 : 10;
 
+    if (!modalVisible) return null;
     return (
-        <Modal
-            visible={modalVisible}
-            transparent
-            animationType="none"
-            statusBarTranslucent
-            onRequestClose={hideBanner}
-        >
             <View style={styles.overlay} pointerEvents="box-none">
                 <Animated.View
                     style={[
                         styles.container,
                         { top: TOP, transform: [{ translateY }] },
                     ]}
-                    pointerEvents="box-none"
+                    {...panResponder.panHandlers}
                 >
                     {banner && (
                         <TouchableOpacity
                             style={[styles.card, { borderLeftColor: style.accent }]}
                             activeOpacity={0.95}
                             onPress={() => {
+                                if (suppressPress.current) return;
                                 hideBanner();
                                 router.push('/notifications' as any);
                             }}
@@ -565,24 +518,20 @@ export default function NotificationBanner() {
                                 <Text style={styles.message} numberOfLines={2}>{banner.message}</Text>
                             </View>
 
-                            <TouchableOpacity
-                                style={styles.closeBtn}
-                                onPress={hideBanner}
-                                hitSlop={{ top: 14, bottom: 14, left: 14, right: 14 }}
-                            >
-                                <Ionicons name="close" size={20} color="#94A3B8" />
-                            </TouchableOpacity>
                         </TouchableOpacity>
                     )}
                 </Animated.View>
             </View>
-        </Modal>
     );
 }
 
 const styles = StyleSheet.create({
     overlay: {
-        flex: 1,
+        position: 'absolute',
+        top: 0,
+        bottom: 0,
+        left: 0,
+        right: 0,
         backgroundColor: 'transparent',
     },
     container: {
@@ -641,10 +590,5 @@ const styles = StyleSheet.create({
         color:      '#475569',
         marginTop:  2,
         lineHeight: 16,
-    },
-    closeBtn: {
-        padding:    6,
-        marginLeft: 8,
-        flexShrink: 0,
     },
 });

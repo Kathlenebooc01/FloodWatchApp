@@ -54,10 +54,6 @@ export default function Dashboard() {
     const [showNeedVerify, setShowNeedVerify]     = useState(false);
     const [showOngoing, setShowOngoing]           = useState(false);
     const [userRole, setUserRole]                 = useState<string>('citizen'); // default, will be overridden
-    const [showMuniModal, setShowMuniModal]       = useState(false);
-    const [munisList, setMunisList]               = useState<{id: string, name: string}[]>([]);
-    const [selectedMuni, setSelectedMuni]         = useState('');
-    const [muniSaving, setMuniSaving]             = useState(false);
     const [refreshing, setRefreshing]             = useState(false);
 
     // Function to fetch risk status using OpenWeatherMap (real radar + station data)
@@ -293,13 +289,6 @@ export default function Dashboard() {
                     if (existing.role) setUserRole(existing.role.toLowerCase());
                     console.log('✅ Profile already exists, skipping save');
                     
-                    if ((existing.role === 'lgu_headmaster' || existing.role === 'admin') && !existing.municipality_id) {
-                        const { data: munis } = await supabase.from('municipality_or_city').select('municipality_id, name').order('name');
-                        if (munis) {
-                            setMunisList(munis.map((m: any) => ({ id: m.municipality_id, name: m.name })));
-                            setShowMuniModal(true);
-                        }
-                    }
                     return;
                 }
 
@@ -513,23 +502,6 @@ export default function Dashboard() {
             return { icon: 'weather-fog', name: 'weather-fog' };
         } else {
             return { icon: 'weather-cloudy-clock', name: 'weather-cloudy-clock' };
-        }
-    };
-
-    const handleSaveMunicipality = async () => {
-        if (!selectedMuni) return;
-        setMuniSaving(true);
-        try {
-            const { data: { user } } = await supabase.auth.getUser();
-            if (user) {
-                const { error } = await supabase.from('profiles').update({ municipality_id: selectedMuni }).eq('id', user.id);
-                if (error) throw error;
-                setShowMuniModal(false);
-            }
-        } catch (e: any) {
-            console.error("Failed to save municipality:", e);
-        } finally {
-            setMuniSaving(false);
         }
     };
 
@@ -779,10 +751,10 @@ export default function Dashboard() {
                             <Ionicons name="time-outline" size={36} color="#D97706" />
                         </View>
                         <Text style={{ fontSize: 20, fontWeight: '800', color: '#1E293B', marginBottom: 10, textAlign: 'center' }}>
-                            Verification Ongoing
+                            Pending PDRRMO Approval
                         </Text>
                         <Text style={{ fontSize: 14, color: '#64748B', textAlign: 'center', lineHeight: 22, marginBottom: 28 }}>
-                            Your identity verification is currently being processed. You will be notified once it is completed.
+                            Your ID is pending PDRRMO approval. You will be notified once your verification has been reviewed.
                         </Text>
                         <TouchableOpacity
                             style={{ backgroundColor: '#D97706', width: '100%', height: 52, borderRadius: 14, justifyContent: 'center', alignItems: 'center' }}
@@ -793,63 +765,7 @@ export default function Dashboard() {
                     </View>
                 </View>
             </Modal>
-            <Modal
-                visible={showMuniModal}
-                transparent
-                animationType="fade"
-            >
-                <View style={{ flex: 1, backgroundColor: 'rgba(15, 23, 42, 0.7)', justifyContent: 'center', alignItems: 'center' }}>
-                    <View style={{ width: '85%', backgroundColor: '#FFFFFF', borderRadius: 24, padding: 24 }}>
-                        <View style={{ width: 60, height: 60, borderRadius: 30, backgroundColor: '#EFF6FF', justifyContent: 'center', alignItems: 'center', alignSelf: 'center', marginBottom: 16 }}>
-                            <Ionicons name="business" size={28} color="#2563EB" />
-                        </View>
-                        <Text style={{ fontSize: 20, fontWeight: '800', color: '#1E293B', marginBottom: 8, textAlign: 'center' }}>Select Your Municipality</Text>
-                        <Text style={{ fontSize: 14, color: '#64748B', textAlign: 'center', marginBottom: 20, lineHeight: 20 }}>
-                            Please link your LGU account to a specific municipality to continue using the dashboard.
-                        </Text>
-                        <ScrollView style={{ maxHeight: 220, marginBottom: 20 }} showsVerticalScrollIndicator={false}>
-                            {munisList.map(m => (
-                                <TouchableOpacity
-                                    key={m.id}
-                                    style={{
-                                        padding: 16,
-                                        borderRadius: 12,
-                                        marginBottom: 8,
-                                        backgroundColor: selectedMuni === m.id ? '#EFF6FF' : '#F8FAFC',
-                                        borderWidth: 2,
-                                        borderColor: selectedMuni === m.id ? '#2563EB' : '#F1F5F9'
-                                    }}
-                                    onPress={() => setSelectedMuni(m.id)}
-                                    activeOpacity={0.7}
-                                >
-                                    <Text style={{
-                                        fontSize: 16,
-                                        fontWeight: selectedMuni === m.id ? '700' : '500',
-                                        color: selectedMuni === m.id ? '#2563EB' : '#334155'
-                                    }}>{m.name}</Text>
-                                </TouchableOpacity>
-                            ))}
-                        </ScrollView>
-                        <TouchableOpacity
-                            style={{
-                                backgroundColor: selectedMuni ? '#2563EB' : '#CBD5E1',
-                                paddingVertical: 16,
-                                borderRadius: 16,
-                                alignItems: 'center'
-                            }}
-                            disabled={!selectedMuni || muniSaving}
-                            onPress={handleSaveMunicipality}
-                            activeOpacity={0.8}
-                        >
-                            {muniSaving ? (
-                                <ActivityIndicator color="#FFFFFF" />
-                            ) : (
-                                <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '700' }}>Confirm Selection</Text>
-                            )}
-                        </TouchableOpacity>
-                    </View>
-                </View>
-            </Modal>
+
         </SafeAreaView>
     );
 }

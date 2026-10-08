@@ -110,7 +110,7 @@ export default function VerificationTableModal({ data, onClose }) {
                 <CardBasedText className="text-xs text-gray-500 mb-1">Status</CardBasedText>
                 {isLoading ? <div className="w-20 mt-1"><SingleLineSkeleton /></div> : (
                   <div className={`font-semibold text-sm ${data.status.toLowerCase() === 'verified' || data.status.toLowerCase() === 'approved' ? 'text-green-500' : data.status.toLowerCase() === 'pending' ? 'text-amber-500' : 'text-red-500'}`}>
-                    {data.status ? data.status.charAt(0).toUpperCase() + data.status.slice(1) : ''}
+                    {data.status === 'pending' ? 'Pending PDRRMO Approval' : data.status ? data.status.charAt(0).toUpperCase() + data.status.slice(1) : ''}
                   </div>
                 )}
               </div>

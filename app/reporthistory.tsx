@@ -1,8 +1,8 @@
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView, TextInput, Image, ActivityIndicator, KeyboardAvoidingView, Platform, Alert, Modal, Animated, Dimensions, StatusBar, Switch, FlatList, RefreshControl, Linking } from 'react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { AppState, View, Text, StyleSheet, TouchableOpacity, ScrollView, Image, ActivityIndicator, Platform, Modal, StatusBar, FlatList, RefreshControl } from 'react-native';
 
 import { supabase } from '@/utils/supabase';
 
@@ -14,6 +14,49 @@ interface Report {
     status: string;
     created_at: string;
     municipality_id: string | null;
+    specific_location_id: string | null;
+    report_type: string | null;
+    latitude: number | null;
+    longitude: number | null;
+    updated_at: string | null;
+}
+
+const REPORT_FIELDS = 'report_id, user_id, hazard_type, description, image_url, status, created_at, updated_at, municipality_id, specific_location_id, report_type, latitude, longitude';
+
+function reportPhotos(imageUrl: string | null): string[] {
+    if (!imageUrl) return [];
+    // The current submission flow stores one URL. Accept a JSON array if older data has several.
+    try {
+        const parsed = JSON.parse(imageUrl);
+        if (Array.isArray(parsed)) return parsed.filter((url): url is string => typeof url === 'string' && /^https?:\/\//.test(url));
+    } catch {}
+    return /^https?:\/\//.test(imageUrl) ? [imageUrl] : [];
+}
+
+function reportedLocation(description: string): string | null {
+    const locationLine = description?.match(/^Location:\s*(.+)$/im)?.[1]?.trim();
+    const quickSnapLocation = description?.match(/Quick snap report from (.+)$/im)?.[1]?.trim();
+    return locationLine || quickSnapLocation || null;
+}
+
+function descriptionNarrative(description: string): string {
+    const structured = description?.match(/(?:^|\n)(?:Observations|Inquiry):\s*([\s\S]*?)(?=\n\s*Location:|$)/i)?.[1]?.trim();
+    return structured || description?.trim() || 'No description provided.';
+}
+
+function displayReportType(reportType: string | null): string {
+    if (!reportType) return 'Incident Report';
+    return reportType.replace(/_/g, ' ').replace(/\b\w/g, letter => letter.toUpperCase());
+}
+
+function displayReportDescription(description: string | null): string {
+    if (!description) return 'No description';
+    return description.replace(/^\[(MODERATE REPORT|GENERAL INQUIRY|QUICK SNAP REPORT)\]/i, heading =>
+        heading.slice(1, -1).toLowerCase().replace(/\b\w/g, letter => letter.toUpperCase()));
+}
+
+function isPendingStatus(status: string): boolean {
+    return status?.toLowerCase().includes('pending') ?? false;
 }
 
 function getStatusStyle(status: string) {
@@ -65,47 +108,56 @@ export default function ReportHistoryScreen() {
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
     const [filter, setFilter] = useState<'all' | 'pending' | 'verified' | 'resolved' | 'rejected'>('all');
+    const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
+    const [expandedPhoto, setExpandedPhoto] = useState<string | null>(null);
+    const [locationName, setLocationName] = useState<string | null>(null);
+    const [failedPhotoUrls, setFailedPhotoUrls] = useState<string[]>([]);
+    const userIdRef = useRef<string | null>(null);
+    const mountedRef = useRef(true);
+    const selectedReport = reports.find(report => report.report_id === selectedReportId);
 
-    const fetchReports = async () => {
+    const fetchReports = useCallback(async (userId?: string) => {
         try {
-            const { data: sessionData } = await supabase.auth.getSession();
-            const userId = sessionData?.session?.user?.id;
+            const uid = userId || userIdRef.current;
 
-            if (!userId) {
-                setLoading(false);
-                return;
-            }
+            if (!uid) return;
 
             const { data, error } = await supabase
                 .from('incident_report')
-                .select('report_id, hazard_type, description, image_url, status, created_at, municipality_id')
-                .eq('user_id', userId)
+                .select(REPORT_FIELDS)
+                .eq('user_id', uid)
                 .order('created_at', { ascending: false });
 
             if (error) {
                 console.error('❌ Failed to fetch reports:', error);
             } else {
-                setReports(data || []);
+                if (mountedRef.current && userIdRef.current === uid) setReports((data || []) as Report[]);
                 console.log('✅ Reports fetched:', data?.length);
             }
         } catch (err) {
             console.error('❌ Error fetching reports:', err);
         } finally {
-            setLoading(false);
-            setRefreshing(false);
+            if (mountedRef.current) {
+                setLoading(false);
+                setRefreshing(false);
+            }
         }
-    };
+    }, []);
 
     useEffect(() => {
-        fetchReports();
-
-        // ── Real-time subscription - auto update when report status changes ──
+        mountedRef.current = true;
+        let disposed = false;
+        let channel: ReturnType<typeof supabase.channel> | null = null;
         const setupSubscription = async () => {
             const { data: sessionData } = await supabase.auth.getSession();
             const userId = sessionData?.session?.user?.id;
-            if (!userId) return null;
+            if (disposed) return;
+            if (!userId) { setLoading(false); return; }
+            userIdRef.current = userId;
+            await fetchReports(userId);
+            if (disposed) return;
 
-            const channel = supabase
+            channel = supabase
                 .channel(`report-history-${userId}-${Date.now()}`) // Unique channel name
                 .on(
                     'postgres_changes',
@@ -115,32 +167,70 @@ export default function ReportHistoryScreen() {
                         table: 'incident_report',
                         filter: `user_id=eq.${userId}`,
                     },
-                    (payload) => {
-                        console.log('🔄 Report updated in real-time:', payload);
-                        fetchReports(); // Re-fetch all reports when any change happens
+                    async (payload) => {
+                        if (disposed) return;
+                        const reportId = ((payload.new as any)?.report_id || (payload.old as any)?.report_id) as string | undefined;
+                        if (!reportId) { fetchReports(userId); return; }
+                        if (payload.eventType === 'DELETE') {
+                            setReports(current => current.filter(report => report.report_id !== reportId));
+                            return;
+                        }
+                        if (payload.eventType === 'UPDATE') {
+                            const changed = payload.new as Partial<Report>;
+                            setReports(current => current.map(report => report.report_id === reportId
+                                ? { ...report, status: changed.status ?? report.status, updated_at: changed.updated_at ?? report.updated_at }
+                                : report));
+                        }
+                        const { data, error } = await supabase.from('incident_report')
+                            .select(REPORT_FIELDS).eq('report_id', reportId).eq('user_id', userId).maybeSingle();
+                        if (disposed || error || !data) return;
+                        setReports(current => [data as Report, ...current.filter(report => report.report_id !== reportId)]
+                            .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at)));
                     }
                 )
-                .subscribe();
-
-            console.log('✅ Real-time subscription active for report history');
-            return channel;
+                .subscribe(status => {
+                    if (!disposed && status === 'SUBSCRIBED') fetchReports(userId);
+                });
         };
 
-        let channelPromise = setupSubscription();
+        setupSubscription();
+        const appState = AppState.addEventListener('change', state => {
+            if (state === 'active') fetchReports();
+        });
 
         return () => {
-            channelPromise.then(channel => {
-                if (channel) {
-                    supabase.removeChannel(channel);
-                }
-            });
+            disposed = true;
+            mountedRef.current = false;
+            userIdRef.current = null;
+            appState.remove();
+            if (channel) supabase.removeChannel(channel);
         };
-    }, []);
+    }, [fetchReports]);
 
     const onRefresh = () => {
         setRefreshing(true);
         fetchReports();
     };
+
+    useEffect(() => {
+        let cancelled = false;
+        setLocationName(null);
+        if (!selectedReport) return;
+        const report = selectedReport;
+        const loadLocation = async () => {
+            const [municipality, specific] = await Promise.all([
+                report.municipality_id
+                    ? supabase.from('municipality_or_city').select('name').eq('municipality_id', report.municipality_id).maybeSingle()
+                    : Promise.resolve({ data: null }),
+                report.specific_location_id
+                    ? supabase.from('specific_locations').select('name').eq('location_id', report.specific_location_id).maybeSingle()
+                    : Promise.resolve({ data: null }),
+            ]);
+            if (!cancelled) setLocationName([specific.data?.name, municipality.data?.name].filter(Boolean).join(', ') || null);
+        };
+        loadLocation();
+        return () => { cancelled = true; };
+    }, [selectedReportId, selectedReport?.municipality_id, selectedReport?.specific_location_id]);
 
     const filteredReports = reports.filter(r => {
         if (filter === 'all') return true;
@@ -156,10 +246,10 @@ export default function ReportHistoryScreen() {
         const statusIcon = getStatusIcon(item.status);
 
         return (
-            <View style={styles.historyCard}>
+            <TouchableOpacity style={styles.historyCard} onPress={() => setSelectedReportId(item.report_id)} activeOpacity={0.8} accessibilityRole="button" accessibilityLabel={`View report ${item.report_id}`}>
                 {/* Image or placeholder */}
-                {item.image_url ? (
-                    <Image source={{ uri: item.image_url }} style={styles.cardImage} />
+                {reportPhotos(item.image_url).length > 0 ? (
+                    <Image source={{ uri: reportPhotos(item.image_url)[0] }} style={styles.cardImage} />
                 ) : (
                     <View style={[styles.cardImage, styles.cardImagePlaceholder]}>
                         <Ionicons name="image-outline" size={28} color="#CBD5E1" />
@@ -182,7 +272,7 @@ export default function ReportHistoryScreen() {
 
                     {/* Description */}
                     <Text style={styles.cardDesc} numberOfLines={2}>
-                        {item.description || 'No description'}
+                        {displayReportDescription(item.description)}
                     </Text>
 
                     {/* Time */}
@@ -190,8 +280,9 @@ export default function ReportHistoryScreen() {
                         <Ionicons name="time-outline" size={13} color="#94A3B8" />
                         <Text style={styles.cardTime}>{formatDate(item.created_at)}</Text>
                     </View>
+                    {!isPendingStatus(item.status) && <Text style={styles.cardTime}>Updated {formatDate(item.updated_at || item.created_at)}</Text>}
                 </View>
-            </View>
+            </TouchableOpacity>
         );
     };
 
@@ -271,6 +362,103 @@ export default function ReportHistoryScreen() {
                     }
                 />
             )}
+
+            <Modal visible={!!selectedReport} animationType="slide" onRequestClose={() => setSelectedReportId(null)}>
+                <SafeAreaView style={styles.detailScreen}>
+                    <View style={styles.detailHeader}>
+                        <TouchableOpacity style={styles.detailBackButton} onPress={() => setSelectedReportId(null)} accessibilityLabel="Close report details">
+                            <Ionicons name="arrow-back" size={22} color="#1E293B" />
+                        </TouchableOpacity>
+                        <View style={styles.detailHeaderText}>
+                            <Text style={styles.detailEyebrow}>CITIZEN REPORT</Text>
+                            <Text style={styles.detailTitle}>Report Details</Text>
+                        </View>
+                        <View style={styles.detailHeaderIcon}><Ionicons name="document-text-outline" size={22} color="#2563EB" /></View>
+                    </View>
+                    {selectedReport && (
+                        <ScrollView contentContainerStyle={styles.detailContent} showsVerticalScrollIndicator={false}>
+                            <View style={styles.detailHero}>
+                                <View style={styles.detailHeroTop}>
+                                    <View style={styles.detailHeroIcon}><Ionicons name="water-outline" size={27} color="#FFFFFF" /></View>
+                                    <View style={styles.detailHeroPill}><Text style={styles.detailHeroPillText}>FLOODWATCH CEBU</Text></View>
+                                </View>
+                                <Text style={styles.detailHeroCaption}>REPORT OVERVIEW</Text>
+                                <Text style={styles.detailHeroTitle}>{selectedReport.hazard_type || 'Incident Report'}</Text>
+                                <Text style={styles.detailHeroReference} numberOfLines={1}>REF  {selectedReport.report_id}</Text>
+                            </View>
+
+                            <View style={styles.detailStatusCard}>
+                                <View style={[styles.detailStatusIcon, { backgroundColor: getStatusStyle(selectedReport.status).bg }]}>
+                                    <Ionicons name={getStatusIcon(selectedReport.status) as any} size={23} color={getStatusStyle(selectedReport.status).text} />
+                                </View>
+                                <View style={styles.detailStatusCopy}>
+                                    <Text style={styles.detailSmallLabel}>CURRENT STATUS</Text>
+                                    <Text style={[styles.detailStatusText, { color: getStatusStyle(selectedReport.status).text }]}>{getStatusStyle(selectedReport.status).label}</Text>
+                                </View>
+                                <Ionicons name="radio-button-on" size={16} color={getStatusStyle(selectedReport.status).text} />
+                            </View>
+
+                            <Text style={styles.detailSectionTitle}>Report information</Text>
+                            <View style={styles.detailInfoCard}>
+                                <View style={styles.detailInfoRow}>
+                                    <View style={styles.detailInfoIcon}><Ionicons name="pricetag-outline" size={19} color="#2563EB" /></View>
+                                    <View style={styles.detailInfoCopy}><Text style={styles.detailSmallLabel}>REPORT TYPE / CATEGORY</Text><Text style={styles.detailInfoValue}>{displayReportType(selectedReport.report_type)} / {selectedReport.hazard_type || 'Unspecified'}</Text></View>
+                                </View>
+                                <View style={styles.detailDivider} />
+                                <View style={styles.detailInfoRow}>
+                                    <View style={styles.detailInfoIcon}><Ionicons name="location-outline" size={20} color="#2563EB" /></View>
+                                    <View style={styles.detailInfoCopy}><Text style={styles.detailSmallLabel}>REPORTED LOCATION</Text><Text style={styles.detailInfoValue}>{reportedLocation(selectedReport.description) || locationName || (selectedReport.latitude != null && selectedReport.longitude != null
+                                        ? `${selectedReport.latitude}, ${selectedReport.longitude}` : 'Location not provided')}</Text></View>
+                                </View>
+                                <View style={styles.detailDivider} />
+                                <View style={styles.detailInfoRow}>
+                                    <View style={styles.detailInfoIcon}><Ionicons name="calendar-outline" size={20} color="#2563EB" /></View>
+                                    <View style={styles.detailInfoCopy}><Text style={styles.detailSmallLabel}>SUBMITTED</Text><Text style={styles.detailInfoValue}>{new Date(selectedReport.created_at).toLocaleString('en-PH')}</Text></View>
+                                </View>
+                                {!isPendingStatus(selectedReport.status) && <>
+                                    <View style={styles.detailDivider} />
+                                    <View style={styles.detailInfoRow}>
+                                        <View style={styles.detailInfoIcon}><Ionicons name="time-outline" size={20} color="#2563EB" /></View>
+                                        <View style={styles.detailInfoCopy}><Text style={styles.detailSmallLabel}>LAST UPDATED</Text><Text style={styles.detailInfoValue}>{new Date(selectedReport.updated_at || selectedReport.created_at).toLocaleString('en-PH')}</Text></View>
+                                    </View>
+                                </>}
+                            </View>
+
+                            <Text style={styles.detailSectionTitle}>Description</Text>
+                            <View style={styles.detailDescriptionCard}>
+                                <View style={styles.detailDescriptionHeader}>
+                                    <View style={styles.detailDescriptionIcon}><Ionicons name="reader-outline" size={20} color="#1D4ED8" /></View>
+                                    <View>
+                                        <Text style={styles.detailDescriptionEyebrow}>REPORT NARRATIVE</Text>
+                                        <Text style={styles.detailDescriptionHeading}>What happened</Text>
+                                    </View>
+                                </View>
+                                <View style={styles.detailDescriptionBody}>
+                                    <Text style={styles.detailDescriptionText}>{descriptionNarrative(selectedReport.description)}</Text>
+                                </View>
+                            </View>
+
+                            <View style={styles.detailSectionRow}><Text style={styles.detailSectionTitle}>Uploaded photos</Text><Text style={styles.detailPhotoCount}>{reportPhotos(selectedReport.image_url).length} PHOTO{reportPhotos(selectedReport.image_url).length === 1 ? '' : 'S'}</Text></View>
+                            {reportPhotos(selectedReport.image_url).length ? reportPhotos(selectedReport.image_url).map((url, index) => (
+                                failedPhotoUrls.includes(url)
+                                    ? <View key={`${url}-${index}`} style={styles.detailEmptyPhoto}><Ionicons name="image-outline" size={27} color="#94A3B8" /><Text style={styles.detailEmptyPhotoText}>Photo {index + 1} is unavailable.</Text></View>
+                                    : <TouchableOpacity key={`${url}-${index}`} style={styles.detailPhotoCard} onPress={() => setExpandedPhoto(url)} accessibilityLabel={`View photo ${index + 1} larger`}>
+                                        <Image source={{ uri: url }} style={styles.detailPhoto} resizeMode="cover" onError={() => setFailedPhotoUrls(current => [...current, url])} />
+                                        <View style={styles.detailPhotoFooter}><Text style={styles.detailPhotoFooterText}>Photo {index + 1}</Text><View style={styles.detailExpand}><Ionicons name="expand-outline" size={16} color="#2563EB" /><Text style={styles.detailExpandText}>View full size</Text></View></View>
+                                    </TouchableOpacity>
+                            )) : <View style={styles.detailEmptyPhoto}><Ionicons name="images-outline" size={30} color="#94A3B8" /><Text style={styles.detailEmptyPhotoText}>No uploaded photos for this report.</Text></View>}
+                        </ScrollView>
+                    )}
+                </SafeAreaView>
+            </Modal>
+            <Modal visible={!!expandedPhoto} transparent onRequestClose={() => setExpandedPhoto(null)}>
+                <View style={styles.photoOverlay}>
+                    <TouchableOpacity style={styles.photoClose} onPress={() => setExpandedPhoto(null)} accessibilityLabel="Close photo">
+                        <Ionicons name="close" size={30} color="#FFFFFF" />
+                    </TouchableOpacity>
+                    {expandedPhoto && <Image source={{ uri: expandedPhoto }} style={styles.expandedPhoto} resizeMode="contain" />}
+                </View>
+            </Modal>
         </SafeAreaView>
     );
 }
@@ -377,4 +565,52 @@ const styles = StyleSheet.create({
         marginTop: 20,
         letterSpacing: 1,
     },
+    detailScreen: { flex: 1, backgroundColor: '#F5F8FC' },
+    detailHeader: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 14, gap: 13, backgroundColor: '#FFFFFF', borderBottomWidth: 1, borderBottomColor: '#E8EEF5' },
+    detailBackButton: { width: 42, height: 42, borderRadius: 14, backgroundColor: '#F1F5F9', alignItems: 'center', justifyContent: 'center' },
+    detailHeaderText: { flex: 1 },
+    detailEyebrow: { color: '#94A3B8', fontSize: 9, fontWeight: '800', letterSpacing: 1.8, marginBottom: 2 },
+    detailTitle: { fontSize: 19, fontWeight: '800', color: '#14233B' },
+    detailHeaderIcon: { width: 40, height: 40, borderRadius: 13, backgroundColor: '#EAF2FF', alignItems: 'center', justifyContent: 'center' },
+    detailContent: { padding: 18, paddingBottom: 48 },
+    detailHero: { minHeight: 182, padding: 20, borderRadius: 23, backgroundColor: '#1D4ED8', overflow: 'hidden', justifyContent: 'flex-end', marginBottom: 14 },
+    detailHeroTop: { position: 'absolute', left: 20, right: 20, top: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+    detailHeroIcon: { width: 43, height: 43, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.18)', alignItems: 'center', justifyContent: 'center' },
+    detailHeroPill: { backgroundColor: 'rgba(255,255,255,0.18)', borderRadius: 30, paddingHorizontal: 10, paddingVertical: 6 },
+    detailHeroPillText: { color: '#FFFFFF', fontSize: 9, fontWeight: '800', letterSpacing: 1.2 },
+    detailHeroCaption: { color: '#BFDBFE', fontSize: 10, fontWeight: '800', letterSpacing: 1.5, marginBottom: 5 },
+    detailHeroTitle: { color: '#FFFFFF', fontSize: 25, fontWeight: '800', marginBottom: 8 },
+    detailHeroReference: { color: '#DBEAFE', fontSize: 11, fontWeight: '600' },
+    detailStatusCard: { flexDirection: 'row', alignItems: 'center', padding: 15, borderRadius: 18, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#E8EEF5' },
+    detailStatusIcon: { width: 46, height: 46, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginRight: 12 },
+    detailStatusCopy: { flex: 1 },
+    detailSmallLabel: { color: '#94A3B8', fontSize: 10, fontWeight: '800', letterSpacing: 0.8, marginBottom: 4 },
+    detailStatusText: { fontSize: 17, fontWeight: '800' },
+    detailSectionTitle: { color: '#14233B', fontSize: 16, fontWeight: '800', marginTop: 23, marginBottom: 11 },
+    detailInfoCard: { backgroundColor: '#FFFFFF', borderRadius: 20, paddingHorizontal: 16, paddingVertical: 4, borderWidth: 1, borderColor: '#E8EEF5' },
+    detailInfoRow: { flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 14 },
+    detailInfoIcon: { width: 37, height: 37, borderRadius: 11, backgroundColor: '#EFF6FF', alignItems: 'center', justifyContent: 'center', marginRight: 12 },
+    detailInfoCopy: { flex: 1, paddingTop: 2 },
+    detailInfoValue: { color: '#25344D', fontSize: 14, fontWeight: '600', lineHeight: 20 },
+    detailDivider: { height: 1, backgroundColor: '#EFF3F8', marginLeft: 49 },
+    detailDescriptionCard: { backgroundColor: '#FFFFFF', borderRadius: 22, padding: 17, borderWidth: 1, borderColor: '#DDE9FA' },
+    detailDescriptionHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 15 },
+    detailDescriptionIcon: { width: 42, height: 42, borderRadius: 13, backgroundColor: '#EAF2FF', alignItems: 'center', justifyContent: 'center', marginRight: 11 },
+    detailDescriptionEyebrow: { color: '#3B82F6', fontSize: 9, fontWeight: '800', letterSpacing: 1.3, marginBottom: 2 },
+    detailDescriptionHeading: { color: '#14233B', fontSize: 15, fontWeight: '800' },
+    detailDescriptionBody: { backgroundColor: '#F4F8FF', borderRadius: 15, paddingVertical: 16, paddingHorizontal: 17, borderLeftWidth: 3, borderLeftColor: '#3B82F6' },
+    detailDescriptionText: { color: '#334155', fontSize: 15, lineHeight: 25, fontWeight: '500' },
+    detailSectionRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+    detailPhotoCount: { color: '#94A3B8', fontSize: 10, fontWeight: '800', letterSpacing: 0.8, marginTop: 12 },
+    detailPhotoCard: { backgroundColor: '#FFFFFF', borderRadius: 20, overflow: 'hidden', borderWidth: 1, borderColor: '#E8EEF5', marginBottom: 12 },
+    detailPhoto: { width: '100%', height: 245, backgroundColor: '#EAF0F7' },
+    detailPhotoFooter: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 15, paddingVertical: 13 },
+    detailPhotoFooterText: { color: '#25344D', fontSize: 13, fontWeight: '700' },
+    detailExpand: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+    detailExpandText: { color: '#2563EB', fontSize: 12, fontWeight: '700' },
+    detailEmptyPhoto: { minHeight: 125, backgroundColor: '#FFFFFF', borderRadius: 20, borderWidth: 1, borderStyle: 'dashed', borderColor: '#CBD5E1', alignItems: 'center', justifyContent: 'center', gap: 8, marginBottom: 12 },
+    detailEmptyPhotoText: { color: '#94A3B8', fontSize: 13, fontWeight: '600' },
+    photoOverlay: { flex: 1, backgroundColor: '#000', justifyContent: 'center' },
+    photoClose: { position: 'absolute', top: 50, right: 20, zIndex: 1 },
+    expandedPhoto: { width: '100%', height: '85%' },
 });

@@ -1,9 +1,10 @@
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, TextInput, Image, ActivityIndicator, KeyboardAvoidingView, Platform, Alert, Modal, Animated, Dimensions, StatusBar, Switch, FlatList, RefreshControl, Linking } from 'react-native';
 
 import Navbar from '@/components/navbar';
@@ -36,7 +37,6 @@ export default function ProfileScreen() {
     const [profileId, setProfileId] = useState<string | null>(null);
     const [firstName, setFirstName] = useState('');
     const [lastName, setLastName]   = useState('');
-    const [mobile, setMobile]       = useState('');
     const [profilePhoto, setProfilePhoto] = useState<string | null>(null);
     const [userRole, setUserRole] = useState('');
     const [userEmail, setUserEmail] = useState('');
@@ -92,23 +92,6 @@ export default function ProfileScreen() {
             try {
                 console.log('📋 Loading profile...');
                 
-                // ⚡ INSTANT LOAD from AsyncStorage first
-                try {
-                    const storedProfile = await AsyncStorage.getItem('user_profile');
-                    if (storedProfile) {
-                        const profile = JSON.parse(storedProfile);
-                        setFirstName(profile.firstName || '');
-                        setLastName(profile.lastName || '');
-                        setMobile(profile.mobile || '');
-                        setProfilePhoto(profile.photo || null);
-                        setUserRole(profile.role || '');
-                        if (profile.email) setUserEmail(profile.email);
-                        setProfileLoading(false); // Stop loading immediately
-                        console.log('⚡ Loaded profile from cache (instant)');
-                    }
-                } catch {}
-                
-                // Then fetch fresh data from server in background
                 const { data: sessionData } = await supabase.auth.getSession();
                 const userId = sessionData?.session?.user?.id;
                 const userMeta = sessionData?.session?.user?.user_metadata;
@@ -124,6 +107,19 @@ export default function ProfileScreen() {
                     setProfileLoading(false); 
                     return; 
                 }
+                setProfileId(userId);
+                // Never display another account's cached profile.
+                try {
+                    const storedProfile = await AsyncStorage.getItem(`user_profile_${userId}`);
+                    if (storedProfile) {
+                        const profile = JSON.parse(storedProfile);
+                        setFirstName(profile.firstName || '');
+                        setLastName(profile.lastName || '');
+                        setProfilePhoto(profile.photo || null);
+                        setUserRole(profile.role || '');
+                        setProfileLoading(false);
+                    }
+                } catch {}
 
                 // Fetch profile by user ID first
                 const { data, error } = await supabase
@@ -138,7 +134,6 @@ export default function ProfileScreen() {
                 if (data && !error) {
                     console.log('✅ Profile found by ID');
                     console.log('📊 Full Name:', data.full_name);
-                    console.log('📊 Mobile:', data.mobile_number);
                     
                     setProfileId(data.id);
                     // Split full_name into first and last name for display
@@ -148,62 +143,23 @@ export default function ProfileScreen() {
                     
                     setFirstName(fname || userMeta?.first_name || '');
                     setLastName(lname || userMeta?.last_name || '');
-                    setMobile(data.mobile_number || userMeta?.phone || '');
-                    setProfilePhoto(data.avatar_url || null);
+                    setProfilePhoto(data.profile_picture || null);
                     setUserRole(data.role || userMeta?.role || '');
                     
                     // Update AsyncStorage with fresh data
-                    await AsyncStorage.setItem('user_profile', JSON.stringify({
+                    await AsyncStorage.setItem(`user_profile_${userId}`, JSON.stringify({
                         id: data.id,
-                        firstName: data.first_name,
-                        lastName: data.last_name,
-                        mobile: data.mobile_number,
-                        photo: data.avatar_url,
+                        firstName: fname || userMeta?.first_name || '',
+                        lastName: lname || userMeta?.last_name || '',
+                        photo: data.profile_picture,
                         role: data.role || userMeta?.role || '',
                     }));
                     console.log('💾 Updated AsyncStorage with DB data');
                 } else {
-                    console.log('⚠️ Profile not found by ID, trying by phone...');
-                    // Profile not found by ID — try by phone from metadata
-                    const phone = userMeta?.phone;
-                    if (phone) {
-                        const { data: phoneData } = await supabase
-                            .from('profiles')
-                            .select('*')
-                            .eq('mobile_number', phone)
-                            .maybeSingle();
-                        
-                        console.log('📥 Profile data by phone:', phoneData);
-                        
-                        if (phoneData) {
-                            console.log('✅ Profile found by phone');
-                            setProfileId(phoneData.id);
-                            // Split full_name into first and last name
-                            const names = (phoneData.full_name || '').split(' ');
-                            const fname = names[0] || '';
-                            const lname = names.slice(1).join(' ') || '';
-                            
-                            setFirstName(fname || '');
-                            setLastName(lname || '');
-                            setMobile(phoneData.mobile_number || '');
-                            setProfilePhoto(phoneData.avatar_url || null);
-                            setUserRole(phoneData.role || userMeta?.role || '');
-                        } else {
-                            // No profile in DB, use metadata
-                            console.log('ℹ️ Using metadata fallback');
-                            setFirstName(userMeta?.first_name || '');
-                            setLastName(userMeta?.last_name || '');
-                            setMobile(userMeta?.phone || '');
-                            setUserRole(userMeta?.role || '');
-                        }
-                    } else {
-                        // Fallback: use metadata directly
-                        console.log('ℹ️ Using metadata fallback (no phone)');
-                        setFirstName(userMeta?.first_name || '');
-                        setLastName(userMeta?.last_name || '');
-                        setMobile(userMeta?.phone || '');
-                        setUserRole(userMeta?.role || '');
-                    }
+                    // Use only the authenticated user's metadata if their profile row is unavailable.
+                    setFirstName(userMeta?.first_name || '');
+                    setLastName(userMeta?.last_name || '');
+                    setUserRole(userMeta?.role || '');
                 }
             } catch (err) {
                 console.error('❌ Error loading profile:', err);
@@ -230,13 +186,11 @@ export default function ProfileScreen() {
     const [editModalVisible, setEditModalVisible] = useState(false);
     const [editFirst, setEditFirst]   = useState('');
     const [editLast, setEditLast]     = useState('');
-    const [editMobile, setEditMobile] = useState('');
     const [savingProfile, setSavingProfile] = useState(false);
 
     const openEditModal = () => {
         setEditFirst(firstName);
         setEditLast(lastName);
-        setEditMobile(mobile);
         setEditModalVisible(true);
     };
 
@@ -247,20 +201,26 @@ export default function ProfileScreen() {
         }
         setSavingProfile(true);
         try {
-            if (profileId) {
-                const fullName = `${editFirst.trim()} ${editLast.trim()}`.trim();
-                const { error } = await supabase
-                    .from('profiles')
-                    .update({
-                        full_name: fullName,
-                        mobile_number: editMobile.trim(),
-                    })
-                    .eq('id', profileId);
-                if (error) throw error;
-            }
+            const { data: sessionData } = await supabase.auth.getSession();
+            const userId = sessionData.session?.user.id;
+            if (!userId || userId !== profileId) throw new Error('Your session changed. Please reopen your profile.');
+            const fullName = `${editFirst.trim()} ${editLast.trim()}`;
+            const { data, error } = await supabase
+                .from('profiles')
+                .update({ full_name: fullName })
+                .eq('id', userId)
+                .select('id')
+                .maybeSingle();
+            if (error || !data) throw error || new Error('Profile could not be saved.');
             setFirstName(editFirst.trim());
             setLastName(editLast.trim());
-            setMobile(editMobile.trim());
+            await AsyncStorage.setItem(`user_profile_${userId}`, JSON.stringify({
+                id: userId,
+                firstName: editFirst.trim(),
+                lastName: editLast.trim(),
+                photo: profilePhoto,
+                role: userRole,
+            }));
             setEditModalVisible(false);
         } catch (err: any) {
             Alert.alert('Error', err.message || 'Could not save profile.');
@@ -284,10 +244,29 @@ export default function ProfileScreen() {
         });
         if (!result.canceled) {
             const uri = result.assets[0].uri;
-            setProfilePhoto(uri);
-            // Save avatar_url to Supabase if we have a profile id
-            if (profileId) {
-                await supabase.from('profiles').update({ avatar_url: uri }).eq('id', profileId);
+            try {
+                const { data: sessionData } = await supabase.auth.getSession();
+                const userId = sessionData.session?.user.id;
+                const token = sessionData.session?.access_token;
+                if (!userId || userId !== profileId || !token) throw new Error('Please sign in again.');
+                const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
+                const anonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+                if (!supabaseUrl || !anonKey) throw new Error('Photo upload is unavailable.');
+                const fileName = `profile_${userId}_${Date.now()}.jpg`;
+                const upload = await FileSystem.uploadAsync(`${supabaseUrl}/storage/v1/object/incident-reports/${fileName}`, uri, {
+                    httpMethod: 'POST',
+                    uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+                    headers: { Authorization: `Bearer ${token}`, apikey: anonKey, 'Content-Type': 'image/jpeg' },
+                });
+                if (upload.status !== 200 && upload.status !== 201) throw new Error('Photo upload failed.');
+                const photoUrl = `${supabaseUrl}/storage/v1/object/public/incident-reports/${fileName}`;
+                const { error } = await supabase.from('profiles').update({ profile_picture: photoUrl }).eq('id', userId);
+                if (error) throw error;
+                setProfilePhoto(photoUrl);
+                const raw = await AsyncStorage.getItem(`user_profile_${userId}`);
+                await AsyncStorage.setItem(`user_profile_${userId}`, JSON.stringify({ ...(raw ? JSON.parse(raw) : {}), id: userId, photo: photoUrl }));
+            } catch (error: any) {
+                Alert.alert('Photo not saved', error.message || 'Please try again.');
             }
         }
     };
@@ -295,40 +274,50 @@ export default function ProfileScreen() {
     // ── Hotline Modal ──
     const [hotlineModalVisible, setHotlineModalVisible] = useState(false);
     const [hotlineName, setHotlineName] = useState('');
-    const [hotlineService, setHotlineService] = useState('');
     const [hotlineNumber, setHotlineNumber] = useState('');
     const [savingHotline, setSavingHotline] = useState(false);
+    const savingHotlineRef = useRef(false);
 
     const handleSaveHotline = async () => {
+        if (savingHotlineRef.current) return;
         if (!hotlineName.trim() || !hotlineNumber.trim()) {
             Alert.alert('Incomplete', 'Please enter the agency name and number.');
             return;
         }
+        savingHotlineRef.current = true;
         setSavingHotline(true);
         try {
-            const newHotline = {
-                name: hotlineName.trim(),
-                service: hotlineService.trim() || 'Custom Added Hotline',
-                number: hotlineNumber.trim(),
-            };
-            
-            const storageKey = profileId ? `custom_hotlines_${profileId}` : 'custom_hotlines';
-            const stored = await AsyncStorage.getItem(storageKey);
-            const parsed = stored ? JSON.parse(stored) : [];
-            parsed.push(newHotline);
-            await AsyncStorage.setItem(storageKey, JSON.stringify(parsed));
-            
+            const { data: sessionData } = await supabase.auth.getSession();
+            const userId = sessionData.session?.user.id;
+            if (!userId || userId !== profileId) throw new Error('Please sign in again.');
+            const { data: account, error: accountError } = await supabase.from('profiles')
+                .select('role, municipality_id').eq('id', userId).maybeSingle();
+            if (accountError || !account) throw accountError || new Error('LGU account was not found.');
+            if (!account.role?.toLowerCase().includes('lgu')) throw new Error('Only LGU accounts can add hotlines.');
+            if (!account.municipality_id) throw new Error('Your LGU account has no municipality assigned.');
+
+            const { data: saved, error: saveError } = await supabase.from('municipality_lgu_hotlines')
+                .insert({
+                    department_name: hotlineName.trim(),
+                    hotline_number: hotlineNumber.trim(),
+                    municipality_id: account.municipality_id,
+                })
+                .select('hotline_id')
+                .single();
+            if (saveError || !saved) {
+                if (saveError?.code === '23505') throw new Error('This hotline is already saved for your municipality.');
+                throw saveError || new Error('The hotline could not be saved.');
+            }
             setHotlineModalVisible(false);
+            const savedName = hotlineName.trim();
             setHotlineName('');
-            setHotlineService('');
             setHotlineNumber('');
-            
-            // Navigate to hotline
-            router.push('/hotline' as any);
-        } catch (err) {
-            console.error('Failed to save hotline', err);
+            router.push({ pathname: '/hotline', params: { saved: '1', name: savedName } } as any);
+        } catch (err: any) {
+            Alert.alert('Could not save hotline', err.message || 'Please try again.');
         } finally {
             setSavingHotline(false);
+            savingHotlineRef.current = false;
         }
     };
 
@@ -348,19 +337,24 @@ export default function ProfileScreen() {
     interface EmergencyContact { name: string; relation: string; number: string; }
     const [emergencyContacts, setEmergencyContacts] = useState<EmergencyContact[]>([]);
 
-    // Load saved contacts from AsyncStorage when profileId is ready
+    // A separate key per authenticated account; clear old contacts before loading the new one.
     useEffect(() => {
-        if (!profileId) return;
+        let active = true;
+        setEmergencyContacts([]);
+        if (!profileId) return () => { active = false; };
         AsyncStorage.getItem(`emergency_contacts_${profileId}`)
-            .then(raw => { if (raw) setEmergencyContacts(JSON.parse(raw)); })
+            .then(raw => { if (active) setEmergencyContacts(raw ? JSON.parse(raw) : []); })
             .catch(() => {});
+        return () => { active = false; };
     }, [profileId]);
 
     // ── Sign Out modal ──
     const [signOutModalVisible, setSignOutModalVisible] = useState(false);
 
     const handleSaveEmergency = async () => {
-        if (!profileId) {
+        const { data: sessionData } = await supabase.auth.getSession();
+        const userId = sessionData.session?.user.id;
+        if (!userId || userId !== profileId) {
             Alert.alert('Error', 'Please wait for your profile to load.');
             return;
         }
@@ -389,7 +383,7 @@ export default function ProfileScreen() {
                 updated = [...emergencyContacts, newContact];
             }
 
-            await AsyncStorage.setItem(`emergency_contacts_${profileId}`, JSON.stringify(updated));
+            await AsyncStorage.setItem(`emergency_contacts_${userId}`, JSON.stringify(updated));
             setEmergencyContacts(updated);
             setEcModalVisible(false);
             setEcName(''); setEcRelation(''); setEcNumber('');
@@ -479,12 +473,6 @@ export default function ProfileScreen() {
                     <View style={styles.fieldBlock}>
                         <Text style={styles.fieldLabel}>LAST NAME</Text>
                         <Text style={styles.fieldValue}>{lastName}</Text>
-                    </View>
-                    <View style={styles.divider} />
-
-                    <View style={styles.fieldBlock}>
-                        <Text style={styles.fieldLabel}>MOBILE NUMBER (PRIMARY)</Text>
-                        <Text style={styles.fieldValue}>{mobile}</Text>
                     </View>
                 </View>
 
@@ -611,20 +599,6 @@ export default function ProfileScreen() {
                                 placeholderTextColor="#CBD5E1"
                                 value={editLast}
                                 onChangeText={setEditLast}
-                            />
-                        </View>
-
-                        {/* Mobile Number */}
-                        <Text style={styles.inputLabel}>MOBILE NUMBER</Text>
-                        <View style={styles.inputRow}>
-                            <Ionicons name="call-outline" size={18} color="#94A3B8" style={{ marginRight: 8 }} />
-                            <TextInput
-                                style={styles.inputField}
-                                placeholder="+63 9XX XXX XXXX"
-                                placeholderTextColor="#CBD5E1"
-                                keyboardType="phone-pad"
-                                value={editMobile}
-                                onChangeText={setEditMobile}
                             />
                         </View>
 
@@ -875,19 +849,6 @@ export default function ProfileScreen() {
                                 placeholderTextColor="#CBD5E1"
                                 value={hotlineName}
                                 onChangeText={setHotlineName}
-                            />
-                        </View>
-
-                        {/* Service Description */}
-                        <Text style={styles.inputLabel}>SERVICE (OPTIONAL)</Text>
-                        <View style={styles.inputRow}>
-                            <Ionicons name="information-circle-outline" size={18} color="#94A3B8" style={{ marginRight: 8 }} />
-                            <TextInput
-                                style={styles.inputField}
-                                placeholder="e.g. Emergency Response"
-                                placeholderTextColor="#CBD5E1"
-                                value={hotlineService}
-                                onChangeText={setHotlineService}
                             />
                         </View>
 

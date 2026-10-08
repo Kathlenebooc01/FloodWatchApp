@@ -1,9 +1,9 @@
-﻿import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
-import { useRouter } from 'expo-router';
-import React, { useState, useEffect, useCallback } from 'react';
+import { useFocusEffect, useRouter } from 'expo-router';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
     ScrollView,
     StyleSheet,
@@ -111,7 +111,38 @@ const formatStatusUI = (status: string) => {
     return status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 };
 
+const formatReportTitle = (title: string) => {
+    return title.replace(/\[?(low|moderate|high|critical|severe)[ _-]+report\]?/gi, (_, level: string) =>
+        `${level[0].toUpperCase()}${level.slice(1).toLowerCase()} Report`);
+};
+
 const DOC_STORAGE_PREFIX = '@lgu_incident_doc_';
+const OTHER_ACTION = 'Others (Please Specify)';
+const ACTION_CHOICES = [
+    'Dispatched responders to the incident',
+    'Conducted site assessment',
+    'Assisted affected residents',
+    'Evacuated affected residents',
+    'Secured the area and placed safety barriers',
+    'Coordinated with emergency services',
+    OTHER_ACTION,
+];
+const OUTCOME_CHOICES = [
+    'Incident resolved and area secured',
+    'Affected residents assisted',
+    'Residents evacuated to safety',
+    'Situation stabilized; monitoring continues',
+    'Referred to another response agency',
+    OTHER_ACTION,
+];
+const SUPPORTING_INFO_CHOICES = [
+    'Equipment and supplies deployed',
+    'Coordinated with other agencies',
+    'Weather or site conditions documented',
+    'Follow-up assessment recommended',
+    'No additional information',
+    OTHER_ACTION,
+];
 
 // ── INCIDENT ATTACHMENT TYPES & HELPERS ──
 export interface IncidentAttachment {
@@ -173,6 +204,10 @@ export default function IncidentLguScreen() {
     const [searchQuery, setSearchQuery] = useState('');
     const [incidents, setIncidents] = useState<IncidentData[]>([]);
     const [loading, setLoading] = useState(true);
+    const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+    const [assignedMunicipalityId, setAssignedMunicipalityId] = useState<string | null>(null);
+    const fetchSequence = useRef(0);
+    const loadedAssignment = useRef<string | null>(null);
 
     // Filter state
     const [activeFilter, setActiveFilter] = useState<'all' | 'quick_snap' | 'moderate_report' | 'general_inquiries' | 'docs_pending' | 'docs_completed' | 'closed'>('all');
@@ -190,8 +225,13 @@ export default function IncidentLguScreen() {
     const [docLocation, setDocLocation] = useState('');
     const [docDateTime, setDocDateTime] = useState('');
     const [docActionsTaken, setDocActionsTaken] = useState('');
+    const [docActionChoice, setDocActionChoice] = useState('');
+    const [actionChoicesOpen, setActionChoicesOpen] = useState(false);
     const [docResponseOutcome, setDocResponseOutcome] = useState('');
     const [docSupportingInfo, setDocSupportingInfo] = useState('');
+    const [outcomeChoice, setOutcomeChoice] = useState('');
+    const [supportingInfoChoice, setSupportingInfoChoice] = useState('');
+    const [openExtraChoice, setOpenExtraChoice] = useState<'outcome' | 'supporting' | null>(null);
     const [docSaving, setDocSaving] = useState(false);
     const [docAttachments, setDocAttachments] = useState<IncidentAttachment[]>([]);
     const [incAttachmentPickerModal, setIncAttachmentPickerModal] = useState(false);
@@ -207,18 +247,40 @@ export default function IncidentLguScreen() {
         missingFields: [],
     });
 
-    // ── CLOSE INCIDENT GUARD & CONFIRMATION MODALS ──
-    const [guardModalIncident, setGuardModalIncident] = useState<IncidentData | null>(null);
-    const [closeConfirmIncident, setCloseConfirmIncident] = useState<IncidentData | null>(null);
-    const [isClosing, setIsClosing] = useState(false);
-
     // ── FETCH INCIDENTS & HYDRATE DOCUMENTATION ──
     const fetchIncidents = useCallback(async () => {
+        const sequence = ++fetchSequence.current;
         setLoading(true);
         try {
+            const { data: { user }, error: authError } = await supabase.auth.getUser();
+            if (authError) throw authError;
+            if (!user) {
+                if (sequence === fetchSequence.current) {
+                    setCurrentUserId(null);
+                    setAssignedMunicipalityId(null);
+                    setIncidents([]);
+                    loadedAssignment.current = null;
+                }
+                return;
+            }
+            const { data: profile, error: profileError } = await supabase.from('profiles')
+                .select('municipality_id').eq('id', user.id).maybeSingle();
+            if (profileError) throw profileError;
+            if (sequence !== fetchSequence.current) return;
+            const municipalityId = profile?.municipality_id || null;
+            const assignmentKey = `${user.id}:${municipalityId || ''}`;
+            if (loadedAssignment.current !== assignmentKey) {
+                setIncidents([]);
+                setSelectedIncident(null);
+                loadedAssignment.current = assignmentKey;
+            }
+            setCurrentUserId(user.id);
+            setAssignedMunicipalityId(municipalityId);
+            if (!municipalityId) return;
             const { data, error } = await supabase
                 .from('incident_report')
                 .select('*')
+                .eq('municipality_id', municipalityId)
                 .neq('report_type', 'situational_report')
                 .not('hazard_type', 'like', '[SITUATIONAL]%')
                 .order('created_at', { ascending: false });
@@ -294,7 +356,7 @@ export default function IncidentLguScreen() {
                         id: row.report_id.substring(0, 8).toUpperCase(),
                         fullId: row.report_id,
                         reportType: rt as any,
-                        title: row.hazard_type || 'General Report',
+                        title: formatReportTitle(row.hazard_type || 'General Report'),
                         urgency: urgencyStr,
                         timeAgo: getTimeAgo(row.created_at),
                         rawCreatedAt: row.created_at,
@@ -314,66 +376,44 @@ export default function IncidentLguScreen() {
                 })
             );
 
-            // Add demo item INC-928A with initial Pending documentation status
-            let demoDoc: IncidentDocumentation | undefined = undefined;
-            let demoStatus: DocStatus = 'Pending';
-            let demoCreated: string | undefined = undefined;
-            let demoUpdated: string | undefined = undefined;
-
-            try {
-                const savedDemo = await AsyncStorage.getItem(`${DOC_STORAGE_PREFIX}INC-928A`);
-                if (savedDemo) {
-                    demoDoc = JSON.parse(savedDemo);
-                    demoStatus = demoDoc?.status || 'Pending';
-                    demoCreated = demoDoc?.createdAt;
-                    demoUpdated = demoDoc?.updatedAt;
-                }
-            } catch {}
-
-            mapped.unshift({
-                id: 'INC-928A',
-                fullId: 'INC-928A',
-                reportType: 'quick_snap',
-                title: 'Severe Flooding Reported',
-                urgency: 'HIGH PRIORITY',
-                timeAgo: 'JUST NOW',
-                rawCreatedAt: new Date().toISOString(),
-                desc: 'Water level rising rapidly at the main intersection. Vehicles are struggling to pass. Requesting immediate assessment.',
-                hasImage: true,
-                image: 'https://images.unsplash.com/photo-1515694346937-94d85e41e6f0?auto=format&fit=crop&q=80&w=600',
-                locationOverlay: 'Buaya, Lapu-Lapu City',
-                actionLabel: 'Dispatch Unit',
-                actionIcon: 'bus-outline',
-                actionType: 'primary',
-                status: 'Ready for LGU',
-                docStatus: demoStatus,
-                docCreatedAt: demoCreated,
-                docUpdatedAt: demoUpdated,
-                documentation: demoDoc,
-            });
-
-            setIncidents(mapped);
+            if (sequence === fetchSequence.current) setIncidents(mapped);
         } catch (err) {
             console.error('Error fetching incidents:', err);
+            if (sequence === fetchSequence.current) setIncidents([]);
         } finally {
-            setLoading(false);
+            if (sequence === fetchSequence.current) setLoading(false);
         }
     }, []);
 
-    useEffect(() => {
+    useFocusEffect(useCallback(() => {
         fetchIncidents();
+        const { data: authListener } = supabase.auth.onAuthStateChange((event) => {
+            if (!['SIGNED_IN', 'SIGNED_OUT', 'USER_UPDATED'].includes(event)) return;
+            setIncidents([]);
+            setSelectedIncident(null);
+            loadedAssignment.current = null;
+            setCurrentUserId(null);
+            setAssignedMunicipalityId(null);
+            fetchIncidents();
+        });
+        return () => authListener.subscription.unsubscribe();
+    }, [fetchIncidents]));
 
-        const channel = supabase.channel(`lgu-incident-reports-${Date.now()}`)
-            .on('postgres_changes' as any, { event: '*', schema: 'public', table: 'incident_report' }, () => {
-                console.log('⚡ Realtime update: incident_report');
-                fetchIncidents();
-            })
+    useEffect(() => {
+        if (!currentUserId) return;
+        const profileChannel = supabase.channel(`lgu-incident-assignment-${currentUserId}`)
+            .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'profiles', filter: `id=eq.${currentUserId}` }, fetchIncidents)
             .subscribe();
-
+        const reportChannel = assignedMunicipalityId
+            ? supabase.channel(`lgu-incident-reports-${currentUserId}-${assignedMunicipalityId}`)
+                .on('postgres_changes', { event: '*', schema: 'public', table: 'incident_report', filter: `municipality_id=eq.${assignedMunicipalityId}` }, fetchIncidents)
+                .subscribe()
+            : null;
         return () => {
-            supabase.removeChannel(channel);
+            supabase.removeChannel(profileChannel);
+            if (reportChannel) supabase.removeChannel(reportChannel);
         };
-    }, [fetchIncidents]);
+    }, [currentUserId, assignedMunicipalityId, fetchIncidents]);
 
     // ── OPEN DOCUMENTATION FORM MODAL ──
     const openDocumentationModal = async (incident: IncidentData) => {
@@ -410,8 +450,16 @@ export default function IncidentLguScreen() {
 
         // Fields 4, 5, 6: restored from saved draft or empty
         setDocActionsTaken(activeDoc?.actionsTaken || '');
+        const savedAction = activeDoc?.actionsTaken || '';
+        setDocActionChoice(savedAction ? (ACTION_CHOICES.includes(savedAction) ? savedAction : OTHER_ACTION) : '');
+        setActionChoicesOpen(false);
         setDocResponseOutcome(activeDoc?.responseOutcome || '');
         setDocSupportingInfo(activeDoc?.supportingInfo || '');
+        const savedOutcome = activeDoc?.responseOutcome || '';
+        const savedSupportingInfo = activeDoc?.supportingInfo || '';
+        setOutcomeChoice(savedOutcome ? (OUTCOME_CHOICES.includes(savedOutcome) ? savedOutcome : OTHER_ACTION) : '');
+        setSupportingInfoChoice(savedSupportingInfo ? (SUPPORTING_INFO_CHOICES.includes(savedSupportingInfo) ? savedSupportingInfo : OTHER_ACTION) : '');
+        setOpenExtraChoice(null);
         setDocAttachments(activeDoc?.attachments || []);
 
         setDocModalVisible(true);
@@ -466,8 +514,8 @@ export default function IncidentLguScreen() {
             await AsyncStorage.setItem(`${DOC_STORAGE_PREFIX}${docTargetIncident.fullId}`, JSON.stringify(docData));
             await AsyncStorage.setItem(`${DOC_STORAGE_PREFIX}${docTargetIncident.id}`, JSON.stringify(docData));
 
-            // 2. Persist to Supabase if real DB incident
-            if (docTargetIncident.fullId !== 'INC-928A') {
+            // 2. Persist to Supabase
+            {
                 try {
                     const adminSupabase = getAdminClient();
                     const appendNotes = `\n\n[DOCUMENTATION STATUS: ${newStatus.toUpperCase()}]\nActions: ${docActionsTaken.trim()}\nOutcome: ${docResponseOutcome.trim()}`;
@@ -518,7 +566,7 @@ export default function IncidentLguScreen() {
             if (mode === 'submit') {
                 setSuccessModalData({
                     title: "Documentation Completed ✅",
-                    message: `Required documentation for Incident #${docTargetIncident.id} has been submitted. The Incident Report is now unlocked and can be officially closed.`,
+                    message: `Required documentation for Incident #${docTargetIncident.id} has been submitted.`,
                 });
             } else {
                 setSuccessModalData({
@@ -534,71 +582,6 @@ export default function IncidentLguScreen() {
         }
     };
 
-    // ── CLOSE INCIDENT REPORT TRIGGER ──
-    const handleAttemptClose = (incident: IncidentData) => {
-        // Business Rule: Documentation MUST be Completed before an Incident Report can be closed!
-        if (incident.docStatus !== 'Completed') {
-            // Guard triggers: Block close and show warning
-            setGuardModalIncident(incident);
-        } else {
-            // Documentation is completed: proceed to close confirmation
-            setCloseConfirmIncident(incident);
-        }
-    };
-
-    // ── EXECUTE CLOSE REPORT ──
-    const handleConfirmClose = async () => {
-        if (!closeConfirmIncident) return;
-        setIsClosing(true);
-
-        try {
-            const target = closeConfirmIncident;
-            const now = new Date().toISOString();
-
-            // 1. Update Supabase — save as 'Verified' so citizens see Verified status
-            if (target.fullId !== 'INC-928A') {
-                const adminSupabase = getAdminClient();
-                const { data: { user } } = await supabase.auth.getUser();
-
-                const { error } = await adminSupabase.from('incident_report')
-                    .update({
-                        status: 'Verified',
-                        reviewed_by: user?.id || null,
-                        reviewed_at: now,
-                    })
-                    .eq('report_id', target.fullId);
-
-                if (error) throw error;
-            }
-
-            // 2. Update local LGU state — show as 'Closed' inside LGU app
-            setIncidents(prev => prev.map(inc => {
-                if (inc.fullId === target.fullId) {
-                    return {
-                        ...inc,
-                        status: 'Closed',
-                    };
-                }
-                return inc;
-            }));
-
-            if (selectedIncident && selectedIncident.fullId === target.fullId) {
-                setSelectedIncident(prev => prev ? { ...prev, status: 'Closed' } : null);
-            }
-
-            setCloseConfirmIncident(null);
-            setSuccessModalData({
-                title: "Incident Report Closed ✓",
-                message: `Incident #${target.id} has been successfully closed. All required incident situation logs, actions taken, and response outcomes have been archived with full timestamp history.`,
-            });
-        } catch (err: any) {
-            console.error('Error closing report:', err);
-            Alert.alert('Error', err.message || 'Could not close incident report.');
-        } finally {
-            setIsClosing(false);
-        }
-    };
-
     // Confirm dispatch or acknowledge
     const handleConfirmAction = async (fullId: string, displayId: string, actionName: string) => {
         setIncidents(prev => prev.map(inc => inc.fullId === fullId ? { ...inc, status: 'Verified' } : inc));
@@ -610,7 +593,7 @@ export default function IncidentLguScreen() {
             message: `Incident #${displayId} has been successfully verified/dispatched.`,
         });
 
-        if (fullId !== 'INC-928A') {
+        {
             try {
                 const adminSupabase = getAdminClient();
                 const { data: { user } } = await supabase.auth.getUser();
@@ -782,7 +765,9 @@ export default function IncidentLguScreen() {
                 ) : filteredIncidents.length === 0 ? (
                     <View style={{ marginTop: 40, alignItems: 'center' }}>
                         <Ionicons name="shield-checkmark-outline" size={48} color="#CBD5E1" />
-                        <Text style={{ marginTop: 10, color: '#94A3B8', fontWeight: '600' }}>No matching incidents found.</Text>
+                        <Text style={{ marginTop: 10, color: '#94A3B8', fontWeight: '600', textAlign: 'center' }}>
+                            {!assignedMunicipalityId ? 'No municipality assigned. Please contact the PDRRMO.' : 'No matching incidents found.'}
+                        </Text>
                     </View>
                 ) : (
                     filteredIncidents.map((item) => {
@@ -897,11 +882,10 @@ export default function IncidentLguScreen() {
                                 )}
 
                                 {/* Description */}
-                                <Text style={s.cardDesc} numberOfLines={3}>{item.desc}</Text>
+                                <Text style={s.cardDesc} numberOfLines={3}>{formatReportTitle(item.desc)}</Text>
 
-                                {/* ── DUAL ACTION BAR (DOCUMENTATION & CLOSE INCIDENT) ── */}
+                                {/* Documentation action */}
                                 <View style={s.cardActionRow}>
-                                    {/* Button 1: Manage / View Documentation */}
                                     <TouchableOpacity
                                         style={[s.actionHalfBtn, s.docActionBtn]}
                                         activeOpacity={0.8}
@@ -919,35 +903,6 @@ export default function IncidentLguScreen() {
                                         </Text>
                                     </TouchableOpacity>
 
-                                    {/* Button 2: Close Incident Report (Guarded) */}
-                                    {isClosed ? (
-                                        <View style={[s.actionHalfBtn, s.closedBtn]}>
-                                            <Ionicons name="checkmark-done" size={16} color="#059669" style={{ marginRight: 6 }} />
-                                            <Text style={s.closedBtnText}>Incident Closed</Text>
-                                        </View>
-                                    ) : (
-                                        <TouchableOpacity
-                                            style={[
-                                                s.actionHalfBtn,
-                                                item.docStatus === 'Completed' ? s.closeBtnReady : s.closeBtnLocked
-                                            ]}
-                                            activeOpacity={0.8}
-                                            onPress={() => handleAttemptClose(item)}
-                                        >
-                                            <Ionicons
-                                                name={item.docStatus === 'Completed' ? "lock-closed-outline" : "alert-circle-outline"}
-                                                size={16}
-                                                color={item.docStatus === 'Completed' ? "#FFFFFF" : "#64748B"}
-                                                style={{ marginRight: 6 }}
-                                            />
-                                            <Text style={[
-                                                s.closeBtnText,
-                                                item.docStatus === 'Completed' ? s.closeBtnTextReady : s.closeBtnTextLocked
-                                            ]}>
-                                                Close Incident
-                                            </Text>
-                                        </TouchableOpacity>
-                                    )}
                                 </View>
                             </TouchableOpacity>
                         );
@@ -1033,12 +988,14 @@ export default function IncidentLguScreen() {
 
                                                 <Text style={[s.docPreviewLabel, { marginTop: 8 }]}>RESPONSE OUTCOME:</Text>
                                                 <Text style={s.docPreviewText}>{selectedIncident.documentation.responseOutcome || 'Not specified'}</Text>
+                                                <Text style={[s.docPreviewLabel, { marginTop: 8 }]}>RELEVANT DETAILS / SUPPORTING INFORMATION:</Text>
+                                                <Text style={s.docPreviewText}>{selectedIncident.documentation.supportingInfo || 'Not specified'}</Text>
                                             </View>
                                         ) : (
                                             <View style={s.docEmptyWarning}>
                                                 <Ionicons name="alert-circle-outline" size={18} color="#D97706" style={{ marginRight: 6 }} />
                                                 <Text style={s.docEmptyWarningText}>
-                                                    Documentation has not been completed. Closing this report remains locked.
+                                                    Documentation has not been completed.
                                                 </Text>
                                             </View>
                                         )}
@@ -1076,7 +1033,7 @@ export default function IncidentLguScreen() {
                                         <View style={{ flex: 1 }}>
                                             <Text style={s.infoBoxLabel}>REPORT DESCRIPTION</Text>
                                             <Text style={[s.infoBoxValue, { lineHeight: 22, marginTop: 4 }]}>
-                                                {selectedIncident.desc}
+                                                {formatReportTitle(selectedIncident.desc)}
                                             </Text>
                                         </View>
                                     </View>
@@ -1095,37 +1052,6 @@ export default function IncidentLguScreen() {
                                 </TouchableOpacity>
                             </View>
 
-                            {/* Floating Bottom Action Bar */}
-                            <View style={s.premiumActionBar}>
-                                {selectedIncident.status?.toLowerCase() === 'closed' ? (
-                                    <View style={[s.premiumActionBtn, { backgroundColor: '#F1F5F9' }]}>
-                                        <Ionicons name="checkmark-done-circle" size={20} color="#059669" style={{ marginRight: 10 }} />
-                                        <Text style={[s.premiumActionBtnText, { color: '#059669' }]}>Incident Closed & Archived</Text>
-                                    </View>
-                                ) : (
-                                    <TouchableOpacity
-                                        style={[
-                                            s.premiumActionBtn,
-                                            selectedIncident.docStatus === 'Completed' ? s.premiumActionBtnPrimary : { backgroundColor: '#475569' }
-                                        ]}
-                                        activeOpacity={0.9}
-                                        onPress={() => {
-                                            setSelectedIncident(null);
-                                            handleAttemptClose(selectedIncident);
-                                        }}
-                                    >
-                                        <Ionicons
-                                            name={selectedIncident.docStatus === 'Completed' ? "checkmark-circle-outline" : "lock-closed-outline"}
-                                            size={20}
-                                            color="#FFFFFF"
-                                            style={{ marginRight: 10 }}
-                                        />
-                                        <Text style={s.premiumActionBtnTextPrimary}>
-                                            {selectedIncident.docStatus === 'Completed' ? "Close Incident Report" : "Close Report (Docs Required)"}
-                                        </Text>
-                                    </TouchableOpacity>
-                                )}
-                            </View>
                         </View>
                     </View>
                 )}
@@ -1257,20 +1183,35 @@ export default function IncidentLguScreen() {
                                     </View>
                                 )}
                             </View>
-                            <TextInput
-                                style={[
-                                    s.textAreaInput,
-                                    docTargetIncident?.docStatus === 'Completed' && s.lockedInput,
-                                    docTargetIncident?.docStatus !== 'Completed' && attemptedDocSubmit && !docActionsTaken.trim() && s.inputErrorBorder
-                                ]}
-                                placeholder={docTargetIncident?.docStatus === 'Completed' ? 'No actions recorded.' : 'Detail response team deployment, rescue operations, flood barricades, evacuations...'}
-                                placeholderTextColor="#94A3B8"
-                                multiline
-                                numberOfLines={3}
-                                value={docActionsTaken}
-                                onChangeText={setDocActionsTaken}
-                                editable={docTargetIncident?.docStatus !== 'Completed'}
-                            />
+                            <TouchableOpacity
+                                style={[s.actionChoiceButton, docTargetIncident?.docStatus === 'Completed' && s.lockedInput, docTargetIncident?.docStatus !== 'Completed' && attemptedDocSubmit && !docActionsTaken.trim() && s.inputErrorBorder]}
+                                onPress={() => setActionChoicesOpen(!actionChoicesOpen)}
+                                disabled={docTargetIncident?.docStatus === 'Completed'}
+                            >
+                                <Text style={[s.actionChoiceText, !docActionChoice && { color: '#94A3B8' }]}>
+                                    {docTargetIncident?.docStatus === 'Completed' && docActionChoice === OTHER_ACTION ? docActionsTaken : docActionChoice || 'Select action taken'}
+                                </Text>
+                                <Ionicons name="chevron-down" size={18} color="#64748B" />
+                            </TouchableOpacity>
+                            {actionChoicesOpen && docTargetIncident?.docStatus !== 'Completed' && (
+                                <View style={s.actionChoiceMenu}>
+                                    {ACTION_CHOICES.map(choice => (
+                                        <TouchableOpacity key={choice} style={s.actionChoiceOption} onPress={() => {
+                                            setDocActionChoice(choice);
+                                            setDocActionsTaken(choice === OTHER_ACTION ? '' : choice);
+                                            setActionChoicesOpen(false);
+                                        }}>
+                                            <Text style={s.actionChoiceText}>{choice}</Text>
+                                            {docActionChoice === choice && <Ionicons name="checkmark" size={17} color="#2563EB" />}
+                                        </TouchableOpacity>
+                                    ))}
+                                </View>
+                            )}
+                            {docActionChoice === OTHER_ACTION && docTargetIncident?.docStatus !== 'Completed' && (
+                                <TextInput style={[s.textAreaInput, { marginTop: 8 }]}
+                                    placeholder="Specify actions taken by LGU or responders" placeholderTextColor="#94A3B8"
+                                    multiline value={docActionsTaken} onChangeText={setDocActionsTaken} />
+                            )}
                             {docTargetIncident?.docStatus !== 'Completed' && attemptedDocSubmit && !docActionsTaken.trim() && (
                                 <Text style={s.fieldErrorText}>* Actions Taken by Responders is required</Text>
                             )}
@@ -1287,20 +1228,35 @@ export default function IncidentLguScreen() {
                                     </View>
                                 )}
                             </View>
-                            <TextInput
-                                style={[
-                                    s.textAreaInput,
-                                    docTargetIncident?.docStatus === 'Completed' && s.lockedInput,
-                                    docTargetIncident?.docStatus !== 'Completed' && attemptedDocSubmit && !docResponseOutcome.trim() && s.inputErrorBorder
-                                ]}
-                                placeholder={docTargetIncident?.docStatus === 'Completed' ? 'No outcome recorded.' : 'Final operational outcome (e.g., families relocated, water subsided, no casualties, area secured)...'}
-                                placeholderTextColor="#94A3B8"
-                                multiline
-                                numberOfLines={3}
-                                value={docResponseOutcome}
-                                onChangeText={setDocResponseOutcome}
-                                editable={docTargetIncident?.docStatus !== 'Completed'}
-                            />
+                            <TouchableOpacity
+                                style={[s.actionChoiceButton, docTargetIncident?.docStatus === 'Completed' && s.lockedInput, docTargetIncident?.docStatus !== 'Completed' && attemptedDocSubmit && !docResponseOutcome.trim() && s.inputErrorBorder]}
+                                onPress={() => setOpenExtraChoice(openExtraChoice === 'outcome' ? null : 'outcome')}
+                                disabled={docTargetIncident?.docStatus === 'Completed'}
+                            >
+                                <Text style={[s.actionChoiceText, !outcomeChoice && { color: '#94A3B8' }]}>
+                                    {docTargetIncident?.docStatus === 'Completed' && outcomeChoice === OTHER_ACTION ? docResponseOutcome : outcomeChoice || 'Select response outcome'}
+                                </Text>
+                                <Ionicons name="chevron-down" size={18} color="#64748B" />
+                            </TouchableOpacity>
+                            {openExtraChoice === 'outcome' && docTargetIncident?.docStatus !== 'Completed' && (
+                                <View style={s.actionChoiceMenu}>
+                                    {OUTCOME_CHOICES.map(choice => (
+                                        <TouchableOpacity key={choice} style={s.actionChoiceOption} onPress={() => {
+                                            setOutcomeChoice(choice);
+                                            setDocResponseOutcome(choice === OTHER_ACTION ? '' : choice);
+                                            setOpenExtraChoice(null);
+                                        }}>
+                                            <Text style={s.actionChoiceText}>{choice}</Text>
+                                            {outcomeChoice === choice && <Ionicons name="checkmark" size={17} color="#2563EB" />}
+                                        </TouchableOpacity>
+                                    ))}
+                                </View>
+                            )}
+                            {outcomeChoice === OTHER_ACTION && docTargetIncident?.docStatus !== 'Completed' && (
+                                <TextInput style={[s.textAreaInput, { marginTop: 8 }]}
+                                    placeholder="Specify the response outcome" placeholderTextColor="#94A3B8"
+                                    multiline value={docResponseOutcome} onChangeText={setDocResponseOutcome} />
+                            )}
                             {docTargetIncident?.docStatus !== 'Completed' && attemptedDocSubmit && !docResponseOutcome.trim() && (
                                 <Text style={s.fieldErrorText}>* Response Outcome is required</Text>
                             )}
@@ -1315,16 +1271,35 @@ export default function IncidentLguScreen() {
                                     </View>
                                 )}
                             </View>
-                            <TextInput
-                                style={[s.textAreaInput, docTargetIncident?.docStatus === 'Completed' && s.lockedInput]}
-                                placeholder={docTargetIncident?.docStatus === 'Completed' ? 'No additional details.' : 'Equipment deployed, collaborating agencies, weather logs, or follow-up recommendations...'}
-                                placeholderTextColor="#94A3B8"
-                                multiline
-                                numberOfLines={2}
-                                value={docSupportingInfo}
-                                onChangeText={setDocSupportingInfo}
-                                editable={docTargetIncident?.docStatus !== 'Completed'}
-                            />
+                            <TouchableOpacity
+                                style={[s.actionChoiceButton, docTargetIncident?.docStatus === 'Completed' && s.lockedInput]}
+                                onPress={() => setOpenExtraChoice(openExtraChoice === 'supporting' ? null : 'supporting')}
+                                disabled={docTargetIncident?.docStatus === 'Completed'}
+                            >
+                                <Text style={[s.actionChoiceText, !supportingInfoChoice && { color: '#94A3B8' }]}>
+                                    {docTargetIncident?.docStatus === 'Completed' && supportingInfoChoice === OTHER_ACTION ? docSupportingInfo : supportingInfoChoice || 'Select supporting information (optional)'}
+                                </Text>
+                                <Ionicons name="chevron-down" size={18} color="#64748B" />
+                            </TouchableOpacity>
+                            {openExtraChoice === 'supporting' && docTargetIncident?.docStatus !== 'Completed' && (
+                                <View style={s.actionChoiceMenu}>
+                                    {SUPPORTING_INFO_CHOICES.map(choice => (
+                                        <TouchableOpacity key={choice} style={s.actionChoiceOption} onPress={() => {
+                                            setSupportingInfoChoice(choice);
+                                            setDocSupportingInfo(choice === OTHER_ACTION ? '' : choice);
+                                            setOpenExtraChoice(null);
+                                        }}>
+                                            <Text style={s.actionChoiceText}>{choice}</Text>
+                                            {supportingInfoChoice === choice && <Ionicons name="checkmark" size={17} color="#2563EB" />}
+                                        </TouchableOpacity>
+                                    ))}
+                                </View>
+                            )}
+                            {supportingInfoChoice === OTHER_ACTION && docTargetIncident?.docStatus !== 'Completed' && (
+                                <TextInput style={[s.textAreaInput, { marginTop: 8 }]}
+                                    placeholder="Specify relevant details or supporting information" placeholderTextColor="#94A3B8"
+                                    multiline value={docSupportingInfo} onChangeText={setDocSupportingInfo} />
+                            )}
 
                             {/* Field 7: Supporting Evidence & Attachments */}
                             <View style={s.fieldLabelRow}>
@@ -1540,128 +1515,6 @@ export default function IncidentLguScreen() {
                             <Ionicons name="create-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
                             <Text style={s.reqActionBtnText}>Complete Missing Fields</Text>
                         </TouchableOpacity>
-                    </View>
-                </View>
-            </Modal>
-
-            {/* ── MODAL: CLOSING GUARD WARNING (BLOCKED CLOSING) ── */}
-            <Modal
-                visible={!!guardModalIncident}
-                transparent
-                animationType="fade"
-                onRequestClose={() => setGuardModalIncident(null)}
-            >
-                <View style={s.modalOverlay}>
-                    <View style={s.requiredFieldsCard}>
-                        {/* Glowing Icon Header */}
-                        <View style={[s.reqIconOuterRing, { borderColor: '#FEE2E2', backgroundColor: '#FEF2F2' }]}>
-                            <View style={[s.reqIconInnerCircle, { backgroundColor: '#FEE2E2' }]}>
-                                <Ionicons name="lock-closed" size={36} color="#DC2626" />
-                            </View>
-                        </View>
-
-                        {/* Pill Tag */}
-                        <View style={[s.reqPillTag, { backgroundColor: '#FEF2F2', borderColor: '#FECACA' }]}>
-                            <Ionicons name="shield-half-outline" size={12} color="#DC2626" style={{ marginRight: 5 }} />
-                            <Text style={[s.reqPillTagText, { color: '#DC2626' }]}>PROTOCOL COMPLIANCE GUARD</Text>
-                        </View>
-
-                        <Text style={s.reqModalTitle}>Documentation Required</Text>
-                        <Text style={s.reqModalSubtitle}>
-                            Incident Report <Text style={{ fontWeight: '800', color: '#0F172A' }}>#{guardModalIncident?.id}</Text> cannot be closed while required documentation is still <Text style={{ color: '#DC2626', fontWeight: '800' }}>{guardModalIncident?.docStatus.toUpperCase()}</Text>.
-                        </Text>
-
-                        {/* Information Card */}
-                        <View style={s.missingFieldsList}>
-                            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8, paddingBottom: 8, borderBottomWidth: 1, borderBottomColor: '#E2E8F0' }}>
-                                <Text style={{ fontSize: 11, fontWeight: '700', color: '#475569' }}>Documentation Status:</Text>
-                                <View style={[
-                                    s.docStatusPill,
-                                    guardModalIncident?.docStatus === 'In Progress' ? s.docPillInProgress : s.docPillPending
-                                ]}>
-                                    <Text style={[
-                                        s.docStatusPillText,
-                                        guardModalIncident?.docStatus === 'In Progress' ? s.docTextInProgress : s.docTextPending
-                                    ]}>
-                                        {(guardModalIncident?.docStatus || 'Pending').toUpperCase()}
-                                    </Text>
-                                </View>
-                            </View>
-                            <Text style={{ fontSize: 11, color: '#64748B', lineHeight: 16 }}>
-                                Mandatory protocol requires official recording of incident situation, actions taken by responders, and operational outcome before closing.
-                            </Text>
-                        </View>
-
-                        {/* Action Buttons */}
-                        <View style={{ width: '100%', gap: 10, marginTop: 4 }}>
-                            <TouchableOpacity
-                                style={s.reqActionBtn}
-                                activeOpacity={0.88}
-                                onPress={() => {
-                                    const target = guardModalIncident;
-                                    setGuardModalIncident(null);
-                                    if (target) openDocumentationModal(target);
-                                }}
-                            >
-                                <Ionicons name="create-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-                                <Text style={s.reqActionBtnText}>Complete Documentation Now</Text>
-                            </TouchableOpacity>
-
-                            <TouchableOpacity
-                                style={s.guardCancelBtn}
-                                onPress={() => setGuardModalIncident(null)}
-                            >
-                                <Text style={s.guardCancelBtnText}>Dismiss & Keep Open</Text>
-                            </TouchableOpacity>
-                        </View>
-                    </View>
-                </View>
-            </Modal>
-
-            {/* ── MODAL: CLOSE CONFIRMATION (WHEN DOCUMENTATION COMPLETED) ── */}
-            <Modal
-                visible={!!closeConfirmIncident}
-                transparent
-                animationType="fade"
-                onRequestClose={() => !isClosing && setCloseConfirmIncident(null)}
-            >
-                <View style={s.modalOverlay}>
-                    <View style={s.guardModalCard}>
-                        <View style={[s.guardIconCircle, { backgroundColor: '#ECFDF5' }]}>
-                            <Ionicons name="checkmark-done-circle" size={44} color="#059669" />
-                        </View>
-                        <Text style={s.guardTitle}>Close Incident Report</Text>
-                        <Text style={s.guardMessage}>
-                            Required documentation is <Text style={{ color: '#059669', fontWeight: '800' }}>COMPLETED</Text> for Incident <Text style={{ fontWeight: '800' }}>#{closeConfirmIncident?.id}</Text>.
-                        </Text>
-                        <Text style={s.guardSubMessage}>
-                            Are you sure you want to officially close and archive this incident? This marks the operation as successfully finalized.
-                        </Text>
-
-                        <View style={{ width: '100%', gap: 10, marginTop: 10 }}>
-                            <TouchableOpacity
-                                style={[s.guardProceedBtn, { backgroundColor: '#059669' }]}
-                                onPress={handleConfirmClose}
-                                disabled={isClosing}
-                            >
-                                {isClosing ? (
-                                    <ActivityIndicator size="small" color="#FFFFFF" />
-                                ) : (
-                                    <>
-                                        <Ionicons name="lock-closed" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-                                        <Text style={s.guardProceedBtnText}>Confirm & Close Report</Text>
-                                    </>
-                                )}
-                            </TouchableOpacity>
-
-                            <TouchableOpacity
-                                style={s.guardCancelBtn}
-                                onPress={() => setCloseConfirmIncident(null)}
-                                disabled={isClosing}
-                            >
-                                <Text style={s.guardCancelBtnText}>Cancel</Text>
-                            </TouchableOpacity>
-                        </View>
                     </View>
                 </View>
             </Modal>
@@ -2593,6 +2446,37 @@ const s = StyleSheet.create({
         color: '#0F172A',
         borderWidth: 1,
         borderColor: '#CBD5E1',
+    },
+    actionChoiceButton: {
+        minHeight: 44,
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        backgroundColor: '#F8FAFC',
+        borderRadius: 10,
+        borderWidth: 1,
+        borderColor: '#CBD5E1',
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+    },
+    actionChoiceText: { flex: 1, fontSize: 13, color: '#0F172A', marginRight: 8 },
+    actionChoiceMenu: {
+        marginTop: 5,
+        borderWidth: 1,
+        borderColor: '#CBD5E1',
+        borderRadius: 10,
+        overflow: 'hidden',
+        backgroundColor: '#FFFFFF',
+    },
+    actionChoiceOption: {
+        minHeight: 43,
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        borderBottomWidth: StyleSheet.hairlineWidth,
+        borderBottomColor: '#E2E8F0',
     },
     docActionRowBottom: {
         flexDirection: 'row',

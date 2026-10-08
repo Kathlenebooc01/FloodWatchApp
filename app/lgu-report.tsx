@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import { useFocusEffect, useRouter } from 'expo-router';
+import React, { useCallback, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
@@ -13,7 +13,6 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getCurrentFullAddress } from '@/utils/location';
 import { supabase } from '@/utils/supabase';
 
 export default function LguReportScreen() {
@@ -24,47 +23,70 @@ export default function LguReportScreen() {
     const [showWaitingModal, setShowWaitingModal] = useState<boolean>(false);
     const [isSubmittingEscalation, setIsSubmittingEscalation] = useState<boolean>(false);
 
-    useEffect(() => {
-        const fetchLocation = async () => {
-            try {
-                const loc = await getCurrentFullAddress();
-                setCurrentSector(loc.city || 'Sector Unassigned');
-            } catch (err) {
-                console.warn('Failed to fetch sector location', err);
-                setCurrentSector('Sector Unassigned');
+    useFocusEffect(useCallback(() => {
+        let active = true;
+        let generation = 0;
+        let profileChannel: ReturnType<typeof supabase.channel> | null = null;
+        const loadAssignment = async (userId: string, requestGeneration: number) => {
+            const { data: profile, error } = await supabase.from('profiles')
+                .select('role, municipality_id').eq('id', userId).maybeSingle();
+            if (!active || requestGeneration !== generation) return;
+            if (error) {
+                setCurrentSector('Unable to load municipality. Please try again.');
+                return;
             }
+            if (profile?.role) setUserRole(profile.role.toLowerCase());
+            const municipalityId = profile?.municipality_id || null;
+            if (!municipalityId) {
+                setCurrentSector('No municipality assigned. Please contact the PDRRMO.');
+                return;
+            }
+            const { data: municipality, error: municipalityError } = await supabase
+                .from('municipality_or_city').select('name')
+                .eq('municipality_id', municipalityId).maybeSingle();
+            if (active && requestGeneration === generation) setCurrentSector(municipalityError ? 'Unable to load municipality. Please try again.' : municipality?.name || 'No municipality assigned. Please contact the PDRRMO.');
         };
-        const fetchRole = async () => {
-            try {
-                const { data: { user } } = await supabase.auth.getUser();
-                if (user) {
-                    const { data: profile } = await supabase
-                        .from('profiles')
-                        .select('role')
-                        .eq('id', user.id)
-                        .maybeSingle();
-                    if (profile?.role) setUserRole(profile.role.toLowerCase());
-                }
-            } catch {}
+        const initialize = async () => {
+            const requestGeneration = ++generation;
+            setCurrentSector('Loading...');
+            const { data: { user } } = await supabase.auth.getUser();
+            if (!active || requestGeneration !== generation) return;
+            if (!user) {
+                setCurrentSector('No municipality assigned. Please contact the PDRRMO.');
+                return;
+            }
+            await loadAssignment(user.id, requestGeneration);
+            if (!active || requestGeneration !== generation) return;
+            profileChannel = supabase.channel(`lgu-report-assignment-${user.id}`)
+                .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'profiles', filter: `id=eq.${user.id}` }, () => loadAssignment(user.id, requestGeneration))
+                .subscribe();
         };
-        fetchLocation();
-        fetchRole();
-    }, []);
+        const { data: authListener } = supabase.auth.onAuthStateChange((event) => {
+            if (!['SIGNED_IN', 'SIGNED_OUT', 'USER_UPDATED'].includes(event)) return;
+            if (profileChannel) {
+                supabase.removeChannel(profileChannel);
+                profileChannel = null;
+            }
+            initialize();
+        });
+        initialize();
+        return () => {
+            active = false;
+            authListener.subscription.unsubscribe();
+            if (profileChannel) supabase.removeChannel(profileChannel);
+        };
+    }, []));
 
     const handleEscalateConfirm = async () => {
         setIsSubmittingEscalation(true);
         try {
             const { data: { user } } = await supabase.auth.getUser();
-
-            let municipalityId = null;
-            if (user) {
-                const { data: profile } = await supabase
-                    .from('profiles')
-                    .select('municipality_id')
-                    .eq('id', user.id)
-                    .maybeSingle();
-                if (profile?.municipality_id) municipalityId = profile.municipality_id;
-            }
+            if (!user) throw new Error('Please sign in to your LGU account.');
+            const { data: profile, error: profileError } = await supabase
+                .from('profiles').select('municipality_id').eq('id', user.id).maybeSingle();
+            if (profileError) throw profileError;
+            const municipalityId = profile?.municipality_id;
+            if (!municipalityId) throw new Error('No municipality assigned. Please contact the PDRRMO.');
 
             const { data: insertedReport, error } = await supabase
                 .from('incident_report')

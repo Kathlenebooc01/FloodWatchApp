@@ -213,9 +213,9 @@ export default function Navbar() {
                         <View style={[styles.modalIconCircle, { backgroundColor: '#FEF3C7' }]}>
                             <Ionicons name="time-outline" size={36} color="#D97706" />
                         </View>
-                        <Text style={styles.modalTitle}>Verification Ongoing</Text>
+                        <Text style={styles.modalTitle}>Pending PDRRMO Approval</Text>
                         <Text style={styles.modalDesc}>
-                            Your identity verification is currently being processed. You will be notified once it is completed.
+                            Your ID is pending PDRRMO approval. You will be notified once your verification has been reviewed.
                         </Text>
                         <TouchableOpacity
                             style={[styles.verifyBtn, { backgroundColor: '#D97706' }]}

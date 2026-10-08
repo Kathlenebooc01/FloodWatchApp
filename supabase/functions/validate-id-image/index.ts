@@ -194,15 +194,14 @@ SCORING GUIDE for confidence_score (0 to 100):
 - 50-69: Uncertain — could be an ID but too many issues
 - 0-49: Not an ID, fake, screenshot, selfie, or unreadable
 
-APPROVE only if confidence_score >= 90.
-REJECT if confidence_score < 90.
+Assess the document format, visible information, image quality, and possible signs of tampering. Your assessment is advisory; only a PDRRMO Admin makes the final decision.
 
 Respond ONLY in this exact JSON format with no other text:
 {
   "ai_is_valid": true or false,
   "confidence_score": integer from 0 to 100,
   "ai_insight": "one sentence describing what you see",
-  "status": "approved" or "rejected"
+  "status": "appears_valid" or "suspicious"
 }
 
 Examples of what to REJECT:
@@ -245,7 +244,7 @@ Examples of what to APPROVE:
           confidence = Math.max(0, Math.min(100, Math.round(confidence)));
 
           const meetsThreshold = confidence >= 90;
-          const finalStatus = meetsThreshold && parsed.ai_is_valid ? 'approved' : 'rejected';
+          const finalStatus = 'pending';
 
           result = {
             ai_is_valid:         meetsThreshold && parsed.ai_is_valid,
@@ -286,51 +285,14 @@ Examples of what to APPROVE:
       const { error: updateError } = await supabase
         .from('id_verification')
         .update(updateData)
-        .eq('id_verification_id', verificationId);
+        .eq('id_verification_id', verificationId)
+        .eq('status', 'pending');
 
       if (updateError) {
         console.error('❌ id_verification update failed:', updateError.message);
       } else {
         console.log('✅ id_verification updated:', result.status);
 
-        // Fetch user_id if not supplied
-        let targetUserId = userId;
-        if (!targetUserId) {
-          const { data: verRow } = await supabase
-            .from('id_verification')
-            .select('user_id')
-            .eq('id_verification_id', verificationId)
-            .maybeSingle();
-          targetUserId = verRow?.user_id;
-        }
-
-        if (targetUserId) {
-          if (result.status === 'approved') {
-            await supabase
-              .from('profiles')
-              .update({ is_verified: true })
-              .eq('id', targetUserId);
-            console.log('✅ profiles.is_verified set to true for user:', targetUserId);
-          }
-
-          const title   = result.status === 'approved'
-            ? '✅ ID Verification Complete'
-            : '❌ ID Verification Failed';
-          const message = result.status === 'approved'
-            ? 'Your identity has been successfully verified. You can now submit flood incident reports.'
-            : 'Your ID could not be verified. Please make sure your ID is clear, all corners are visible, and try again.';
-
-          await supabase.from('notifications').insert({
-            user_id:     targetUserId,
-            title,
-            message,
-            type:        'Updates',
-            is_read:     false,
-            target_role: 'user',
-            created_at:  new Date().toISOString(),
-          });
-          console.log('✅ Notification sent for ID verification status:', result.status);
-        }
       }
     }
 
