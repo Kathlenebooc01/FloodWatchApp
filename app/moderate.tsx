@@ -1,3 +1,4 @@
+import { resolveReportMunicipality } from '@/utils/report-municipality';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -203,29 +204,7 @@ export default function ModerateReportScreen() {
             const primaryImageUrl = imageUrls[0] || null;
 
             // Municipality lookup
-            let municipalityId: string | null = null;
-            try {
-                const cityName = locationData?.city || 'CEBU CITY';
-                const { data: munData } = await supabase
-                    .from('municipality_or_city')
-                    .select('municipality_id')
-                    .ilike('name', `%${cityName}%`)
-                    .limit(1)
-                    .maybeSingle();
-                if (munData) {
-                    municipalityId = munData.municipality_id;
-                } else {
-                    const { data: liveData } = await supabase
-                        .from('live_municipality_weather')
-                        .select('municipality_id')
-                        .ilike('municipality_name', `%${cityName}%`)
-                        .limit(1)
-                        .maybeSingle();
-                    municipalityId = liveData?.municipality_id || null;
-                }
-            } catch (e) {
-                console.warn('⚠️ Municipality lookup failed:', e);
-            }
+            const municipalityId = await resolveReportMunicipality(locationData?.city);
 
             // If user left description empty, wait for AI (may still be in-flight)
             let finalDescription = observations.trim();

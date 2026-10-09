@@ -1,3 +1,4 @@
+import { resolveReportMunicipality } from '@/utils/report-municipality';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -145,17 +146,7 @@ export default function GeneralInquiryScreen() {
             }
 
             // Municipality lookup
-            let municipalityId: string | null = null;
-            try {
-                const cityName = locationData?.city || 'CEBU CITY';
-                const { data: munData } = await supabase
-                    .from('municipality_or_city')
-                    .select('municipality_id')
-                    .ilike('name', `%${cityName}%`)
-                    .limit(1)
-                    .maybeSingle();
-                if (munData) municipalityId = munData.municipality_id;
-            } catch (e) {}
+            const municipalityId = await resolveReportMunicipality(locationData?.city);
 
             const description =
                 `[GENERAL INQUIRY]\n` +

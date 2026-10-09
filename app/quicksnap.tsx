@@ -1,3 +1,4 @@
+import { resolveReportMunicipality } from '@/utils/report-municipality';
 import { Ionicons } from '@expo/vector-icons';
 import { CameraView, FlashMode, useCameraPermissions } from 'expo-camera';
 import { useRouter } from 'expo-router';
@@ -155,27 +156,7 @@ export default function QuickSnapScreen() {
             }
 
             // 4. Get municipality
-            let municipalityId: string | null = null;
-            try {
-                const cityName = locationData?.city || 'LAPU-LAPU CITY';
-                const { data: munData } = await supabase
-                    .from('municipality_or_city')
-                    .select('municipality_id')
-                    .ilike('name', `%${cityName}%`)
-                    .limit(1).maybeSingle();
-                if (munData) {
-                    municipalityId = munData.municipality_id;
-                } else {
-                    const { data: liveData } = await supabase
-                        .from('live_municipality_weather')
-                        .select('municipality_id')
-                        .ilike('municipality_name', `%${cityName}%`)
-                        .limit(1).maybeSingle();
-                    municipalityId = liveData?.municipality_id || null;
-                }
-            } catch (e) {
-                console.warn('⚠️ Municipality lookup failed:', e);
-            }
+            const municipalityId = await resolveReportMunicipality(locationData?.city);
 
             // 5. Save report to DB with status Pending_AI (already AI validated)
             const { data: reportData, error: reportError } = await supabase

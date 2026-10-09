@@ -190,15 +190,6 @@ const getIncFileMeta = (type: IncidentAttachment['fileType']) => {
     }
 };
 
-// Admin client helper to bypass RLS for administrative verification/closing
-const getAdminClient = () => {
-    const { createClient } = require('@supabase/supabase-js');
-    return createClient(
-        'https://xncciaozzxoqbesfxpww.supabase.co',
-        'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhuY2NpYW96enhvcWJlc2Z4cHd3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MjM0ODIzNCwiZXhwIjoyMDg3OTI0MjM0fQ.MQRcV40PTwXPml9PqEeb9oLu6bwdkd5lI-IAhkfRDr8'
-    );
-};
-
 export default function IncidentLguScreen() {
     const router = useRouter();
     const [searchQuery, setSearchQuery] = useState('');
@@ -264,10 +255,11 @@ export default function IncidentLguScreen() {
                 return;
             }
             const { data: profile, error: profileError } = await supabase.from('profiles')
-                .select('municipality_id').eq('id', user.id).maybeSingle();
+                .select('role, municipality_id').eq('id', user.id).maybeSingle();
             if (profileError) throw profileError;
             if (sequence !== fetchSequence.current) return;
-            const municipalityId = profile?.municipality_id || null;
+            const municipalityId = ['lgu', 'lgu_frontliner', 'lgu_headmaster'].includes(profile?.role || '')
+                ? profile?.municipality_id || null : null;
             const assignmentKey = `${user.id}:${municipalityId || ''}`;
             if (loadedAssignment.current !== assignmentKey) {
                 setIncidents([]);
@@ -441,7 +433,7 @@ export default function IncidentLguScreen() {
 
         // Fields 1, 2, 3: prefilled from incident report (system record)
         const initSit = activeDoc?.situation || incident.desc || 'General incident report recorded.';
-        const initLoc = activeDoc?.location || incident.locationOverlay || 'Buaya, Lapu-Lapu City';
+        const initLoc = activeDoc?.location || incident.locationOverlay || '';
         const initDate = activeDoc?.incidentDateTime || formatReadableDate(incident.rawCreatedAt);
 
         setDocSituation(initSit);
@@ -499,7 +491,7 @@ export default function IncidentLguScreen() {
                 incidentId: docTargetIncident.fullId,
                 status: newStatus,
                 situation: docSituation.trim() || docTargetIncident.desc || 'Incident recorded.',
-                location: docLocation.trim() || docTargetIncident.locationOverlay || 'Buaya, Lapu-Lapu City',
+                location: docLocation.trim() || docTargetIncident.locationOverlay || '',
                 incidentDateTime: docDateTime.trim() || formatReadableDate(docTargetIncident.rawCreatedAt),
                 actionsTaken: docActionsTaken.trim(),
                 responseOutcome: docResponseOutcome.trim(),
@@ -510,24 +502,27 @@ export default function IncidentLguScreen() {
                 completedBy: 'Assigned LGU Responder',
             };
 
-            // 1. Persist to AsyncStorage under both fullId and shortId so draft can never be lost
-            await AsyncStorage.setItem(`${DOC_STORAGE_PREFIX}${docTargetIncident.fullId}`, JSON.stringify(docData));
-            await AsyncStorage.setItem(`${DOC_STORAGE_PREFIX}${docTargetIncident.id}`, JSON.stringify(docData));
-
-            // 2. Persist to Supabase
+            // Persist to Supabase before saving a local draft or showing success.
             {
                 try {
-                    const adminSupabase = getAdminClient();
                     const appendNotes = `\n\n[DOCUMENTATION STATUS: ${newStatus.toUpperCase()}]\nActions: ${docActionsTaken.trim()}\nOutcome: ${docResponseOutcome.trim()}`;
-                    await adminSupabase.from('incident_report')
+                    if (!assignedMunicipalityId) throw new Error('No municipality assigned.');
+                    const { data: updated, error } = await supabase.from('incident_report')
                         .update({
                             description: `${docTargetIncident.desc}${appendNotes}`,
                         })
-                        .eq('report_id', docTargetIncident.fullId);
+                        .eq('report_id', docTargetIncident.fullId)
+                        .eq('municipality_id', assignedMunicipalityId)
+                        .select('report_id').maybeSingle();
+                    if (error) throw error;
+                    if (!updated) throw new Error('This report is no longer available to your municipality.');
                 } catch (dbErr) {
-                    console.warn('Supabase doc update warning:', dbErr);
+                    throw dbErr;
                 }
             }
+
+            await AsyncStorage.setItem(`${DOC_STORAGE_PREFIX}${docTargetIncident.fullId}`, JSON.stringify(docData));
+            await AsyncStorage.setItem(`${DOC_STORAGE_PREFIX}${docTargetIncident.id}`, JSON.stringify(docData));
 
             // 3. Update target incident and state immediately
             setDocTargetIncident(prev => prev ? {
@@ -584,29 +579,31 @@ export default function IncidentLguScreen() {
 
     // Confirm dispatch or acknowledge
     const handleConfirmAction = async (fullId: string, displayId: string, actionName: string) => {
-        setIncidents(prev => prev.map(inc => inc.fullId === fullId ? { ...inc, status: 'Verified' } : inc));
-        if (actionName === 'dispatch') setDispatchIncidentId(null);
-        if (actionName === 'acknowledge') setAcknowledgeIncidentId(null);
-
-        setSuccessModalData({
-            title: "Status Updated",
-            message: `Incident #${displayId} has been successfully verified/dispatched.`,
-        });
-
-        {
-            try {
-                const adminSupabase = getAdminClient();
+        try {
+                if (!assignedMunicipalityId) throw new Error('No municipality assigned.');
                 const { data: { user } } = await supabase.auth.getUser();
-                await adminSupabase.from('incident_report')
+                if (!user) throw new Error('Please sign in again.');
+                const { data: updated, error } = await supabase.from('incident_report')
                     .update({
                         status: 'Verified',
-                        reviewed_by: user?.id || null,
+                        reviewed_by: user.id,
                         reviewed_at: new Date().toISOString(),
                     })
-                    .eq('report_id', fullId);
-            } catch (err) {
-                console.error("Exception updating status in DB:", err);
-            }
+                    .eq('report_id', fullId)
+                    .eq('municipality_id', assignedMunicipalityId)
+                    .select('report_id').maybeSingle();
+                if (error) throw error;
+                if (!updated) throw new Error('This report is no longer available to your municipality.');
+                setIncidents(prev => prev.map(inc => inc.fullId === fullId ? { ...inc, status: 'Verified' } : inc));
+                if (actionName === 'dispatch') setDispatchIncidentId(null);
+                if (actionName === 'acknowledge') setAcknowledgeIncidentId(null);
+                setSuccessModalData({
+                    title: "Status Updated",
+                    message: `Incident #${displayId} has been successfully verified/dispatched.`,
+                });
+        } catch (err: any) {
+            Alert.alert('Update Failed', err.message || 'Could not update this report.');
+            fetchIncidents();
         }
     };
 

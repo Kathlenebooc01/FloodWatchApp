@@ -24,6 +24,44 @@ using (exists (
              and p.municipality_id = incident_report.municipality_id))
 ));
 
+-- A report ID supplied by a client cannot authorize an update outside the
+-- municipality assigned to that LGU. WITH CHECK also prevents moving a report.
+drop policy if exists "LGU updates assigned municipality incident reports" on public.incident_report;
+create policy "LGU updates assigned municipality incident reports"
+on public.incident_report as permissive for update to authenticated
+using (exists (
+  select 1 from public.profiles p
+  where p.id = (select auth.uid())
+    and p.role in ('lgu', 'lgu_frontliner', 'lgu_headmaster')
+    and p.municipality_id is not null
+    and p.municipality_id = incident_report.municipality_id
+))
+with check (exists (
+  select 1 from public.profiles p
+  where p.id = (select auth.uid())
+    and p.role in ('lgu', 'lgu_frontliner', 'lgu_headmaster')
+    and p.municipality_id is not null
+    and p.municipality_id = incident_report.municipality_id
+));
+
+drop policy if exists "LGU cannot update other municipalities incident reports" on public.incident_report;
+create policy "LGU cannot update other municipalities incident reports"
+on public.incident_report as restrictive for update to authenticated
+using (exists (
+  select 1 from public.profiles p
+  where p.id = (select auth.uid())
+    and (p.role not in ('lgu', 'lgu_frontliner', 'lgu_headmaster')
+         or (p.municipality_id is not null
+             and p.municipality_id = incident_report.municipality_id))
+))
+with check (exists (
+  select 1 from public.profiles p
+  where p.id = (select auth.uid())
+    and (p.role not in ('lgu', 'lgu_frontliner', 'lgu_headmaster')
+         or (p.municipality_id is not null
+             and p.municipality_id = incident_report.municipality_id))
+));
+
 -- Deliver assignment changes while an LGU user has the Reports page open.
 do $$
 begin

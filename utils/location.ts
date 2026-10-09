@@ -200,7 +200,7 @@ function assembleAddress(
     // Normalize and clean barangay
     barangay = barangay.replace(/^Barangay\s+/i, '').trim();
 
-    // If city is empty or just "Cebu", check subregion or default to Lapu-Lapu City
+    // Resolve the city only from the geocoder's actual administrative fields.
     if (!city || city.toLowerCase() === 'cebu') {
         if (expo.subregion && expo.subregion.toLowerCase().includes('lapu')) {
             city = 'Lapu-Lapu City';
@@ -214,11 +214,6 @@ function assembleAddress(
         barangay = '';
     }
 
-    // If in Lapu-Lapu City and no specific barangay was identified, default to Buaya
-    if (!barangay && (city.toLowerCase().includes('lapu-lapu') || city.toLowerCase().includes('lapulapu') || !city)) {
-        barangay = 'Buaya';
-        if (!city) city = 'Lapu-Lapu City';
-    }
 
     // expo street info as fallback
     const expoName = (expo.name && !isPlusCode(expo.name)) ? expo.name.trim() : '';
