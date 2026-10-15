@@ -49,6 +49,7 @@ export interface EmergencyRequestParent {
     submitterId?: string;
     isEscalation?: boolean;
     hazardType?: string;
+    reportType?: string;
     createdAt: string;
     updatedAt: string;
     description: string;
@@ -441,6 +442,7 @@ export default function SituationalAdminScreen() {
                         submitterId: ir.user_id,
                         isEscalation: isEscalation,
                         hazardType: rawHazard,
+                        reportType: ir.report_type,
                         createdAt,
                         updatedAt,
                         description: cleanDesc || 'Official situational update filed by local government unit.',
@@ -570,22 +572,36 @@ export default function SituationalAdminScreen() {
             const adminSupabase = getAdminClient();
             const { data: { user } } = await supabase.auth.getUser();
 
-            await adminSupabase
-                .from('resource_requests')
-                .update({
-                    status: newStatus,
-                    reviewed_by: user?.id || null,
-                })
-                .eq('request_id', targetRequest.id);
-
-            await adminSupabase
-                .from('incident_report')
-                .update({
-                    status: newStatus === 'Accepted' ? 'Verified' : (newStatus === 'Rejected' ? 'Rejected' : newStatus),
-                    reviewed_by: user?.id || null,
-                    reviewed_at: new Date().toISOString(),
-                })
-                .eq('report_id', targetRequest.id);
+            const isSituationalReport = ['situational_report', 'situational'].includes(targetRequest.reportType || '') ||
+                !!targetRequest.hazardType?.startsWith('[SITUATIONAL]');
+            if (isSituationalReport) {
+                const decision = newStatus === 'Accepted' ? 'Verified' : newStatus;
+                const { error } = await supabase.rpc('review_lgu_situational_report', {
+                    p_report_id: targetRequest.id,
+                    p_decision: decision,
+                });
+                if (error) throw error;
+            } else if (targetRequest.hazardType) {
+                const { data, error } = await adminSupabase
+                    .from('incident_report')
+                    .update({
+                        status: newStatus === 'Accepted' ? 'Verified' : newStatus,
+                        reviewed_by: user?.id || null,
+                        reviewed_at: new Date().toISOString(),
+                    })
+                    .eq('report_id', targetRequest.id)
+                    .select('report_id').maybeSingle();
+                if (error) throw error;
+                if (!data) throw new Error('The incident report was not found.');
+            } else {
+                const { data, error } = await adminSupabase
+                    .from('resource_requests')
+                    .update({ status: newStatus, reviewed_by: user?.id || null })
+                    .eq('request_id', targetRequest.id)
+                    .select('request_id').maybeSingle();
+                if (error) throw error;
+                if (!data) throw new Error('The emergency request was not found.');
+            }
 
             // Determine if this is an escalation report
             let isEsc = !!targetRequest.isEscalation ||
@@ -609,7 +625,7 @@ export default function SituationalAdminScreen() {
             }
 
             // Insert notification for LGU side
-            if (newStatus === 'Accepted') {
+            if (!isSituationalReport && newStatus === 'Accepted') {
                 const notifTitle = isEsc
                     ? '🚨 Escalation Report Accepted'
                     : 'Request Accepted ✅';
@@ -626,7 +642,7 @@ export default function SituationalAdminScreen() {
                     is_read: false,
                     created_at: new Date().toISOString(),
                 });
-            } else if (newStatus === 'Rejected') {
+            } else if (!isSituationalReport && newStatus === 'Rejected') {
                 await adminSupabase.from('notifications').insert({
                     user_id: targetUserId || null,
                     target_role: 'lgu',

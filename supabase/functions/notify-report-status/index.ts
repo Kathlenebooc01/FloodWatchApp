@@ -60,6 +60,16 @@ Deno.serve(async (req) => {
       });
     }
 
+    // The database writes LGU situational review notifications in the same
+    // transaction as the status change, including linked updates.
+    if (report.report_type === 'situational_report' || report.report_type === 'situational' ||
+        report.hazard_type?.startsWith('[SITUATIONAL]')) {
+      return new Response(JSON.stringify({ skipped: true, reason: 'Handled by situational review trigger' }), {
+        status: 200,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
     // Build label from report_type
     const reportLabel =
       report.report_type === 'quick_snap'      ? 'Quick Snap Report'  :

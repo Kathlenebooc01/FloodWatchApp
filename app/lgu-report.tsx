@@ -83,8 +83,11 @@ export default function LguReportScreen() {
             const { data: { user } } = await supabase.auth.getUser();
             if (!user) throw new Error('Please sign in to your LGU account.');
             const { data: profile, error: profileError } = await supabase
-                .from('profiles').select('municipality_id').eq('id', user.id).maybeSingle();
+                .from('profiles').select('role, municipality_id').eq('id', user.id).maybeSingle();
             if (profileError) throw profileError;
+            if (!['lgu', 'lgu_frontliner', 'lgu_headmaster'].includes(profile?.role || '')) {
+                throw new Error('Only LGU accounts can submit escalation reports.');
+            }
             const municipalityId = profile?.municipality_id;
             if (!municipalityId) throw new Error('No municipality assigned. Please contact the PDRRMO.');
 
@@ -92,6 +95,8 @@ export default function LguReportScreen() {
                 .from('incident_report')
                 .insert({
                     user_id: user?.id || null,
+                    // The deployed incident_report constraint permits moderate_report.
+                    // The LGU Incident screen separates this record by submitter role.
                     report_type: 'moderate_report',
                     hazard_type: 'Support escalation',
                     description: `Regional Support Escalation requested by LGU Officer for ${currentSector}. Local emergency operational capacity exceeded; requesting direct provincial assistance and response coordination from PDRRMO.`,

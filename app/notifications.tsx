@@ -121,7 +121,7 @@ export default function NotificationsScreen() {
             let targetRole = 'user';
             if (userId) {
                 const { data: profile } = await supabase.from('profiles').select('role').eq('id', userId).maybeSingle();
-                if (profile?.role === 'lgu' || profile?.role === 'lgu_headmaster' || profile?.role === 'admin') {
+                if (profile?.role === 'lgu' || profile?.role === 'lgu_frontliner' || profile?.role === 'lgu_headmaster' || profile?.role === 'admin') {
                     targetRole = 'lgu';
                 }
             }

@@ -23,7 +23,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { imageBase64, backBase64, imageUrl, idType, verificationId, userId } = await req.json();
+    const { imageBase64, backBase64, imageUrl, backUrl, idType, verificationId, userId } = await req.json();
 
     const supabase = createClient(
       Deno.env.get('SUPABASE_URL')!,
@@ -56,9 +56,10 @@ Deno.serve(async (req) => {
     }
 
     // If base64Data is available, ensure it is stored in Supabase storage so admin can view it
-    if (base64Data) {
+    if (base64Data && !imageUrl) {
       try {
         const frontBytes = decodeBase64ToUint8Array(base64Data);
+        if (frontBytes.byteLength > 800 * 1024) throw new Error('ID photo exceeds 800 KB. Please compress it before uploading.');
         const fileName = `id_front_${verificationId || Date.now()}_${Date.now()}.jpg`;
         const { error: upErr } = await supabase
           .storage
@@ -79,15 +80,19 @@ Deno.serve(async (req) => {
           console.warn('⚠️ Supabase storage front upload error:', upErr.message);
         }
       } catch (upEx: any) {
+        if (upEx.message?.includes('exceeds 800 KB')) {
+          return new Response(JSON.stringify({ error: upEx.message }), { status: 413, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
         console.warn('⚠️ Server storage front upload exception:', upEx.message);
       }
     }
 
     // 2. Upload back image if provided
-    let finalBackUrl: string | null = null;
-    if (backBase64) {
+    let finalBackUrl: string | null = backUrl || null;
+    if (backBase64 && !backUrl) {
       try {
         const backBytes = decodeBase64ToUint8Array(backBase64);
+        if (backBytes.byteLength > 800 * 1024) throw new Error('Back ID photo exceeds 800 KB. Please compress it before uploading.');
         const backFileName = `id_back_${verificationId || Date.now()}_${Date.now()}.jpg`;
         const { error: backUpErr } = await supabase
           .storage
@@ -108,6 +113,9 @@ Deno.serve(async (req) => {
           console.warn('⚠️ Supabase storage back upload error:', backUpErr.message);
         }
       } catch (backEx: any) {
+        if (backEx.message?.includes('exceeds 800 KB')) {
+          return new Response(JSON.stringify({ error: backEx.message }), { status: 413, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
         console.warn('⚠️ Server storage back upload exception:', backEx.message);
       }
     }

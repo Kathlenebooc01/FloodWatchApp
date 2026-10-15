@@ -2,7 +2,7 @@ import { resolveReportMunicipality } from '@/utils/report-municipality';
 import { Ionicons } from '@expo/vector-icons';
 import { CameraView, FlashMode, useCameraPermissions } from 'expo-camera';
 import { useRouter } from 'expo-router';
-import * as FileSystem from 'expo-file-system/legacy';
+import { optimizeImage, uploadOptimizedImage } from '@/utils/upload-optimization';
 import React, { useEffect, useRef, useState } from 'react';
 import {
     ActivityIndicator,
@@ -49,7 +49,7 @@ export default function QuickSnapScreen() {
         if (cameraRef.current) {
             const photo = await cameraRef.current.takePictureAsync({
                 mirror: facing === 'front',
-                quality: 0.2, // Ensures file size is in KB
+                quality: 0.8,
             });
             if (photo) {
                 setCapturedImage(photo.uri);
@@ -78,11 +78,14 @@ export default function QuickSnapScreen() {
                 return;
             }
 
+            // Reuse the compressed image for AI validation and storage.
+            const optimizedPhoto = await optimizeImage(capturedImage);
+
             // 2. Pre-validate image with AI BEFORE uploading or saving
             let aiHazardType = 'Flood';
             
             try {
-                const imgResp = await fetch(capturedImage);
+                const imgResp = await fetch(optimizedPhoto.uri);
                 const arrBuf = await imgResp.arrayBuffer();
                 const uint8 = new Uint8Array(arrBuf);
                 let binary = '';
@@ -134,25 +137,9 @@ export default function QuickSnapScreen() {
                 const SUPABASE_URL = 'https://xncciaozzxoqbesfxpww.supabase.co';
                 const ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhuY2NpYW96enhvcWJlc2Z4cHd3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIzNDgyMzQsImV4cCI6MjA4NzkyNDIzNH0.im6QTwjVyryj4y0fvcloH4qw-Rj5PPftDYhk4sKtymI';
 
-                const uploadUrl = `${SUPABASE_URL}/storage/v1/object/incident-reports/${fileName}`;
-                const uploadResult = await FileSystem.uploadAsync(uploadUrl, capturedImage, {
-                    httpMethod: 'POST',
-                    uploadType: (FileSystem as any).FileSystemUploadType?.BINARY_CONTENT ?? 0,
-                    headers: {
-                        'Authorization': `Bearer ${token || ANON_KEY}`,
-                        'apikey': ANON_KEY,
-                        'Content-Type': 'image/jpeg',
-                        'x-upsert': 'true',
-                    },
-                });
-
-                if (uploadResult.status === 200 || uploadResult.status === 201) {
-                    imageUrl = `${SUPABASE_URL}/storage/v1/object/public/incident-reports/${fileName}`;
-                } else {
-                    console.warn('Upload failed with status:', uploadResult.status, uploadResult.body);
-                }
+                imageUrl = await uploadOptimizedImage({ uri: optimizedPhoto.uri, fileName, token, supabaseUrl: SUPABASE_URL, anonKey: ANON_KEY, prepared: true });
             } catch (e) {
-                console.warn('⚠️ Upload failed:', e);
+                throw e;
             }
 
             // 4. Get municipality
@@ -166,7 +153,7 @@ export default function QuickSnapScreen() {
                     hazard_type: aiHazardType !== 'None' ? aiHazardType : 'Flood',
                     description: `URGENT HELP! Quick snap report from ${locationData?.full || locationName}`,
                     image_url: imageUrl,
-                    status: 'Pending_AI',
+                    status: 'Pending',
                     report_type: 'quick_snap',
                     municipality_id: municipalityId,
                     latitude: locationData?.latitude || null,
@@ -216,7 +203,7 @@ export default function QuickSnapScreen() {
     if (!isPreviewMode) {
         return (
             <View style={styles.container}>
-                <CameraView ref={cameraRef} style={styles.camera} facing={facing} flash={flash} enableTorch={flash === 'on'}>
+                <CameraView ref={cameraRef} style={styles.camera} facing={facing} flash={flash} enableTorch={flash === 'on'} />
                     <View style={styles.overlay}>
                         {/* Header */}
                         <View style={styles.header}>
@@ -268,7 +255,6 @@ export default function QuickSnapScreen() {
                             </View>
                         </View>
                     </View>
-                </CameraView>
             </View>
         );
     }
@@ -389,7 +375,7 @@ export default function QuickSnapScreen() {
 const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: 'black' },
     camera: { flex: 1 },
-    overlay: { flex: 1, paddingHorizontal: 25, paddingVertical: 60, justifyContent: 'space-between', alignItems: 'center' },
+    overlay: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, paddingHorizontal: 25, paddingVertical: 60, justifyContent: 'space-between', alignItems: 'center' },
 
     header: { flexDirection: 'row', width: '100%', justifyContent: 'space-between', alignItems: 'center' },
     titleContainer: { alignItems: 'center' },

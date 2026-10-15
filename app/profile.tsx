@@ -1,7 +1,7 @@
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as FileSystem from 'expo-file-system/legacy';
+import { uploadOptimizedImage } from '@/utils/upload-optimization';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
@@ -240,7 +240,7 @@ export default function ProfileScreen() {
             mediaTypes: ['images'],
             allowsEditing: true,
             aspect: [1, 1],
-            quality: 0.2, // Ensures file size is in KB
+            quality: 0.85,
         });
         if (!result.canceled) {
             const uri = result.assets[0].uri;
@@ -253,13 +253,7 @@ export default function ProfileScreen() {
                 const anonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
                 if (!supabaseUrl || !anonKey) throw new Error('Photo upload is unavailable.');
                 const fileName = `profile_${userId}_${Date.now()}.jpg`;
-                const upload = await FileSystem.uploadAsync(`${supabaseUrl}/storage/v1/object/incident-reports/${fileName}`, uri, {
-                    httpMethod: 'POST',
-                    uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
-                    headers: { Authorization: `Bearer ${token}`, apikey: anonKey, 'Content-Type': 'image/jpeg' },
-                });
-                if (upload.status !== 200 && upload.status !== 201) throw new Error('Photo upload failed.');
-                const photoUrl = `${supabaseUrl}/storage/v1/object/public/incident-reports/${fileName}`;
+                const photoUrl = await uploadOptimizedImage({ uri, fileName, token, supabaseUrl, anonKey });
                 const { error } = await supabase.from('profiles').update({ profile_picture: photoUrl }).eq('id', userId);
                 if (error) throw error;
                 setProfilePhoto(photoUrl);
@@ -301,11 +295,15 @@ export default function ProfileScreen() {
                     department_name: hotlineName.trim(),
                     hotline_number: hotlineNumber.trim(),
                     municipality_id: account.municipality_id,
+                    lgu_account_id: userId,
                 })
                 .select('hotline_id')
                 .single();
             if (saveError || !saved) {
-                if (saveError?.code === '23505') throw new Error('This hotline is already saved for your municipality.');
+                if (saveError?.code === '23505') throw new Error('This hotline is already saved for your account.');
+                if (saveError?.code === '42703' || saveError?.code === 'PGRST204') {
+                    throw new Error('Account-specific hotlines are not available yet. The Supabase hotline migration must be applied first.');
+                }
                 throw saveError || new Error('The hotline could not be saved.');
             }
             setHotlineModalVisible(false);

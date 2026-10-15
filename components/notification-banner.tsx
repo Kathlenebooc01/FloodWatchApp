@@ -284,7 +284,10 @@ export default function NotificationBanner() {
                     const oldState = prevState[rep.report_id];
                     const isRecent = (Date.now() - new Date(rep.created_at).getTime()) < 48 * 60 * 60 * 1000;
 
-                    if (oldState && oldState !== statusStr && isRecent) {
+                    const isSituational = rep.report_type === 'situational_report' || rep.report_type === 'situational' ||
+                        (rep.hazard_type || '').startsWith('[SITUATIONAL]');
+                    // The notifications-table event is the sole banner for a situational review.
+                    if (oldState && oldState !== statusStr && isRecent && !isSituational) {
                         const isEsc = (rep.hazard_type || '').toLowerCase().includes('escalation') ||
                                       (rep.title || '').toLowerCase().includes('escalation');
                         const isSit = rep.report_type === 'situational';
@@ -390,7 +393,7 @@ export default function NotificationBanner() {
                     .eq('id', uid)
                     .single();
                 if (profile) {
-                    if (['lgu', 'lgu_headmaster', 'admin'].includes(profile.role)) {
+                    if (['lgu', 'lgu_frontliner', 'lgu_headmaster', 'admin'].includes(profile.role)) {
                         targetRole.current = 'lgu';
                     } else {
                         targetRole.current = 'user';

@@ -1,6 +1,6 @@
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, TextInput, Image, ActivityIndicator, KeyboardAvoidingView, Platform, Alert, Modal, Animated, Dimensions, StatusBar, Switch, FlatList, RefreshControl, Linking } from 'react-native';
 import Navbar from '../components/navbar'; // Make sure the path to your Navbar is correct
@@ -39,6 +39,7 @@ export default function HotlineScreen() {
     const { saved, name } = useLocalSearchParams<{ saved?: string; name?: string }>();
     const [searchQuery, setSearchQuery] = useState('');
     const [customHotlines, setCustomHotlines] = useState<any[]>([]);
+    const hotlineLoad = useRef(0);
     const [showSavedModal, setShowSavedModal] = useState(false);
 
     useEffect(() => {
@@ -51,31 +52,34 @@ export default function HotlineScreen() {
     };
 
     const loadCustomHotlines = useCallback(async () => {
+        const load = ++hotlineLoad.current;
+        setCustomHotlines([]);
         try {
             const { data: sessionData } = await supabase.auth.getSession();
             const userId = sessionData.session?.user.id;
-            if (!userId) { setCustomHotlines([]); return; }
+            if (!userId) return;
             const { data: profile, error: profileError } = await supabase.from('profiles')
                 .select('role, municipality_id').eq('id', userId).maybeSingle();
             if (profileError) throw profileError;
+            if (load !== hotlineLoad.current) return;
             if (!profile?.role?.toLowerCase().includes('lgu') || !profile.municipality_id) {
-                setCustomHotlines([]);
                 return;
             }
             const { data, error } = await supabase.from('municipality_lgu_hotlines')
-                .select('hotline_id, department_name, hotline_number, municipality_id')
-                .eq('municipality_id', profile.municipality_id)
+                .select('hotline_id, department_name, hotline_number')
+                .eq('lgu_account_id', userId)
                 .order('department_name');
             if (error) throw error;
+            if (load !== hotlineLoad.current) return;
             setCustomHotlines((data || []).map(row => ({
                 id: row.hotline_id,
                 name: row.department_name,
                 service: 'LGU Hotline',
                 number: row.hotline_number,
             })));
-        } catch (err) {
-            console.error('Failed to load custom hotlines', err);
-            setCustomHotlines([]);
+        } catch (err: any) {
+            if (err?.code !== '42703') console.error('Failed to load custom hotlines', err);
+            if (load === hotlineLoad.current) setCustomHotlines([]);
         }
     }, []);
 
@@ -84,6 +88,11 @@ export default function HotlineScreen() {
             let active = true;
             let channel: ReturnType<typeof supabase.channel> | null = null;
             loadCustomHotlines();
+            const { data: authListener } = supabase.auth.onAuthStateChange((event) => {
+                if (event === 'SIGNED_IN' || event === 'SIGNED_OUT' || event === 'USER_UPDATED') {
+                    loadCustomHotlines();
+                }
+            });
             const subscribe = async () => {
                 const { data: sessionData } = await supabase.auth.getSession();
                 const userId = sessionData.session?.user.id;
@@ -94,13 +103,15 @@ export default function HotlineScreen() {
                 channel = supabase.channel(`hotlines-${userId}-${Date.now()}`)
                     .on('postgres_changes', {
                         event: '*', schema: 'public', table: 'municipality_lgu_hotlines',
-                        filter: `municipality_id=eq.${profile.municipality_id}`,
+                        filter: `lgu_account_id=eq.${userId}`,
                     }, () => { if (active) loadCustomHotlines(); })
                     .subscribe();
             };
             subscribe();
             return () => {
                 active = false;
+                hotlineLoad.current++;
+                authListener.subscription.unsubscribe();
                 if (channel) supabase.removeChannel(channel);
             };
         }, [loadCustomHotlines])

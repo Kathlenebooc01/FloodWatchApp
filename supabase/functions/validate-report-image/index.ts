@@ -197,7 +197,8 @@ If the image is NOT a hazard (e.g. selfie, food, random objects, clear weather, 
           status: newStatus,
           hazard_type: result.hazard_type,
         })
-        .eq('report_id', reportId);
+        .eq('report_id', reportId)
+        .in('status', ['Pending', 'Pending_AI']);
 
       if (updateError) {
         console.error('❌ Status update failed:', updateError);

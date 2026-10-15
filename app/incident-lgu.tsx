@@ -1,7 +1,9 @@
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
+import { optimizeImage, validateDocument } from '@/utils/upload-optimization';
 import { useFocusEffect, useRouter } from 'expo-router';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
@@ -180,6 +182,22 @@ const formatIncFileSize = (bytes?: number): string => {
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 };
 
+const prepareIncImageAttachment = async (uri: string, name: string): Promise<IncidentAttachment> => {
+    const optimized = await optimizeImage(uri);
+    const base64 = await FileSystem.readAsStringAsync(optimized.uri, { encoding: 'base64' });
+    return {
+        id: `${Date.now()}_${Math.random()}`,
+        name: name.replace(/\.[^.]+$/, '') + '.jpg',
+        uri: optimized.uri,
+        size: optimized.size,
+        formattedSize: formatIncFileSize(optimized.size),
+        mimeType: 'image/jpeg',
+        fileType: 'image',
+        uploadedAt: new Date().toISOString(),
+        base64: `data:image/jpeg;base64,${base64}`,
+    };
+};
+
 const getIncFileMeta = (type: IncidentAttachment['fileType']) => {
     switch (type) {
         case 'image': return { icon: 'image-outline', color: '#059669', bg: '#ECFDF5', label: 'IMAGE' };
@@ -201,12 +219,14 @@ export default function IncidentLguScreen() {
     const loadedAssignment = useRef<string | null>(null);
 
     // Filter state
-    const [activeFilter, setActiveFilter] = useState<'all' | 'quick_snap' | 'moderate_report' | 'general_inquiries' | 'docs_pending' | 'docs_completed' | 'closed'>('all');
+    const [activeFilter, setActiveFilter] = useState<'all' | 'quick_snap' | 'moderate_report' | 'general_inquiries' | 'docs_pending' | 'docs_completed' | 'rejected'>('all');
 
     // Action modals
     const [dispatchIncidentId, setDispatchIncidentId] = useState<string | null>(null);
     const [acknowledgeIncidentId, setAcknowledgeIncidentId] = useState<string | null>(null);
     const [selectedIncident, setSelectedIncident] = useState<IncidentData | null>(null);
+    const [rejectTarget, setRejectTarget] = useState<IncidentData | null>(null);
+    const [acceptingIncidentId, setAcceptingIncidentId] = useState<string | null>(null);
     const [successModalData, setSuccessModalData] = useState<{ title: string; message: string } | null>(null);
 
     // ── DOCUMENTATION MODAL STATE ──
@@ -273,15 +293,29 @@ export default function IncidentLguScreen() {
                 .from('incident_report')
                 .select('*')
                 .eq('municipality_id', municipalityId)
-                .neq('report_type', 'situational_report')
-                .not('hazard_type', 'like', '[SITUATIONAL]%')
+                .in('report_type', ['quick_snap', 'moderate_report', 'general_inquiries'])
                 .order('created_at', { ascending: false });
 
             if (error) throw error;
 
+            // Check the submitter's database role before showing a report. Older
+            // LGU escalations were saved as moderate_report, so category alone
+            // cannot distinguish them from citizen reports.
+            const submitterIds = [...new Set((data || []).map(row => row.user_id).filter(Boolean))];
+            const citizenIds = new Set<string>();
+            for (let start = 0; start < submitterIds.length; start += 100) {
+                const { data: submitters, error: submitterError } = await supabase
+                    .from('profiles')
+                    .select('id')
+                    .in('id', submitterIds.slice(start, start + 100))
+                    .eq('role', 'citizen');
+                if (submitterError) throw submitterError;
+                submitters?.forEach(submitter => citizenIds.add(submitter.id));
+            }
+
             const mapped: IncidentData[] = await Promise.all(
-                (data || []).map(async (row) => {
-                    const rt = row.report_type || 'moderate_report';
+                (data || []).filter(row => citizenIds.has(row.user_id)).map(async (row) => {
+                    const rt = row.report_type;
 
                     let urgencyStr = 'MODERATE';
                     let actionLbl = 'Assess Report';
@@ -409,6 +443,7 @@ export default function IncidentLguScreen() {
 
     // ── OPEN DOCUMENTATION FORM MODAL ──
     const openDocumentationModal = async (incident: IncidentData) => {
+        if (incident.status !== 'Verified' && incident.docStatus === 'Pending') return;
         setDocTargetIncident(incident);
         setAttemptedDocSubmit(false);
 
@@ -460,6 +495,7 @@ export default function IncidentLguScreen() {
     // ── SAVE DOCUMENTATION (Draft or Final Submit) ──
     const handleSaveDocumentation = async (mode: 'draft' | 'submit') => {
         if (!docTargetIncident) return;
+        if (docTargetIncident.status !== 'Verified' && docTargetIncident.docStatus === 'Pending') return;
 
         // Validation for final submission (only fields 4 and 5 are required from the user, 1-3 are auto-filled)
         if (mode === 'submit') {
@@ -513,6 +549,7 @@ export default function IncidentLguScreen() {
                         })
                         .eq('report_id', docTargetIncident.fullId)
                         .eq('municipality_id', assignedMunicipalityId)
+                        .eq('status', 'Verified')
                         .select('report_id').maybeSingle();
                     if (error) throw error;
                     if (!updated) throw new Error('This report is no longer available to your municipality.');
@@ -577,43 +614,62 @@ export default function IncidentLguScreen() {
         }
     };
 
-    // Confirm dispatch or acknowledge
-    const handleConfirmAction = async (fullId: string, displayId: string, actionName: string) => {
+    const handleReviewReport = async (incident: IncidentData, decision: 'Verified' | 'Rejected') => {
+        if (acceptingIncidentId || incident.status !== 'Pending') return;
+        setAcceptingIncidentId(incident.fullId);
         try {
                 if (!assignedMunicipalityId) throw new Error('No municipality assigned.');
                 const { data: { user } } = await supabase.auth.getUser();
                 if (!user) throw new Error('Please sign in again.');
                 const { data: updated, error } = await supabase.from('incident_report')
                     .update({
-                        status: 'Verified',
+                        status: decision,
                         reviewed_by: user.id,
                         reviewed_at: new Date().toISOString(),
                     })
-                    .eq('report_id', fullId)
+                    .eq('report_id', incident.fullId)
                     .eq('municipality_id', assignedMunicipalityId)
+                    .in('status', ['Pending', 'Pending_AI'])
                     .select('report_id').maybeSingle();
                 if (error) throw error;
-                if (!updated) throw new Error('This report is no longer available to your municipality.');
-                setIncidents(prev => prev.map(inc => inc.fullId === fullId ? { ...inc, status: 'Verified' } : inc));
-                if (actionName === 'dispatch') setDispatchIncidentId(null);
-                if (actionName === 'acknowledge') setAcknowledgeIncidentId(null);
+                if (!updated) throw new Error('This report is no longer pending or available to your municipality.');
+                setIncidents(prev => prev.map(inc => inc.fullId === incident.fullId ? { ...inc, status: decision } : inc));
+                setSelectedIncident(prev => prev?.fullId === incident.fullId ? { ...prev, status: decision } : prev);
                 setSuccessModalData({
-                    title: "Status Updated",
-                    message: `Incident #${displayId} has been successfully verified/dispatched.`,
+                    title: decision === 'Verified' ? 'Report Accepted' : 'Report Rejected',
+                    message: decision === 'Verified'
+                        ? `Incident #${incident.id} is now Verified. Documentation can be created.`
+                        : `Incident #${incident.id} is now Rejected.`,
                 });
         } catch (err: any) {
             Alert.alert('Update Failed', err.message || 'Could not update this report.');
             fetchIncidents();
+        } finally {
+            setAcceptingIncidentId(null);
         }
+    };
+
+    const handleAcceptReport = (incident: IncidentData) => handleReviewReport(incident, 'Verified');
+    const handleRejectReport = (incident: IncidentData) => handleReviewReport(incident, 'Rejected');
+    const confirmRejectReport = (incident: IncidentData) => {
+        setSelectedIncident(incident);
+        setRejectTarget(incident);
+    };
+
+    const handleConfirmAction = (fullId: string, _displayId: string, actionName: string) => {
+        const incident = incidents.find(item => item.fullId === fullId);
+        if (incident) handleAcceptReport(incident);
+        if (actionName === 'dispatch') setDispatchIncidentId(null);
+        if (actionName === 'acknowledge') setAcknowledgeIncidentId(null);
     };
 
     // Filter computation
     const quickCount = incidents.filter(i => i.reportType === 'quick_snap' && i.status?.toLowerCase() !== 'closed').length;
     const moderateCount = incidents.filter(i => i.reportType === 'moderate_report' && i.status?.toLowerCase() !== 'closed').length;
     const inquiryCount = incidents.filter(i => i.reportType === 'general_inquiries' && i.status?.toLowerCase() !== 'closed').length;
-    const docsPendingCount = incidents.filter(i => i.docStatus !== 'Completed' && i.status?.toLowerCase() !== 'closed').length;
+    const docsPendingCount = incidents.filter(i => i.docStatus !== 'Completed' && !['closed', 'rejected'].includes(i.status?.toLowerCase())).length;
     const docsCompletedCount = incidents.filter(i => i.docStatus === 'Completed' && i.status?.toLowerCase() !== 'closed').length;
-    const closedCount = incidents.filter(i => i.status?.toLowerCase() === 'closed').length;
+    const rejectedCount = incidents.filter(i => i.status === 'Rejected').length;
 
     const filteredIncidents = incidents.filter(inc => {
         const query = searchQuery.toLowerCase();
@@ -631,9 +687,9 @@ export default function IncidentLguScreen() {
         if (activeFilter === 'quick_snap') return inc.reportType === 'quick_snap';
         if (activeFilter === 'moderate_report') return inc.reportType === 'moderate_report';
         if (activeFilter === 'general_inquiries') return inc.reportType === 'general_inquiries';
-        if (activeFilter === 'docs_pending') return inc.docStatus === 'Pending' || inc.docStatus === 'In Progress';
+        if (activeFilter === 'docs_pending') return inc.status !== 'Rejected' && (inc.docStatus === 'Pending' || inc.docStatus === 'In Progress');
         if (activeFilter === 'docs_completed') return inc.docStatus === 'Completed';
-        if (activeFilter === 'closed') return inc.status?.toLowerCase() === 'closed';
+        if (activeFilter === 'rejected') return inc.status?.toLowerCase() === 'rejected';
 
         return true;
     });
@@ -716,17 +772,18 @@ export default function IncidentLguScreen() {
                     </TouchableOpacity>
 
                     <TouchableOpacity
-                        style={[s.statCardHalf, { borderColor: activeFilter === 'closed' ? '#64748B' : 'transparent' }]}
+                        style={[s.statCardHalf, { borderColor: activeFilter === 'rejected' ? '#DC2626' : 'transparent' }]}
                         activeOpacity={0.9}
-                        onPress={() => setActiveFilter(prev => prev === 'closed' ? 'all' : 'closed')}
+                        onPress={() => setActiveFilter(prev => prev === 'rejected' ? 'all' : 'rejected')}
                     >
                         <View style={s.statHeader}>
-                            <Text style={s.statLabel}>CLOSED CASES</Text>
-                            <Ionicons name="lock-closed-outline" size={16} color="#64748B" />
+                            <Text style={[s.statLabel, { color: '#B91C1C' }]}>REJECTED</Text>
+                            <Ionicons name="close-circle-outline" size={16} color="#DC2626" />
                         </View>
-                        <Text style={s.statValue}>{closedCount}</Text>
-                        <Text style={s.statSub}>Archived Records</Text>
+                        <Text style={[s.statValue, { color: '#DC2626' }]}>{rejectedCount}</Text>
+                        <Text style={s.statSub}>Rejected Reports</Text>
                     </TouchableOpacity>
+
                 </View>
 
                 {/* ── FILTER CHIPS ── */}
@@ -736,7 +793,7 @@ export default function IncidentLguScreen() {
                     style={s.filterScrollView}
                     contentContainerStyle={s.filterRowScroll}
                 >
-                    {(['all', 'docs_pending', 'docs_completed', 'quick_snap', 'moderate_report', 'closed'] as const).map(f => (
+                    {(['all', 'docs_pending', 'docs_completed', 'quick_snap', 'moderate_report', 'rejected'] as const).map(f => (
                         <TouchableOpacity
                             key={f}
                             style={[s.filterChip, activeFilter === f && s.filterChipActive]}
@@ -747,7 +804,7 @@ export default function IncidentLguScreen() {
                                  f === 'docs_pending' ? 'Docs Pending' :
                                  f === 'docs_completed' ? 'Docs Completed' :
                                  f === 'quick_snap' ? 'Quick Snaps' :
-                                 f === 'moderate_report' ? 'Moderate' : 'Closed'}
+                                 f === 'moderate_report' ? 'Moderate' : 'Rejected'}
                             </Text>
                         </TouchableOpacity>
                     ))}
@@ -802,17 +859,19 @@ export default function IncidentLguScreen() {
                                     </View>
                                     <View style={[
                                         s.badge,
+                                        item.status === 'Rejected' ? s.badgeRed :
                                         isClosed ? s.badgeGray :
                                         item.reportType === 'quick_snap' ? s.badgeRed :
                                         item.reportType === 'moderate_report' ? s.badgeYellow : s.badgeGray
                                     ]}>
                                         <Text style={[
                                             s.badgeText,
+                                            item.status === 'Rejected' ? s.badgeTextRed :
                                             isClosed ? s.badgeTextGray :
                                             item.reportType === 'quick_snap' ? s.badgeTextRed :
                                             item.reportType === 'moderate_report' ? s.badgeTextYellow : s.badgeTextGray
                                         ]}>
-                                            {isClosed ? 'CLOSED' : item.urgency}
+                                            {item.status === 'Rejected' ? 'REJECTED' : isClosed ? 'CLOSED' : item.urgency}
                                         </Text>
                                     </View>
                                 </View>
@@ -820,6 +879,7 @@ export default function IncidentLguScreen() {
                                 {/* ── REQUIRED DOCUMENTATION STATUS & TIMESTAMPS BOX ── */}
                                 <View style={[
                                     s.docStatusBanner,
+                                    item.status === 'Rejected' ? s.docBannerRejected :
                                     item.docStatus === 'Completed' ? s.docBannerCompleted :
                                     item.docStatus === 'In Progress' ? s.docBannerInProgress : s.docBannerPending
                                 ]}>
@@ -827,29 +887,33 @@ export default function IncidentLguScreen() {
                                         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                                             <Ionicons
                                                 name={
+                                                    item.status === 'Rejected' ? 'close-circle' :
                                                     item.docStatus === 'Completed' ? 'checkmark-circle' :
                                                     item.docStatus === 'In Progress' ? 'create-outline' : 'alert-circle-outline'
                                                 }
                                                 size={16}
                                                 color={
+                                                    item.status === 'Rejected' ? '#DC2626' :
                                                     item.docStatus === 'Completed' ? '#059669' :
                                                     item.docStatus === 'In Progress' ? '#2563EB' : '#D97706'
                                                 }
                                                 style={{ marginRight: 6 }}
                                             />
-                                            <Text style={s.docBannerLabel}>DOCUMENTATION STATUS:</Text>
+                                            <Text style={[s.docBannerLabel, item.status === 'Rejected' && s.docTextRejected]}>DOCUMENTATION STATUS:</Text>
                                         </View>
                                         <View style={[
                                             s.docStatusPill,
+                                            item.status === 'Rejected' ? s.docPillRejected :
                                             item.docStatus === 'Completed' ? s.docPillCompleted :
                                             item.docStatus === 'In Progress' ? s.docPillInProgress : s.docPillPending
                                         ]}>
                                             <Text style={[
                                                 s.docStatusPillText,
+                                                item.status === 'Rejected' ? s.docTextRejected :
                                                 item.docStatus === 'Completed' ? s.docTextCompleted :
                                                 item.docStatus === 'In Progress' ? s.docTextInProgress : s.docTextPending
                                             ]}>
-                                                {item.docStatus.toUpperCase()}
+                                                {item.status === 'Rejected' ? 'REPORT REJECTED' : item.docStatus.toUpperCase()}
                                             </Text>
                                         </View>
                                     </View>
@@ -881,24 +945,39 @@ export default function IncidentLguScreen() {
                                 {/* Description */}
                                 <Text style={s.cardDesc} numberOfLines={3}>{formatReportTitle(item.desc)}</Text>
 
-                                {/* Documentation action */}
+                                {/* Review actions, then documentation */}
                                 <View style={s.cardActionRow}>
-                                    <TouchableOpacity
-                                        style={[s.actionHalfBtn, s.docActionBtn]}
-                                        activeOpacity={0.8}
-                                        onPress={() => openDocumentationModal(item)}
-                                    >
-                                        <Ionicons
-                                            name="document-text-outline"
-                                            size={17}
-                                            color="#2563EB"
-                                            style={{ marginRight: 6 }}
-                                        />
-                                        <Text style={s.docActionBtnText}>
-                                            {item.docStatus === 'Completed' ? 'View Docs' :
-                                             item.docStatus === 'In Progress' ? 'Edit Docs' : 'Create Docs'}
-                                        </Text>
-                                    </TouchableOpacity>
+                                    {item.status === 'Pending' && (
+                                        <>
+                                            <TouchableOpacity
+                                                style={[s.actionHalfBtn, s.acceptReportBtn]}
+                                                disabled={!!acceptingIncidentId}
+                                                onPress={() => handleAcceptReport(item)}
+                                            >
+                                                <Text style={s.reviewBtnText}>Accept Report</Text>
+                                            </TouchableOpacity>
+                                            <TouchableOpacity
+                                                style={[s.actionHalfBtn, s.rejectReportBtn]}
+                                                disabled={!!acceptingIncidentId}
+                                                onPress={() => confirmRejectReport(item)}
+                                            >
+                                                <Text style={s.reviewBtnText}>Reject Report</Text>
+                                            </TouchableOpacity>
+                                        </>
+                                    )}
+                                    {(item.status === 'Verified' || item.docStatus !== 'Pending') && (
+                                        <TouchableOpacity
+                                            style={[s.actionHalfBtn, s.docActionBtn]}
+                                            activeOpacity={0.8}
+                                            onPress={() => openDocumentationModal(item)}
+                                        >
+                                            <Ionicons name="document-text-outline" size={17} color="#2563EB" style={{ marginRight: 6 }} />
+                                            <Text style={s.docActionBtnText}>
+                                                {item.docStatus === 'Completed' ? 'View Docs' :
+                                                 item.docStatus === 'In Progress' ? 'Edit Docs' : 'Create Docs'}
+                                            </Text>
+                                        </TouchableOpacity>
+                                    )}
 
                                 </View>
                             </TouchableOpacity>
@@ -912,7 +991,7 @@ export default function IncidentLguScreen() {
                 visible={!!selectedIncident}
                 transparent
                 animationType="slide"
-                onRequestClose={() => setSelectedIncident(null)}
+                onRequestClose={() => rejectTarget ? setRejectTarget(null) : setSelectedIncident(null)}
             >
                 {selectedIncident && (
                     <View style={s.modalOverlayDark}>
@@ -936,14 +1015,33 @@ export default function IncidentLguScreen() {
                                             <Text style={s.premiumTitle}>{selectedIncident.title}</Text>
                                             <Text style={s.premiumSubtitle}>ID: #{selectedIncident.id}  •  {selectedIncident.timeAgo}</Text>
                                         </View>
-                                        <View style={[s.statusPill, selectedIncident.status === 'Closed' ? s.statusPillGreen : s.statusPillBlue]}>
-                                            <Text style={[s.statusPillText, selectedIncident.status === 'Closed' ? s.statusPillTextGreen : s.statusPillTextBlue]}>
+                                        <View style={[s.statusPill, selectedIncident.status === 'Rejected' ? s.statusPillRed : selectedIncident.status === 'Closed' ? s.statusPillGreen : s.statusPillBlue]}>
+                                            <Text style={[s.statusPillText, selectedIncident.status === 'Rejected' ? s.statusPillTextRed : selectedIncident.status === 'Closed' ? s.statusPillTextGreen : s.statusPillTextBlue]}>
                                                 {selectedIncident.status}
                                             </Text>
                                         </View>
                                     </View>
 
                                     <View style={s.dividerPremium} />
+
+                                    {selectedIncident.status === 'Pending' && (
+                                        <View style={s.cardActionRow}>
+                                            <TouchableOpacity
+                                                style={[s.actionHalfBtn, s.acceptReportBtn]}
+                                                disabled={!!acceptingIncidentId}
+                                                onPress={() => handleAcceptReport(selectedIncident)}
+                                            >
+                                                <Text style={s.reviewBtnText}>Accept Report</Text>
+                                            </TouchableOpacity>
+                                            <TouchableOpacity
+                                                style={[s.actionHalfBtn, s.rejectReportBtn]}
+                                                disabled={!!acceptingIncidentId}
+                                                onPress={() => confirmRejectReport(selectedIncident)}
+                                            >
+                                                <Text style={s.reviewBtnText}>Reject Report</Text>
+                                            </TouchableOpacity>
+                                        </View>
+                                    )}
 
                                     {/* ── REQUIRED DOCUMENTATION SUMMARY SECTION ── */}
                                     <View style={s.detailDocSection}>
@@ -954,15 +1052,17 @@ export default function IncidentLguScreen() {
                                             </View>
                                             <View style={[
                                                 s.docStatusPill,
+                                                selectedIncident.status === 'Rejected' ? s.docPillRejected :
                                                 selectedIncident.docStatus === 'Completed' ? s.docPillCompleted :
                                                 selectedIncident.docStatus === 'In Progress' ? s.docPillInProgress : s.docPillPending
                                             ]}>
                                                 <Text style={[
                                                     s.docStatusPillText,
+                                                    selectedIncident.status === 'Rejected' ? s.docTextRejected :
                                                     selectedIncident.docStatus === 'Completed' ? s.docTextCompleted :
                                                     selectedIncident.docStatus === 'In Progress' ? s.docTextInProgress : s.docTextPending
                                                 ]}>
-                                                    {selectedIncident.docStatus.toUpperCase()}
+                                                    {selectedIncident.status === 'Rejected' ? 'REPORT REJECTED' : selectedIncident.docStatus.toUpperCase()}
                                                 </Text>
                                             </View>
                                         </View>
@@ -989,26 +1089,28 @@ export default function IncidentLguScreen() {
                                                 <Text style={s.docPreviewText}>{selectedIncident.documentation.supportingInfo || 'Not specified'}</Text>
                                             </View>
                                         ) : (
-                                            <View style={s.docEmptyWarning}>
-                                                <Ionicons name="alert-circle-outline" size={18} color="#D97706" style={{ marginRight: 6 }} />
-                                                <Text style={s.docEmptyWarningText}>
-                                                    Documentation has not been completed.
+                                            <View style={[s.docEmptyWarning, selectedIncident.status === 'Rejected' && s.docBannerRejected]}>
+                                                <Ionicons name="alert-circle-outline" size={18} color={selectedIncident.status === 'Rejected' ? '#DC2626' : '#D97706'} style={{ marginRight: 6 }} />
+                                                <Text style={[s.docEmptyWarningText, selectedIncident.status === 'Rejected' && s.docTextRejected]}>
+                                                    {selectedIncident.status === 'Rejected' ? 'Report rejected. Documentation is unavailable.' : 'Documentation has not been completed.'}
                                                 </Text>
                                             </View>
                                         )}
 
-                                        <TouchableOpacity
-                                            style={s.docManageBtn}
-                                            onPress={() => {
-                                                setSelectedIncident(null);
-                                                openDocumentationModal(selectedIncident);
-                                            }}
-                                        >
-                                            <Ionicons name={selectedIncident.docStatus === 'Completed' ? "document-text-outline" : "create-outline"} size={16} color="#2563EB" style={{ marginRight: 6 }} />
-                                            <Text style={s.docManageBtnText}>
-                                                {selectedIncident.docStatus === 'Completed' ? 'View Completed Documentation' : 'Complete Required Documentation'}
-                                            </Text>
-                                        </TouchableOpacity>
+                                        {(selectedIncident.status === 'Verified' || selectedIncident.docStatus !== 'Pending') && (
+                                            <TouchableOpacity
+                                                style={s.docManageBtn}
+                                                onPress={() => {
+                                                    setSelectedIncident(null);
+                                                    openDocumentationModal(selectedIncident);
+                                                }}
+                                            >
+                                                <Ionicons name={selectedIncident.docStatus === 'Completed' ? "document-text-outline" : "create-outline"} size={16} color="#2563EB" style={{ marginRight: 6 }} />
+                                                <Text style={s.docManageBtnText}>
+                                                    {selectedIncident.docStatus === 'Completed' ? 'View Completed Documentation' : 'Complete Required Documentation'}
+                                                </Text>
+                                            </TouchableOpacity>
+                                        )}
                                     </View>
 
                                     {/* Location Info Box */}
@@ -1044,12 +1146,39 @@ export default function IncidentLguScreen() {
                                         {selectedIncident.urgency}
                                     </Text>
                                 </View>
-                                <TouchableOpacity onPress={() => setSelectedIncident(null)} style={s.closeFloatingBtn} activeOpacity={0.8}>
+                                <TouchableOpacity onPress={() => { setRejectTarget(null); setSelectedIncident(null); }} style={s.closeFloatingBtn} activeOpacity={0.8}>
                                     <Ionicons name="close" size={22} color="#475569" />
                                 </TouchableOpacity>
                             </View>
 
                         </View>
+                        {rejectTarget && (
+                            <View style={s.rejectConfirmOverlay}>
+                                <View style={s.rejectConfirmCard}>
+                                    <Ionicons name="alert-circle-outline" size={40} color="#DC2626" />
+                                    <Text style={s.rejectConfirmTitle}>Reject Report?</Text>
+                                    <Text style={s.rejectConfirmMessage}>
+                                        Reject Incident #{rejectTarget.id}? This report will be marked Rejected and documentation will stay unavailable.
+                                    </Text>
+                                    <View style={s.cardActionRow}>
+                                        <TouchableOpacity style={[s.actionHalfBtn, s.rejectCancelBtn]} onPress={() => setRejectTarget(null)} disabled={!!acceptingIncidentId}>
+                                            <Text style={s.rejectCancelText}>Cancel</Text>
+                                        </TouchableOpacity>
+                                        <TouchableOpacity
+                                            style={[s.actionHalfBtn, s.rejectReportBtn]}
+                                            disabled={!!acceptingIncidentId}
+                                            onPress={() => {
+                                                const target = rejectTarget;
+                                                setRejectTarget(null);
+                                                handleRejectReport(target);
+                                            }}
+                                        >
+                                            <Text style={s.reviewBtnText}>Reject Report</Text>
+                                        </TouchableOpacity>
+                                    </View>
+                                </View>
+                            </View>
+                        )}
                     </View>
                 )}
             </Modal>
@@ -1648,19 +1777,22 @@ export default function IncidentLguScreen() {
                                             Alert.alert('Invalid File', 'Allowed: PDF, DOCX, XLSX, JPG, JPEG, PNG');
                                             return;
                                         }
-                                        const newAtt: IncidentAttachment = {
-                                            id: Date.now().toString(),
-                                            name: asset.name,
-                                            uri: asset.uri,
-                                            size: asset.size,
-                                            formattedSize: formatIncFileSize(asset.size),
-                                            mimeType: asset.mimeType,
-                                            fileType: getIncAttachmentFileType(asset.name, asset.mimeType),
-                                            uploadedAt: new Date().toISOString(),
-                                        };
+                                        const fileType = getIncAttachmentFileType(asset.name, asset.mimeType);
+                                        const newAtt: IncidentAttachment = fileType === 'image'
+                                            ? await prepareIncImageAttachment(asset.uri, asset.name)
+                                            : {
+                                                id: Date.now().toString(),
+                                                name: asset.name,
+                                                uri: asset.uri,
+                                                size: await validateDocument(asset.uri),
+                                                formattedSize: formatIncFileSize(asset.size),
+                                                mimeType: asset.mimeType,
+                                                fileType,
+                                                uploadedAt: new Date().toISOString(),
+                                            };
                                         setDocAttachments(prev => [...prev, newAtt]);
                                     }
-                                } catch (e) { console.warn('File pick error:', e); }
+                                } catch (e: any) { Alert.alert('Attachment not added', e.message || 'Please choose a smaller file.'); }
                             }}
                         >
                             <View style={[s.incPickerOptionIcon, { backgroundColor: '#EFF6FF' }]}>
@@ -1681,19 +1813,13 @@ export default function IncidentLguScreen() {
                                 try {
                                     const { status } = await ImagePicker.requestCameraPermissionsAsync();
                                     if (status !== 'granted') { Alert.alert('Permission Required', 'Camera access is needed.'); return; }
-                                    const result = await ImagePicker.launchCameraAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8, base64: true });
+                                    const result = await ImagePicker.launchCameraAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8 });
                                     if (!result.canceled && result.assets.length > 0) {
                                         const asset = result.assets[0];
-                                        const name = `photo_${Date.now()}.jpg`;
-                                        const newAtt: IncidentAttachment = {
-                                            id: Date.now().toString(), name, uri: asset.uri,
-                                            mimeType: 'image/jpeg', fileType: 'image',
-                                            uploadedAt: new Date().toISOString(),
-                                            base64: asset.base64 ? `data:image/jpeg;base64,${asset.base64}` : undefined,
-                                        };
+                                        const newAtt = await prepareIncImageAttachment(asset.uri, `photo_${Date.now()}.jpg`);
                                         setDocAttachments(prev => [...prev, newAtt]);
                                     }
-                                } catch (e) { console.warn('Camera error:', e); }
+                                } catch (e: any) { Alert.alert('Attachment not added', e.message || 'Please try another photo.'); }
                             }}
                         >
                             <View style={[s.incPickerOptionIcon, { backgroundColor: '#ECFDF5' }]}>
@@ -1714,19 +1840,14 @@ export default function IncidentLguScreen() {
                                 try {
                                     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
                                     if (status !== 'granted') { Alert.alert('Permission Required', 'Gallery access is needed.'); return; }
-                                    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8, base64: true, allowsMultipleSelection: false });
+                                    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8, allowsMultipleSelection: false });
                                     if (!result.canceled && result.assets.length > 0) {
                                         const asset = result.assets[0];
                                         const fname = asset.fileName || `photo_${Date.now()}.jpg`;
-                                        const newAtt: IncidentAttachment = {
-                                            id: Date.now().toString(), name: fname, uri: asset.uri,
-                                            mimeType: asset.mimeType || 'image/jpeg', fileType: 'image',
-                                            uploadedAt: new Date().toISOString(),
-                                            base64: asset.base64 ? `data:image/jpeg;base64,${asset.base64}` : undefined,
-                                        };
+                                        const newAtt = await prepareIncImageAttachment(asset.uri, fname);
                                         setDocAttachments(prev => [...prev, newAtt]);
                                     }
-                                } catch (e) { console.warn('Gallery error:', e); }
+                                } catch (e: any) { Alert.alert('Attachment not added', e.message || 'Please try another photo.'); }
                             }}
                         >
                             <View style={[s.incPickerOptionIcon, { backgroundColor: '#F5F3FF' }]}>
@@ -1998,6 +2119,7 @@ const s = StyleSheet.create({
         backgroundColor: '#FFFBEB',
         borderColor: '#FDE68A',
     },
+    docBannerRejected: { backgroundColor: '#FEF2F2', borderColor: '#FECACA' },
     docBannerInProgress: {
         backgroundColor: '#EFF6FF',
         borderColor: '#BFDBFE',
@@ -2023,10 +2145,12 @@ const s = StyleSheet.create({
         borderRadius: 6,
     },
     docPillPending: { backgroundColor: '#FEF3C7' },
+    docPillRejected: { backgroundColor: '#FEE2E2' },
     docPillInProgress: { backgroundColor: '#DBEAFE' },
     docPillCompleted: { backgroundColor: '#D1FAE5' },
     docStatusPillText: { fontSize: 10, fontWeight: '800' },
     docTextPending: { color: '#D97706' },
+    docTextRejected: { color: '#B91C1C' },
     docTextInProgress: { color: '#2563EB' },
     docTextCompleted: { color: '#059669' },
 
@@ -2092,6 +2216,9 @@ const s = StyleSheet.create({
         height: 44,
         borderRadius: 10,
     },
+    acceptReportBtn: { backgroundColor: '#059669' },
+    rejectReportBtn: { backgroundColor: '#DC2626' },
+    reviewBtnText: { color: '#FFFFFF', fontSize: 13, fontWeight: '700' },
     docActionBtn: {
         backgroundColor: '#EFF6FF',
         borderWidth: 1,
@@ -2133,6 +2260,20 @@ const s = StyleSheet.create({
         backgroundColor: 'rgba(0, 0, 0, 0.5)',
         justifyContent: 'flex-end',
     },
+    rejectConfirmOverlay: {
+        position: 'absolute', top: 0, right: 0, bottom: 0, left: 0,
+        backgroundColor: 'rgba(15, 23, 42, 0.65)',
+        justifyContent: 'center', alignItems: 'center', padding: 24,
+        zIndex: 20,
+    },
+    rejectConfirmCard: {
+        width: '100%', backgroundColor: '#FFFFFF', borderRadius: 18,
+        padding: 24, alignItems: 'center',
+    },
+    rejectConfirmTitle: { fontSize: 20, fontWeight: '800', color: '#0F172A', marginTop: 12 },
+    rejectConfirmMessage: { fontSize: 14, color: '#475569', textAlign: 'center', lineHeight: 21, marginTop: 8, marginBottom: 24 },
+    rejectCancelBtn: { backgroundColor: '#F1F5F9' },
+    rejectCancelText: { color: '#334155', fontSize: 13, fontWeight: '700' },
     premiumModalContainer: {
         width: '100%',
         height: '88%',
@@ -2188,9 +2329,11 @@ const s = StyleSheet.create({
         marginLeft: 10,
     },
     statusPillBlue: { backgroundColor: '#EFF6FF' },
+    statusPillRed: { backgroundColor: '#FEE2E2' },
     statusPillGreen: { backgroundColor: '#ECFDF5' },
     statusPillText: { fontSize: 11, fontWeight: '800' },
     statusPillTextBlue: { color: '#2563EB' },
+    statusPillTextRed: { color: '#B91C1C' },
     statusPillTextGreen: { color: '#059669' },
     dividerPremium: {
         height: 1,

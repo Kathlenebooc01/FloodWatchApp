@@ -2,6 +2,8 @@ import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
+import { DOCUMENT_UPLOAD_LIMIT, validateDocument } from '@/utils/upload-optimization';
 import React, { useRef, useState } from 'react';
 import {
     ScrollView,
@@ -117,21 +119,35 @@ export default function SituationalLguScreen() {
         try {
             const result = await DocumentPicker.getDocumentAsync({
                 type: 'application/pdf',
-                copyToCacheDirectory: true,
+                // Keep Android's content:// URI so we can copy directly from the provider.
+                // The picker cache file can be unreadable in Expo Go on some devices.
+                copyToCacheDirectory: Platform.OS !== 'android',
             });
 
             if (result.canceled) return;
 
             const doc = result.assets[0];
-            if (doc.size && doc.size > 10 * 1024 * 1024) {
-                setErrorModal({ visible: true, title: 'File too large', message: 'Please select a PDF smaller than 10MB.' });
+            if (doc.size && doc.size > DOCUMENT_UPLOAD_LIMIT) {
+                setErrorModal({ visible: true, title: 'File too large', message: 'Please select a PDF smaller than 5 MB or export a smaller PDF.' });
                 return;
             }
 
-            setDocument(doc);
+            if (!FileSystem.documentDirectory) throw new Error('Local document storage is unavailable.');
+            const localUri = `${FileSystem.documentDirectory}situational_${Date.now()}_${Math.random().toString(36).slice(2)}.pdf`;
+            await FileSystem.copyAsync({ from: doc.uri, to: localUri });
+            try {
+                const size = await validateDocument(localUri);
+                setDocument({ ...doc, uri: localUri, size });
+                if (document?.uri) {
+                    FileSystem.deleteAsync(document.uri, { idempotent: true }).catch(error => console.warn('Could not remove previous PDF copy', error));
+                }
+            } catch (error) {
+                await FileSystem.deleteAsync(localUri, { idempotent: true });
+                throw error;
+            }
         } catch (err) {
             console.log('Error picking document', err);
-            setErrorModal({ visible: true, title: 'Error', message: 'Failed to pick document.' });
+            setErrorModal({ visible: true, title: 'Document unavailable', message: err instanceof Error ? err.message : 'Could not read the selected PDF. Please select it again.' });
         }
     };
 
@@ -166,33 +182,27 @@ export default function SituationalLguScreen() {
                     const ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || '';
                     
                     // Make the filename unique to avoid 409 KeyAlreadyExists errors
+                    await validateDocument(document.uri);
                     const uniqueFileName = `${Date.now()}_${document.name}`;
                     const uploadUrl = `${SUPABASE_URL}/storage/v1/object/incident-reports/${uniqueFileName}`;
-                    
-                    const fileData = await fetch(document.uri);
-                    const blob = await fileData.blob();
-                    
-                    const uploadRes = await fetch(uploadUrl, {
-                        method: 'POST',
+                    const uploadRes = await FileSystem.uploadAsync(uploadUrl, document.uri, {
+                        httpMethod: 'POST',
+                        uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
                         headers: {
                             'Authorization': `Bearer ${session.access_token}`,
                             'apikey': ANON_KEY,
                             'Content-Type': document.mimeType || 'application/pdf',
-                            'x-upsert': 'true'
                         },
-                        body: blob
                     });
                     
-                    if (!uploadRes.ok) {
-                        const errText = await uploadRes.text();
-                        console.error('File upload failed:', errText);
+                    if (uploadRes.status !== 200 && uploadRes.status !== 201) {
                         throw new Error('Failed to upload the PDF to Supabase storage.');
                     }
                     
                     documentPath = uniqueFileName;
                 } catch (uploadErr) {
                     console.error('Upload Error:', uploadErr);
-                    setErrorModal({ visible: true, title: 'Upload Failed', message: 'Failed to upload the attached PDF.' });
+                    setErrorModal({ visible: true, title: 'Upload Failed', message: uploadErr instanceof Error ? uploadErr.message : 'Failed to upload the attached PDF.' });
                     setIsSubmitting(false);
                     return;
                 }
@@ -220,6 +230,10 @@ export default function SituationalLguScreen() {
                 history.push(newItem);
                 await AsyncStorage.setItem('lgu_reports_history', JSON.stringify(history));
             } catch (cacheError) { console.warn('Report saved; local history cache could not be updated', cacheError); }
+            if (document?.uri) {
+                FileSystem.deleteAsync(document.uri, { idempotent: true }).catch(error => console.warn('Could not remove uploaded PDF copy', error));
+                setDocument(null);
+            }
             
             setShowSuccessModal(true);
         } catch (err) {
@@ -341,7 +355,7 @@ export default function SituationalLguScreen() {
                             {document ? readableReportText(document.name) : 'Tap to browse files'}
                         </Text>
                         <Text style={s.uploadSubtitle}>
-                            {document ? `${(document.size / 1024 / 1024).toFixed(2)} MB` : 'Accepts PDF only (Max 10MB)'}
+                            {document ? `${(document.size / 1024 / 1024).toFixed(2)} MB` : 'Accepts PDF only (Max 5 MB)'}
                         </Text>
                     </TouchableOpacity>
                 </View>
