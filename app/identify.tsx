@@ -1,7 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system/legacy';
-import { optimizeImage, READABLE_IMAGE_LIMIT, uploadOptimizedImage } from '@/utils/upload-optimization';
 import * as ImagePicker from 'expo-image-picker';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useState } from 'react';
@@ -71,7 +70,7 @@ export default function IdentityVerification() {
             // allowsEditing removed — the crop screen was the source of the corrupted
             // gray-image bug on Android (content:// URI stopped reading correctly afterward).
             allowsEditing: false,
-            quality: 0.9,
+            quality: 1,
             base64: true, // get base64 straight from the camera, no second file read needed
         });
         if (!result.canceled) {
@@ -92,11 +91,20 @@ export default function IdentityVerification() {
 
     // Upload one image to storage using native FileSystem.uploadAsync (reliable on Android & iOS)
     const uploadPhoto = async (uri: string, fileName: string, token: string): Promise<string> => {
-        try {
-            return await uploadOptimizedImage({ uri, fileName, token, supabaseUrl: SUPABASE_URL, anonKey: ANON_KEY, maxBytes: READABLE_IMAGE_LIMIT, prepared: true });
-        } catch (e: any) {
-            throw e;
+        const uploadUrl = `${SUPABASE_URL}/storage/v1/object/incident-reports/${fileName}`;
+        const result = await FileSystem.uploadAsync(uploadUrl, uri, {
+            httpMethod: 'POST',
+            uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+            headers: {
+                Authorization: `Bearer ${token}`,
+                apikey: ANON_KEY,
+                'Content-Type': 'image/jpeg',
+            },
+        });
+        if (result.status !== 200 && result.status !== 201) {
+            throw new Error('Photo upload failed. Please try again.');
         }
+        return `${SUPABASE_URL}/storage/v1/object/public/incident-reports/${fileName}`;
     };
 
     const handleVerifySubmit = async () => {
@@ -126,21 +134,16 @@ export default function IdentityVerification() {
             // frontBase64 / backBase64 already captured directly from the camera in takePhoto()
             // — no FileSystem re-read here anymore, which is what was corrupting the image.
 
-            const optimizedFront = await optimizeImage(frontUri, READABLE_IMAGE_LIMIT);
-            const optimizedFrontBase64 = await FileSystem.readAsStringAsync(optimizedFront.uri, { encoding: 'base64' });
-            const optimizedBack = needsBack && backUri ? await optimizeImage(backUri, READABLE_IMAGE_LIMIT) : null;
-
-            // Upload the same optimized bytes used for AI review.
             const frontUrl = await uploadPhoto(
-                optimizedFront.uri,
+                frontUri,
                 `id_front_${userId}_${Date.now()}.jpg`,
                 token
             );
 
             let backUrl: string | null = null;
-            if (optimizedBack) {
+            if (needsBack && backUri) {
                 backUrl = await uploadPhoto(
-                    optimizedBack.uri,
+                    backUri,
                     `id_back_${userId}_${Date.now()}.jpg`,
                     token
                 );
@@ -198,7 +201,7 @@ Respond ONLY in this exact JSON format with no other text:
   "status": "appears_valid"
 }`;
 
-                        const cleanBase64 = optimizedFrontBase64;
+                        const cleanBase64 = frontBase64;
                         if (!geminiKey) throw new Error('Gemini API key is not configured');
                         const requestBody = JSON.stringify({
                             contents: [{
