@@ -153,6 +153,26 @@ export default function LguHistoryScreen() {
                 }
             }
 
+            let backendEscalations: HistoryItem[] = [];
+            if (user) {
+                const { data: signals, error: signalsError } = await supabase
+                    .from('distress_signals')
+                    .select('distress_id, created_at, status, remarks')
+                    .eq('profile_id', user.id)
+                    .order('created_at', { ascending: false });
+                if (signalsError) throw signalsError;
+                backendEscalations = (signals || [])
+                    .filter(signal => (signal.remarks || '').includes('Regional Support Escalation requested'))
+                    .map(signal => ({
+                        id: signal.distress_id,
+                        type: 'escalation' as const,
+                        timestamp: signal.created_at,
+                        title: 'Support escalation',
+                        status: signal.status || 'Pending',
+                        desc: signal.remarks || '',
+                    }));
+            }
+
             // 2. Fetch Backend Logistics Requests
             let backendLogistics: HistoryItem[] = [];
             if (user) {
@@ -267,7 +287,7 @@ export default function LguHistoryScreen() {
                 }
             }
 
-            const merged = [...backendSituational, ...backendLogistics];
+            const merged = [...backendSituational, ...backendEscalations, ...backendLogistics];
             merged.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
             setHistory(merged);
 
@@ -293,6 +313,12 @@ export default function LguHistoryScreen() {
         const sitChannel = supabase.channel(`history-sit-updates-${Date.now()}`)
             .on('postgres_changes' as any, { event: '*', schema: 'public', table: 'incident_report' }, () => {
                 fetchHistory(true); // silent refresh - no spinner, no flicker
+            })
+            .subscribe();
+
+        const distressChannel = supabase.channel(`history-distress-updates-${Date.now()}`)
+            .on('postgres_changes' as any, { event: '*', schema: 'public', table: 'distress_signals' }, () => {
+                fetchHistory(true);
             })
             .subscribe();
 
@@ -341,6 +367,7 @@ export default function LguHistoryScreen() {
             supabase.removeChannel(reqChannel);
             supabase.removeChannel(allocChannel);
             supabase.removeChannel(sitChannel);
+            supabase.removeChannel(distressChannel);
             clearInterval(intervalId);
         };
     }, []);
@@ -381,7 +408,11 @@ export default function LguHistoryScreen() {
             await AsyncStorage.setItem('lgu_reports_history', JSON.stringify(localHistory));
             
             if (!String(deleteCandidate.id).startsWith('sit-') && !String(deleteCandidate.id).startsWith('esc-')) {
-                await supabase.from('incident_report').delete().eq('report_id', deleteCandidate.id);
+                if (deleteCandidate.type === 'escalation' && deleteCandidate.desc.includes('Regional Support Escalation requested')) {
+                    await supabase.from('distress_signals').delete().eq('distress_id', deleteCandidate.id);
+                } else {
+                    await supabase.from('incident_report').delete().eq('report_id', deleteCandidate.id);
+                }
             }
 
             setHistory(prev => prev.filter(i => i.id !== deleteCandidate.id));

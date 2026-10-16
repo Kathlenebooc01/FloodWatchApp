@@ -91,17 +91,27 @@ export default function LguReportScreen() {
             const municipalityId = profile?.municipality_id;
             if (!municipalityId) throw new Error('No municipality assigned. Please contact the PDRRMO.');
 
+            const { data: municipality, error: municipalityError } = await supabase
+                .from('municipality_or_city')
+                .select('province_id, center_point, center_latitude, center_longitude')
+                .eq('municipality_id', municipalityId)
+                .single();
+            if (municipalityError) throw municipalityError;
+            const locationPoint = municipality.center_point ||
+                (municipality.center_longitude != null && municipality.center_latitude != null
+                    ? `POINT(${municipality.center_longitude} ${municipality.center_latitude})`
+                    : null);
+            if (!locationPoint) throw new Error('No location is configured for your municipality. Please contact the PDRRMO.');
+
             const { data: insertedReport, error } = await supabase
-                .from('incident_report')
+                .from('distress_signals')
                 .insert({
-                    user_id: user?.id || null,
-                    // The deployed incident_report constraint permits moderate_report.
-                    // The LGU Incident screen separates this record by submitter role.
-                    report_type: 'moderate_report',
-                    hazard_type: 'Support escalation',
-                    description: `Regional Support Escalation requested by LGU Officer for ${currentSector}. Local emergency operational capacity exceeded; requesting direct provincial assistance and response coordination from PDRRMO.`,
-                    status: 'Pending_AI',
+                    profile_id: user.id,
+                    province_id: municipality.province_id,
                     municipality_id: municipalityId,
+                    location_point: locationPoint,
+                    remarks: `Regional Support Escalation requested by LGU Officer for ${currentSector}. Local emergency operational capacity exceeded; requesting direct provincial assistance and response coordination from PDRRMO.`,
+                    status: 'Pending',
                     created_at: new Date().toISOString(),
                 })
                 .select()
@@ -117,7 +127,7 @@ export default function LguReportScreen() {
             // Save to local cache in AsyncStorage
             try {
                 const newItem = {
-                    id: insertedReport?.report_id ? String(insertedReport.report_id) : 'esc-' + Date.now(),
+                    id: insertedReport?.distress_id ? String(insertedReport.distress_id) : 'esc-' + Date.now(),
                     type: 'escalation',
                     timestamp: new Date().toISOString(),
                     title: 'Support escalation',
