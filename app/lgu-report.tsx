@@ -103,7 +103,7 @@ export default function LguReportScreen() {
                     : null);
             if (!locationPoint) throw new Error('No location is configured for your municipality. Please contact the PDRRMO.');
 
-            const { data: insertedReport, error } = await supabase
+            const { error } = await supabase
                 .from('distress_signals')
                 .insert({
                     profile_id: user.id,
@@ -113,21 +113,14 @@ export default function LguReportScreen() {
                     remarks: `Regional Support Escalation requested by LGU Officer for ${currentSector}. Local emergency operational capacity exceeded; requesting direct provincial assistance and response coordination from PDRRMO.`,
                     status: 'Pending',
                     created_at: new Date().toISOString(),
-                })
-                .select()
-                .single();
+                });
 
-            if (error) {
-                console.error('Failed to submit escalation:', error);
-                Alert.alert('Escalation Request Failed', error.message || 'Could not connect to PDRRMO server.');
-                setIsSubmittingEscalation(false);
-                return;
-            }
+            if (error) throw error;
 
             // Save to local cache in AsyncStorage
             try {
                 const newItem = {
-                    id: insertedReport?.distress_id ? String(insertedReport.distress_id) : 'esc-' + Date.now(),
+                    id: 'esc-' + Date.now(),
                     type: 'escalation',
                     timestamp: new Date().toISOString(),
                     title: 'Support escalation',
@@ -147,7 +140,12 @@ export default function LguReportScreen() {
             setShowWaitingModal(true);
         } catch (err: any) {
             console.error('Escalation error:', err);
-            Alert.alert('Error', err?.message || 'An unexpected error occurred.');
+            Alert.alert(
+                'Escalation Request Failed',
+                err?.code === '57014'
+                    ? 'The server took too long to process the request. Check Report History before trying again to avoid sending a duplicate escalation.'
+                    : err?.message || 'An unexpected error occurred.'
+            );
         } finally {
             setIsSubmittingEscalation(false);
         }
