@@ -51,6 +51,7 @@ export interface IncidentData {
     timeAgo: string;
     rawCreatedAt: string;
     desc: string;
+    reportDescription: string;
     hasImage: boolean;
     image?: string;
     locationOverlay?: string;
@@ -58,6 +59,7 @@ export interface IncidentData {
     actionIcon: string;
     actionType: 'primary' | 'secondary';
     status: string;
+    reportStatus: string;
     docStatus: DocStatus;
     docCreatedAt?: string;
     docUpdatedAt?: string;
@@ -117,6 +119,23 @@ const formatReportTitle = (title: string) => {
     return title.replace(/\[?(low|moderate|high|critical|severe)[ _-]+report\]?/gi, (_, level: string) =>
         `${level[0].toUpperCase()}${level.slice(1).toLowerCase()} Report`);
 };
+
+const reportTypeLabel = (type: IncidentData['reportType']) => ({
+    general_inquiries: 'General Inquiry',
+    moderate_report: 'Moderate Report',
+    quick_snap: 'Quick Snap',
+}[type]);
+
+const reportDescription = (description: string, type: IncidentData['reportType']) => {
+    if (type === 'quick_snap') return description.replace(/\s+from\s+.+$/i, '').trim() || 'No description provided.';
+    return description.match(/(?:^|\n)(?:Observations|Inquiry):\s*([\s\S]*?)(?=\n\s*Location:|$)/i)?.[1]?.trim()
+        || description.replace(/^\[[^\]]+\]\s*/, '').replace(/\n\s*Location:\s*.+$/im, '').trim()
+        || 'No description provided.';
+};
+
+const reportLocation = (description: string) =>
+    description.match(/^Location:\s*(.+)$/im)?.[1]?.trim()
+    || description.match(/Quick snap report from (.+)$/im)?.[1]?.trim();
 
 const DOC_STORAGE_PREFIX = '@lgu_incident_doc_';
 const OTHER_ACTION = 'Others (Please Specify)';
@@ -333,17 +352,7 @@ export default function IncidentLguScreen() {
                         actType = 'secondary';
                     }
 
-                    // Extract location string
-                    let locStr = (row.latitude && row.longitude) ? 'Location Attached' : undefined;
-                    if (row.latitude && row.longitude) {
-                        if (rt === 'moderate_report') {
-                            const match = (row.description || '').match(/Location:\s*(.+)$/s);
-                            if (match && match[1]) locStr = match[1].trim();
-                        } else if (rt === 'quick_snap') {
-                            const match = (row.description || '').match(/from\s+(.+)$/s);
-                            if (match && match[1]) locStr = match[1].trim();
-                        }
-                    }
+                    const locStr = reportLocation(row.description || '');
 
                     // Load persisted documentation for this incident from description and AsyncStorage
                     let docStatus: DocStatus = 'Pending';
@@ -387,6 +396,7 @@ export default function IncidentLguScreen() {
                         timeAgo: getTimeAgo(row.created_at),
                         rawCreatedAt: row.created_at,
                         desc: row.description || 'No description provided.',
+                        reportDescription: reportDescription(row.description || '', rt),
                         hasImage: !!row.image_url,
                         image: row.image_url,
                         locationOverlay: locStr,
@@ -394,6 +404,7 @@ export default function IncidentLguScreen() {
                         actionIcon: actIcon,
                         actionType: actType,
                         status: formatStatusUI(row.status),
+                        reportStatus: row.status || 'Unknown',
                         docStatus,
                         docCreatedAt,
                         docUpdatedAt,
@@ -402,7 +413,12 @@ export default function IncidentLguScreen() {
                 })
             );
 
-            if (sequence === fetchSequence.current) setIncidents(mapped);
+            if (sequence === fetchSequence.current) {
+                setIncidents(mapped);
+                setSelectedIncident(previous => previous
+                    ? mapped.find(report => report.fullId === previous.fullId) || null
+                    : null);
+            }
         } catch (err) {
             console.error('Error fetching incidents:', err);
             if (sequence === fetchSequence.current) setIncidents([]);
@@ -427,13 +443,17 @@ export default function IncidentLguScreen() {
 
     useEffect(() => {
         if (!currentUserId) return;
+        let hasSubscribed = false;
         const profileChannel = supabase.channel(`lgu-incident-assignment-${currentUserId}`)
             .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'profiles', filter: `id=eq.${currentUserId}` }, fetchIncidents)
             .subscribe();
         const reportChannel = assignedMunicipalityId
             ? supabase.channel(`lgu-incident-reports-${currentUserId}-${assignedMunicipalityId}`)
                 .on('postgres_changes', { event: '*', schema: 'public', table: 'incident_report', filter: `municipality_id=eq.${assignedMunicipalityId}` }, fetchIncidents)
-                .subscribe()
+                .subscribe((status) => {
+                    if (status === 'SUBSCRIBED' && hasSubscribed) fetchIncidents();
+                    if (status === 'SUBSCRIBED') hasSubscribed = true;
+                })
             : null;
         return () => {
             supabase.removeChannel(profileChannel);
@@ -630,11 +650,11 @@ export default function IncidentLguScreen() {
                     .eq('report_id', incident.fullId)
                     .eq('municipality_id', assignedMunicipalityId)
                     .in('status', ['Pending', 'Pending_AI'])
-                    .select('report_id').maybeSingle();
+                    .select('report_id, status').maybeSingle();
                 if (error) throw error;
                 if (!updated) throw new Error('This report is no longer pending or available to your municipality.');
-                setIncidents(prev => prev.map(inc => inc.fullId === incident.fullId ? { ...inc, status: decision } : inc));
-                setSelectedIncident(prev => prev?.fullId === incident.fullId ? { ...prev, status: decision } : prev);
+                setIncidents(prev => prev.map(inc => inc.fullId === incident.fullId ? { ...inc, status: decision, reportStatus: updated.status } : inc));
+                setSelectedIncident(prev => prev?.fullId === incident.fullId ? { ...prev, status: decision, reportStatus: updated.status } : prev);
                 setSuccessModalData({
                     title: decision === 'Verified' ? 'Report Accepted' : 'Report Rejected',
                     message: decision === 'Verified'
@@ -742,7 +762,6 @@ export default function IncidentLguScreen() {
                             <Ionicons name="hourglass-outline" size={16} color="#D97706" />
                         </View>
                         <Text style={[s.statValue, { color: '#D97706' }]}>{docsPendingCount}</Text>
-                        <Text style={s.statSub}>Closing Locked</Text>
                     </TouchableOpacity>
 
                     <TouchableOpacity
@@ -755,7 +774,6 @@ export default function IncidentLguScreen() {
                             <Ionicons name="document-text-outline" size={16} color="#059669" />
                         </View>
                         <Text style={[s.statValue, { color: '#059669' }]}>{docsCompletedCount}</Text>
-                        <Text style={s.statSub}>Ready to Close</Text>
                     </TouchableOpacity>
 
                     <TouchableOpacity
@@ -876,10 +894,18 @@ export default function IncidentLguScreen() {
                                     </View>
                                 </View>
 
+                                <View style={[s.docStatusBanner, { backgroundColor: '#F8FAFC', borderColor: '#E2E8F0' }]}>
+                                    <View style={s.docBannerTopRow}>
+                                        <Text style={s.docBannerLabel}>REPORT STATUS:</Text>
+                                        <View style={[s.docStatusPill, item.status === 'Rejected' ? s.docPillRejected : ['Verified', 'Accepted'].includes(item.status) ? s.docPillCompleted : s.docPillPending]}>
+                                            <Text style={[s.docStatusPillText, item.status === 'Rejected' ? s.docTextRejected : ['Verified', 'Accepted'].includes(item.status) ? s.docTextCompleted : s.docTextPending]}>{item.reportStatus}</Text>
+                                        </View>
+                                    </View>
+                                </View>
+
                                 {/* ── REQUIRED DOCUMENTATION STATUS & TIMESTAMPS BOX ── */}
                                 <View style={[
                                     s.docStatusBanner,
-                                    item.status === 'Rejected' ? s.docBannerRejected :
                                     item.docStatus === 'Completed' ? s.docBannerCompleted :
                                     item.docStatus === 'In Progress' ? s.docBannerInProgress : s.docBannerPending
                                 ]}>
@@ -887,33 +913,29 @@ export default function IncidentLguScreen() {
                                         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                                             <Ionicons
                                                 name={
-                                                    item.status === 'Rejected' ? 'close-circle' :
                                                     item.docStatus === 'Completed' ? 'checkmark-circle' :
                                                     item.docStatus === 'In Progress' ? 'create-outline' : 'alert-circle-outline'
                                                 }
                                                 size={16}
                                                 color={
-                                                    item.status === 'Rejected' ? '#DC2626' :
                                                     item.docStatus === 'Completed' ? '#059669' :
                                                     item.docStatus === 'In Progress' ? '#2563EB' : '#D97706'
                                                 }
                                                 style={{ marginRight: 6 }}
                                             />
-                                            <Text style={[s.docBannerLabel, item.status === 'Rejected' && s.docTextRejected]}>DOCUMENTATION STATUS:</Text>
+                                            <Text style={s.docBannerLabel}>DOCUMENTATION STATUS:</Text>
                                         </View>
                                         <View style={[
                                             s.docStatusPill,
-                                            item.status === 'Rejected' ? s.docPillRejected :
                                             item.docStatus === 'Completed' ? s.docPillCompleted :
                                             item.docStatus === 'In Progress' ? s.docPillInProgress : s.docPillPending
                                         ]}>
                                             <Text style={[
                                                 s.docStatusPillText,
-                                                item.status === 'Rejected' ? s.docTextRejected :
                                                 item.docStatus === 'Completed' ? s.docTextCompleted :
                                                 item.docStatus === 'In Progress' ? s.docTextInProgress : s.docTextPending
                                             ]}>
-                                                {item.status === 'Rejected' ? 'REPORT REJECTED' : item.docStatus.toUpperCase()}
+                                                {item.docStatus.toUpperCase()}
                                             </Text>
                                         </View>
                                     </View>
@@ -942,8 +964,24 @@ export default function IncidentLguScreen() {
                                     </View>
                                 )}
 
-                                {/* Description */}
-                                <Text style={s.cardDesc} numberOfLines={3}>{formatReportTitle(item.desc)}</Text>
+                                <View style={[s.infoBox, { marginBottom: 8 }]}>
+                                    <View style={{ flex: 1 }}>
+                                        <Text style={s.infoBoxLabel}>REPORT TYPE</Text>
+                                        <Text style={s.infoBoxValue}>{reportTypeLabel(item.reportType)}</Text>
+                                    </View>
+                                </View>
+                                <View style={[s.infoBox, { marginBottom: 8 }]}>
+                                    <View style={{ flex: 1 }}>
+                                        <Text style={s.infoBoxLabel}>REPORT DESCRIPTION</Text>
+                                        <Text style={s.infoBoxValue} numberOfLines={3}>{item.reportDescription}</Text>
+                                    </View>
+                                </View>
+                                <View style={[s.infoBox, { marginBottom: 14 }]}>
+                                    <View style={{ flex: 1 }}>
+                                        <Text style={s.infoBoxLabel}>EXACT LOCATION</Text>
+                                        <Text style={s.infoBoxValue}>{item.locationOverlay || 'Location Not Provided'}</Text>
+                                    </View>
+                                </View>
 
                                 {/* Review actions, then documentation */}
                                 <View style={s.cardActionRow}>
@@ -1043,6 +1081,15 @@ export default function IncidentLguScreen() {
                                         </View>
                                     )}
 
+                                    <View style={s.detailDocSection}>
+                                        <View style={[s.detailDocHeader, { marginBottom: 0 }]}>
+                                            <Text style={s.detailDocTitle}>REPORT STATUS</Text>
+                                            <View style={[s.docStatusPill, selectedIncident.status === 'Rejected' ? s.docPillRejected : ['Verified', 'Accepted'].includes(selectedIncident.status) ? s.docPillCompleted : s.docPillPending]}>
+                                                <Text style={[s.docStatusPillText, selectedIncident.status === 'Rejected' ? s.docTextRejected : ['Verified', 'Accepted'].includes(selectedIncident.status) ? s.docTextCompleted : s.docTextPending]}>{selectedIncident.reportStatus}</Text>
+                                            </View>
+                                        </View>
+                                    </View>
+
                                     {/* ── REQUIRED DOCUMENTATION SUMMARY SECTION ── */}
                                     <View style={s.detailDocSection}>
                                         <View style={s.detailDocHeader}>
@@ -1052,17 +1099,15 @@ export default function IncidentLguScreen() {
                                             </View>
                                             <View style={[
                                                 s.docStatusPill,
-                                                selectedIncident.status === 'Rejected' ? s.docPillRejected :
                                                 selectedIncident.docStatus === 'Completed' ? s.docPillCompleted :
                                                 selectedIncident.docStatus === 'In Progress' ? s.docPillInProgress : s.docPillPending
                                             ]}>
                                                 <Text style={[
                                                     s.docStatusPillText,
-                                                    selectedIncident.status === 'Rejected' ? s.docTextRejected :
                                                     selectedIncident.docStatus === 'Completed' ? s.docTextCompleted :
                                                     selectedIncident.docStatus === 'In Progress' ? s.docTextInProgress : s.docTextPending
                                                 ]}>
-                                                    {selectedIncident.status === 'Rejected' ? 'REPORT REJECTED' : selectedIncident.docStatus.toUpperCase()}
+                                                    {selectedIncident.docStatus.toUpperCase()}
                                                 </Text>
                                             </View>
                                         </View>
@@ -1113,8 +1158,18 @@ export default function IncidentLguScreen() {
                                         )}
                                     </View>
 
-                                    {/* Location Info Box */}
                                     <View style={s.infoBox}>
+                                        <View style={s.infoBoxIcon}>
+                                            <Ionicons name="information-circle" size={22} color="#2563EB" />
+                                        </View>
+                                        <View style={{ flex: 1 }}>
+                                            <Text style={s.infoBoxLabel}>REPORT TYPE</Text>
+                                            <Text style={s.infoBoxValue}>{reportTypeLabel(selectedIncident.reportType)}</Text>
+                                        </View>
+                                    </View>
+
+                                    {/* Location Info Box */}
+                                    <View style={[s.infoBox, { marginTop: 16 }]}>
                                         <View style={s.infoBoxIcon}>
                                             <Ionicons name="location" size={22} color="#2563EB" />
                                         </View>
@@ -1132,7 +1187,7 @@ export default function IncidentLguScreen() {
                                         <View style={{ flex: 1 }}>
                                             <Text style={s.infoBoxLabel}>REPORT DESCRIPTION</Text>
                                             <Text style={[s.infoBoxValue, { lineHeight: 22, marginTop: 4 }]}>
-                                                {formatReportTitle(selectedIncident.desc)}
+                                                {selectedIncident.reportDescription}
                                             </Text>
                                         </View>
                                     </View>

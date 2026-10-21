@@ -1,5 +1,86 @@
 import * as Location from 'expo-location';
 
+export type LocationAccessIssue = 'services' | 'permission';
+const issueListeners = new Set<(issue: LocationAccessIssue) => void>();
+const restoredListeners = new Set<() => void>();
+let permissionRequested = false;
+let permissionCheck: Promise<void> | null = null;
+
+export const onLocationAccessIssue = (listener: (issue: LocationAccessIssue) => void) => {
+    issueListeners.add(listener);
+    return () => { issueListeners.delete(listener); };
+};
+
+export const subscribeLocationRestored = (listener: () => void) => {
+    restoredListeners.add(listener);
+    return () => { restoredListeners.delete(listener); };
+};
+
+export const onLocationRestored = () => {
+    clearLocationCache();
+    restoredListeners.forEach(listener => { Promise.resolve().then(listener).catch(() => {}); });
+};
+
+const reportLocationIssue = (issue: LocationAccessIssue) => {
+    issueListeners.forEach(listener => listener(issue));
+};
+
+export async function checkLocationAccess(): Promise<LocationAccessIssue | null> {
+    if (permissionCheck) await permissionCheck.catch(() => {});
+    if (!await Location.hasServicesEnabledAsync()) return 'services';
+    const permission = await Location.getForegroundPermissionsAsync();
+    return permission.granted ? null : 'permission';
+}
+
+export async function showLocationAccessIssue() {
+    const issue = await checkLocationAccess().catch(() => null);
+    if (issue === 'permission') permissionRequested = true;
+    if (issue) reportLocationIssue(issue);
+}
+
+async function requireLocationAccess() {
+    if (permissionCheck) return permissionCheck;
+    const check = (async () => {
+        if (!await Location.hasServicesEnabledAsync()) {
+            reportLocationIssue('services');
+            throw new Error('LOCATION_SERVICES_DISABLED');
+        }
+        let permission = await Location.getForegroundPermissionsAsync();
+        if (!permission.granted && permission.canAskAgain && !permissionRequested) {
+            permissionRequested = true;
+            permission = await Location.requestForegroundPermissionsAsync();
+        }
+        if (!permission.granted) {
+            reportLocationIssue('permission');
+            throw new Error('PERMISSION_DENIED');
+        }
+    })();
+    permissionCheck = check;
+    try {
+        return await check;
+    } finally {
+        if (permissionCheck === check) permissionCheck = null;
+    }
+}
+
+const withLocationTimeout = async <T,>(request: Promise<T>): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        return await Promise.race([
+            request,
+            new Promise<T>((_, reject) => { timer = setTimeout(() => reject(new Error('LOCATION_TIMEOUT')), 12000); }),
+        ]);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+};
+
+const reportChangedLocationAccess = async () => {
+    const issue = await checkLocationAccess().catch(() => null);
+    if (issue) reportLocationIssue(issue);
+    return issue;
+};
+
 export interface FullAddress {
     /** Complete formatted address, e.g. "Zone 1, Buaya, Lapu-Lapu City" */
     full: string;
@@ -18,6 +99,7 @@ export interface FullAddress {
 // GPS + Nominatim only run ONCE no matter how many screens call this.
 let _cachedAddress: FullAddress | null = null;
 let _pendingPromise: Promise<FullAddress> | null = null;
+let _cacheVersion = 0;
 // ──────────────────────────────────────────────────────────────────────────
 
     /** Detect Google Plus Codes like "8X9V+8R8" — never show these */
@@ -262,6 +344,7 @@ function assembleAddress(
  * Every subsequent call returns instantly from memory.
  */
 export async function getCurrentFullAddress(): Promise<FullAddress> {
+    await requireLocationAccess();
     // Return cached result immediately — no GPS, no network
     if (_cachedAddress) return _cachedAddress;
 
@@ -269,14 +352,12 @@ export async function getCurrentFullAddress(): Promise<FullAddress> {
     // share the same promise instead of making two GPS requests
     if (_pendingPromise) return _pendingPromise;
 
-    _pendingPromise = (async () => {
-        const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status !== 'granted') throw new Error('PERMISSION_DENIED');
-
+    const version = _cacheVersion;
+    const request = (async () => {
         // Force high accuracy GPS for the text address to get the exact barangay and street
-        const position = await Location.getCurrentPositionAsync({
+        const position = await withLocationTimeout(Location.getCurrentPositionAsync({
             accuracy: Location.Accuracy.Highest,
-        });
+        }));
 
         const { latitude, longitude } = position.coords;
 
@@ -296,16 +377,23 @@ export async function getCurrentFullAddress(): Promise<FullAddress> {
         const result = assembleAddress(nominatimData, bigDataCloudData, expoGeo, latitude, longitude);
 
         // Store in cache for all future calls
-        _cachedAddress = result;
-        _pendingPromise = null;
+        if (version === _cacheVersion) _cachedAddress = result;
         return result;
-    })();
-
-    return _pendingPromise;
+    })().catch(async error => {
+        await reportChangedLocationAccess();
+        throw error;
+    });
+    _pendingPromise = request;
+    try {
+        return await request;
+    } finally {
+        if (_pendingPromise === request) _pendingPromise = null;
+    }
 }
 
 /** Call this to force a fresh location fetch (e.g. user taps a refresh button) */
 export function clearLocationCache(): void {
+    _cacheVersion++;
     _cachedAddress = null;
     _pendingPromise = null;
 }
@@ -319,25 +407,24 @@ export function buildFullAddress(geo: Location.LocationGeocodedAddress): FullAdd
  * This is used for weather fetching so it can be completely instant.
  */
 export async function getFastCoordinates(): Promise<{ latitude: number; longitude: number }> {
+    await requireLocationAccess();
     // If we already have a cached address, use its exact coordinates immediately!
     if (_cachedAddress && _cachedAddress.latitude && _cachedAddress.longitude) {
         return { latitude: _cachedAddress.latitude, longitude: _cachedAddress.longitude };
     }
 
-    const { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== 'granted') throw new Error('PERMISSION_DENIED');
-
     try {
-        const position = await Location.getCurrentPositionAsync({
+        const position = await withLocationTimeout(Location.getCurrentPositionAsync({
             accuracy: Location.Accuracy.High,
-        });
+        }));
         return { latitude: position.coords.latitude, longitude: position.coords.longitude };
     } catch {
-        const lastPos = await Location.getLastKnownPositionAsync();
+        const issue = await reportChangedLocationAccess();
+        if (issue) throw new Error(issue === 'services' ? 'LOCATION_SERVICES_DISABLED' : 'PERMISSION_DENIED');
+        const lastPos = await Location.getLastKnownPositionAsync().catch(() => null);
         if (lastPos?.coords?.latitude && lastPos?.coords?.longitude) {
             return { latitude: lastPos.coords.latitude, longitude: lastPos.coords.longitude };
         }
-        // Lapu-Lapu City default coordinates
-        return { latitude: 10.3157, longitude: 123.9789 };
+        throw new Error('LOCATION_UNAVAILABLE');
     }
 }

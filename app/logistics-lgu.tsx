@@ -18,9 +18,10 @@ import {
     ActivityIndicator,
     KeyboardAvoidingView,
     Image,
+    AppState,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { getCurrentFullAddress } from '@/utils/location';
+import { getCurrentFullAddress, subscribeLocationRestored } from '@/utils/location';
 import { supabase } from '@/utils/supabase';
 import {
     parseDropOffAndNotes,
@@ -278,6 +279,53 @@ export default function LogisticsLguScreen() {
 
     // ── VIEW MODE: 'list' (manage existing requests) or 'create' (new request form) ──
     const [viewMode, setViewMode] = useState<'list' | 'create'>('list');
+    const [hasActiveUtilityFlag, setHasActiveUtilityFlag] = useState<boolean | null>(null);
+
+    const refreshUtilityFlag = useCallback(async () => {
+        const { data: { user }, error: authError } = await supabase.auth.getUser();
+        if (authError) throw authError;
+        if (!user) {
+            setHasActiveUtilityFlag(null);
+            return true;
+        }
+        const { data, error } = await supabase.from('utility_overdue_flags')
+            .select('flag_id')
+            .eq('lgu_id', user.id)
+            .is('cleared_at', null)
+            .limit(1);
+        if (error) throw error;
+        const flagged = (data?.length || 0) > 0;
+        setHasActiveUtilityFlag(flagged);
+        if (flagged) setViewMode('list');
+        return flagged;
+    }, []);
+
+    useFocusEffect(useCallback(() => {
+        refreshUtilityFlag().catch(error => {
+            console.error('Error checking utility request flag:', error);
+            setHasActiveUtilityFlag(null);
+        });
+    }, [refreshUtilityFlag]));
+
+    useEffect(() => {
+        const channel = supabase.channel(`lgu-utility-flags-${Date.now()}`)
+            .on('postgres_changes' as any, { event: '*', schema: 'public', table: 'utility_overdue_flags' }, () => {
+                refreshUtilityFlag().catch(error => {
+                    console.error('Error refreshing utility request flag:', error);
+                    setHasActiveUtilityFlag(null);
+                });
+            })
+            .subscribe(status => {
+                if (status === 'SUBSCRIBED') refreshUtilityFlag().catch(() => setHasActiveUtilityFlag(null));
+            });
+        const appState = AppState.addEventListener('change', state => {
+            if (state === 'active') refreshUtilityFlag().catch(() => setHasActiveUtilityFlag(null));
+        });
+        return () => {
+            supabase.removeChannel(channel);
+            appState.remove();
+        };
+    }, [refreshUtilityFlag]);
 
     // ── LIST VIEW STATE ──
     const [requests, setRequests] = useState<LogisticsRequestData[]>([]);
@@ -567,6 +615,7 @@ export default function LogisticsLguScreen() {
 
     // ── FETCH UTILITIES FOR CREATE MODE ──
     useEffect(() => {
+        if (viewMode !== 'create') return;
         const fetchLocation = async () => {
             try {
                 const loc = await getCurrentFullAddress();
@@ -578,7 +627,10 @@ export default function LogisticsLguScreen() {
             }
         };
         fetchLocation();
+        return subscribeLocationRestored(fetchLocation);
+    }, [viewMode]);
 
+    useEffect(() => {
         const fetchUtilities = async () => {
             setLoadingUtilities(true);
             try {
@@ -619,6 +671,15 @@ export default function LogisticsLguScreen() {
     };
 
     const handleSubmitNewRequest = async () => {
+        try {
+            if (await refreshUtilityFlag()) {
+                setErrorModal({ visible: true, title: 'Utility Request Restricted', message: 'Your account has been flagged by the Provincial Admin due to overdue borrowed utilities. You are temporarily restricted from creating new utility requests. Please return your outstanding utilities and wait for the Provincial Admin to clear your flag.' });
+                return;
+            }
+        } catch (error) {
+            setErrorModal({ visible: true, title: 'Request Unavailable', message: 'Unable to verify utility request access. Please try again.' });
+            return;
+        }
         const totalItems = Object.values(quantities).reduce((a, b) => a + b, 0);
         if (totalItems === 0) {
             setErrorModal({ visible: true, title: 'No Items Selected', message: 'Please request at least one item before submitting.' });
@@ -1289,8 +1350,9 @@ export default function LogisticsLguScreen() {
                     </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                    style={[s.viewModeTab, viewMode === 'create' && s.viewModeTabActive]}
-                    onPress={() => setViewMode('create')}
+                    style={[s.viewModeTab, viewMode === 'create' && s.viewModeTabActive, hasActiveUtilityFlag !== false && { opacity: 0.5 }]}
+                    onPress={() => { if (hasActiveUtilityFlag === false) setViewMode('create'); }}
+                    disabled={hasActiveUtilityFlag !== false}
                     activeOpacity={0.8}
                 >
                     <Ionicons name="add-circle-outline" size={16} color={viewMode === 'create' ? '#FFFFFF' : '#64748B'} style={{ marginRight: 6 }} />
@@ -1299,6 +1361,13 @@ export default function LogisticsLguScreen() {
                     </Text>
                 </TouchableOpacity>
             </View>
+
+            {hasActiveUtilityFlag === true && (
+                <View style={{ marginHorizontal: 20, marginTop: 12, padding: 14, borderRadius: 12, backgroundColor: '#FFF7ED', borderWidth: 1, borderColor: '#FED7AA' }}>
+                    <Text style={{ color: '#9A3412', fontWeight: '700', marginBottom: 4 }}>Utility Request Restricted</Text>
+                    <Text style={{ color: '#9A3412' }}>Your account has been flagged by the Provincial Admin due to overdue borrowed utilities. You are temporarily restricted from creating new utility requests. Please return your outstanding utilities and wait for the Provincial Admin to clear your flag.</Text>
+                </View>
+            )}
 
             {viewMode === 'list' ? (
                 /* ═══════════════════════════════════════════════════

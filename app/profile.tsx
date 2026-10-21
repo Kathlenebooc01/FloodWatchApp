@@ -8,7 +8,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, TextInput, Image, ActivityIndicator, KeyboardAvoidingView, Platform, Alert, Modal, Animated, Dimensions, StatusBar, Switch, FlatList, RefreshControl, Linking } from 'react-native';
 
 import Navbar from '@/components/navbar';
-import { getCurrentFullAddress } from '@/utils/location';
+import { getCurrentFullAddress, subscribeLocationRestored } from '@/utils/location';
 import { supabase } from '@/utils/supabase';
 
 const RELATIONSHIPS = [
@@ -170,7 +170,7 @@ export default function ProfileScreen() {
 
     // Load live location
     useEffect(() => {
-        (async () => {
+        const fetchLocation = async () => {
             try {
                 const addr = await getCurrentFullAddress();
                 setLocationText(addr.short || addr.full);
@@ -179,7 +179,9 @@ export default function ProfileScreen() {
             } finally {
                 setLocationLoading(false);
             }
-        })();
+        };
+        fetchLocation();
+        return subscribeLocationRestored(fetchLocation);
     }, []);
 
     // ── Edit Profile modal ──

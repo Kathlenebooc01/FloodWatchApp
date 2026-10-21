@@ -15,7 +15,7 @@ import {
     View
 } from 'react-native';
 
-import { getCurrentFullAddress } from '@/utils/location';
+import { getCurrentFullAddress, subscribeLocationRestored } from '@/utils/location';
 import { supabase } from '@/utils/supabase';
 
 export default function QuickSnapScreen() {
@@ -34,7 +34,7 @@ export default function QuickSnapScreen() {
     const [invalidModalVisible, setInvalidModalVisible] = useState(false);
 
     useEffect(() => {
-        (async () => {
+        const fetchLocation = async () => {
             try {
                 const addr = await getCurrentFullAddress();
                 setLocationName(addr.full.toUpperCase());
@@ -42,7 +42,9 @@ export default function QuickSnapScreen() {
             } catch (error: any) {
                 setLocationName('LOCATION UNAVAILABLE');
             }
-        })();
+        };
+        fetchLocation();
+        return subscribeLocationRestored(fetchLocation);
     }, []);
 
     const takePicture = async () => {

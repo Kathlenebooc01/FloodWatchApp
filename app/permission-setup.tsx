@@ -2,23 +2,43 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Camera from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
+import { showLocationAccessIssue, subscribeLocationRestored } from '@/utils/location';
 import { Stack, useRouter } from 'expo-router';
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView, TextInput, Image, ActivityIndicator, KeyboardAvoidingView, Platform, Alert, Modal, Animated, Dimensions, StatusBar, Switch, FlatList, RefreshControl, Linking } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { AppState, View, Text, StyleSheet, TouchableOpacity, ScrollView, TextInput, Image, ActivityIndicator, KeyboardAvoidingView, Platform, Alert, Modal, Animated, Dimensions, StatusBar, Switch, FlatList, RefreshControl, Linking } from 'react-native';
 
 export default function PermissionSetup() {
   const router = useRouter();
 
   // Real hooks for permissions
-  const [locationStatus, requestLocation] = Location.useForegroundPermissions();
+  const [locationStatus, requestLocation, refreshLocationPermission] = Location.useForegroundPermissions();
   const [cameraStatus, requestCamera] = Camera.useCameraPermissions();
   const [photoStatus, requestPhotos] = ImagePicker.useMediaLibraryPermissions();
 
   // Static state for Notifications (Mocked to bypass the SDK 53 Expo Go crash)
   const [notifGranted, setNotifGranted] = useState(false);
 
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', state => {
+      if (state === 'active') refreshLocationPermission().catch(() => {});
+    });
+    const stopRecovery = subscribeLocationRestored(() => { refreshLocationPermission().catch(() => {}); });
+    return () => { subscription.remove(); stopRecovery(); };
+  }, [refreshLocationPermission]);
+
   const handleRequest = async (id: string) => {
-    if (id === 'location') await requestLocation();
+    if (id === 'location') {
+      try {
+        if (!await Location.hasServicesEnabledAsync()) {
+          await showLocationAccessIssue();
+          return;
+        }
+        await requestLocation();
+        await showLocationAccessIssue();
+      } catch {
+        await showLocationAccessIssue();
+      }
+    }
     if (id === 'camera') await requestCamera();
     if (id === 'photos') await requestPhotos();
     if (id === 'notifications') {

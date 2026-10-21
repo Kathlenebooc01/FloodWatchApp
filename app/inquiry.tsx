@@ -18,7 +18,7 @@ import {
     View
 } from 'react-native';
 
-import { getCurrentFullAddress } from '@/utils/location';
+import { getCurrentFullAddress, subscribeLocationRestored } from '@/utils/location';
 import { supabase } from '@/utils/supabase';
 
 const SUPABASE_URL = 'https://xncciaozzxoqbesfxpww.supabase.co';
@@ -77,9 +77,11 @@ export default function GeneralInquiryScreen() {
     const isFormValid = subject.trim().length > 0 && inquiry.trim().length > 0 && !isSubmitting;
 
     useEffect(() => {
-        getCurrentFullAddress()
+        const fetchLocation = () => getCurrentFullAddress()
             .then(addr => setLocationData(addr))
             .catch(() => {});
+        fetchLocation();
+        return subscribeLocationRestored(fetchLocation);
     }, []);
 
     const pickAttachment = async () => {

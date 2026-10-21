@@ -6,7 +6,7 @@ import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, TextInput, Image, ActivityIndicator, KeyboardAvoidingView, Platform, Alert, Modal, Animated, Dimensions, StatusBar, Switch, FlatList, RefreshControl, Linking } from 'react-native';
 
 import Navbar from '@/components/navbar';
-import { clearLocationCache, getCurrentFullAddress, getFastCoordinates } from '@/utils/location';
+import { clearLocationCache, getCurrentFullAddress, getFastCoordinates, subscribeLocationRestored } from '@/utils/location';
 import { supabase } from '@/utils/supabase';
 
 interface NewsItem {
@@ -447,9 +447,12 @@ export default function Dashboard() {
             checkVerificationStatus();
         }, 60000);
 
+        const stopLocationRecovery = subscribeLocationRestored(fetchLocation);
+
         return () => {
             isMounted = false;
             clearInterval(interval);
+            stopLocationRecovery();
             if (channel) supabase.removeChannel(channel);
         };
     }, []);

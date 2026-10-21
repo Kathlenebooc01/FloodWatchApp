@@ -19,7 +19,7 @@ import {
     View
 } from 'react-native';
 
-import { getCurrentFullAddress } from '@/utils/location';
+import { getCurrentFullAddress, subscribeLocationRestored } from '@/utils/location';
 import { supabase } from '@/utils/supabase';
 
 const SUPABASE_URL = 'https://xncciaozzxoqbesfxpww.supabase.co';
@@ -153,7 +153,10 @@ export default function ModerateReportScreen() {
         }
     };
 
-    useEffect(() => { fetchLocation(); }, []);
+    useEffect(() => {
+        fetchLocation();
+        return subscribeLocationRestored(fetchLocation);
+    }, []);
 
     // ── Image upload ─────────────────────────────────────────────────────────
     const uploadImage = async (uri: string, userId: string, token: string, index: number): Promise<string> => {
