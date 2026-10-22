@@ -187,6 +187,7 @@ async function fetchNominatimGeocode(lat: number, lng: number): Promise<{
             a.neighbourhood  ||
             a.suburb         ||
             a.village        ||
+            a.city_district  ||
             a.hamlet         ||
             a.residential    ||
             '';
@@ -331,8 +332,8 @@ function assembleAddress(
         parts.push(province);
     }
 
-    const full  = parts.length > 0 ? parts.join(', ') : 'Buaya, Lapu-Lapu City';
-    const short = [barangay, city].filter(Boolean).join(', ') || 'Buaya, Lapu-Lapu City';
+    const full  = parts.length > 0 ? parts.join(', ') : 'Location unavailable';
+    const short = [barangay, city].filter(Boolean).join(', ') || 'Location unavailable';
 
     return { full, short, city: city.toUpperCase(), latitude, longitude };
 }

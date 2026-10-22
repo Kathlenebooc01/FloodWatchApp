@@ -205,7 +205,7 @@ export default function Dashboard() {
 
         } catch (err: any) {
             console.log('ℹ️ Risk status using fallback:', err?.message);
-            const fallbackLoc = customLocationName || (fullAddress !== 'Fetching location...' && fullAddress !== 'Location unavailable' ? fullAddress : 'Buaya, Lapu-Lapu City');
+            const fallbackLoc = customLocationName || (fullAddress !== 'Fetching location...' ? fullAddress : 'Location unavailable');
             setRiskStatus({
                 risk_level: 'Info',
                 alert_level: 0,
@@ -227,10 +227,10 @@ export default function Dashboard() {
         try {
             clearLocationCache(); // Force a fresh lookup for the most specific address
             const addr = await getCurrentFullAddress();
-            setFullAddress(addr.short || 'Buaya, Lapu-Lapu City');
-            setCityName(addr.city || 'LAPU-LAPU CITY');
+            setFullAddress(addr.short);
+            setCityName(addr.city);
             // Immediately fetch live weather for user's exact GPS location & address
-            await fetchRiskStatus({ latitude: addr.latitude, longitude: addr.longitude }, addr.short || 'Buaya, Lapu-Lapu City');
+            await fetchRiskStatus({ latitude: addr.latitude, longitude: addr.longitude }, addr.short);
         } catch (error: any) {
             if (error?.message === 'PERMISSION_DENIED') {
                 setFullAddress('Location permission denied');
@@ -240,12 +240,12 @@ export default function Dashboard() {
                     try {
                         clearLocationCache();
                         const addr = await getCurrentFullAddress();
-                        setFullAddress(addr.short || 'Buaya, Lapu-Lapu City');
-                        setCityName(addr.city || 'LAPU-LAPU CITY');
-                        await fetchRiskStatus({ latitude: addr.latitude, longitude: addr.longitude }, addr.short || 'Buaya, Lapu-Lapu City');
+                        setFullAddress(addr.short);
+                        setCityName(addr.city);
+                        await fetchRiskStatus({ latitude: addr.latitude, longitude: addr.longitude }, addr.short);
                     } catch {
-                        setFullAddress('Buaya, Lapu-Lapu City');
-                        await fetchRiskStatus(undefined, 'Buaya, Lapu-Lapu City');
+                        setFullAddress('Location unavailable');
+                        await fetchRiskStatus(undefined, 'Location unavailable');
                     }
                 }, 2000);
             }
