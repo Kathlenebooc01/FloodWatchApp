@@ -2196,7 +2196,9 @@ export default function LogisticsLguScreen() {
                 visible={docModalVisible}
                 transparent
                 animationType="slide"
-                onRequestClose={() => !docSaving && setDocModalVisible(false)}
+                onRequestClose={() => {
+                    if (!docSaving) setDocModalVisible(false);
+                }}
             >
                 <KeyboardAvoidingView
                     behavior={Platform.OS === 'ios' ? 'padding' : undefined}

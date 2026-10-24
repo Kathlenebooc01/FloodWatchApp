@@ -257,7 +257,9 @@ export default function LguLoginScreen() {
                 visible={forgotModalVisible}
                 transparent
                 animationType="fade"
-                onRequestClose={() => !forgotLoading && setForgotModalVisible(false)}
+                onRequestClose={() => {
+                    if (!forgotLoading) setForgotModalVisible(false);
+                }}
             >
                 <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={s.modalOverlay}>
                     <View style={s.modalContainer}>

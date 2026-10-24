@@ -270,7 +270,9 @@ export default function LguReportScreen() {
                 visible={showConfirmModal}
                 transparent
                 animationType="fade"
-                onRequestClose={() => !isSubmittingEscalation && setShowConfirmModal(false)}
+                onRequestClose={() => {
+                    if (!isSubmittingEscalation) setShowConfirmModal(false);
+                }}
             >
                 <View style={s.modalOverlay}>
                     <View style={s.modalContainer}>

@@ -996,7 +996,9 @@ export default function ProfileScreen() {
                 visible={changePassModalVisible}
                 transparent
                 animationType="fade"
-                onRequestClose={() => !changePassLoading && setChangePassModalVisible(false)}
+                onRequestClose={() => {
+                    if (!changePassLoading) setChangePassModalVisible(false);
+                }}
             >
                 <KeyboardAvoidingView
                     behavior={Platform.OS === 'ios' ? 'padding' : 'height'}

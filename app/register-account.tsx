@@ -1,4 +1,5 @@
 import { SafeAreaView } from 'react-native-safe-area-context';
+import type { ScrollViewInstance } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '@/utils/supabase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -43,7 +44,7 @@ function AnimatedLink({ children, onPress, style }: { children: React.ReactNode;
 
 export default function RegisterAccount() {
     const router    = useRouter();
-    const scrollRef = useRef<ScrollView>(null);
+    const scrollRef = useRef<ScrollViewInstance>(null);
 
     const [firstName, setFirstName] = useState('');
     const [lastName, setLastName]   = useState('');

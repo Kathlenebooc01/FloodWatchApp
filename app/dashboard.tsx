@@ -6,7 +6,10 @@ import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, TextInput, Image, ActivityIndicator, KeyboardAvoidingView, Platform, Alert, Modal, Animated, Dimensions, StatusBar, Switch, FlatList, RefreshControl, Linking } from 'react-native';
 
 import Navbar from '@/components/navbar';
-import { clearLocationCache, getCurrentFullAddress, getFastCoordinates, subscribeLocationRestored } from '@/utils/location';
+import LiveRiskModal from '@/components/live-risk-modal';
+import { loadRiskSnapshot, resolvePriority } from '@/utils/live-risk';
+import { isStale, riskFor } from '@/utils/live-risk-model';
+import { clearLocationCache, getCurrentFullAddress, subscribeLocationRestored } from '@/utils/location';
 import { supabase } from '@/utils/supabase';
 
 interface NewsItem {
@@ -18,9 +21,9 @@ interface NewsItem {
 }
 
 interface WeatherData {
-    temperature: number;
+    temperature: number | null;
     condition: string;
-    precipitation: number;
+    precipitation: number | null;
 }
 
 interface RiskStatusData {
@@ -33,20 +36,20 @@ interface RiskStatusData {
 
 export default function Dashboard() {
     const router = useRouter();
-    const [fullAddress, setFullAddress] = useState('Buaya, Lapu-Lapu City');
-    const [cityName, setCityName] = useState('LAPU-LAPU CITY');
+    const [fullAddress, setFullAddress] = useState('Fetching location...');
+    const [cityName, setCityName] = useState('');
     const [loading, setLoading] = useState(true);
     const [latestNews, setLatestNews] = useState<NewsItem | null>(null);
     const [newsLoading, setNewsLoading] = useState(true);
-    // Fast initial state with reasonable defaults while API loads
-    const [weather, setWeather] = useState<WeatherData>({ temperature: 25, condition: 'Fetching...', precipitation: 0 });
+    // Missing observations remain unavailable until backend data loads
+    const [weather, setWeather] = useState<WeatherData>({ temperature: null, condition: 'Fetching...', precipitation: null });
     const [weatherLoading, setWeatherLoading] = useState(false);
     const [riskStatus, setRiskStatus] = useState<RiskStatusData>({
-        risk_level: 'Info',
+        risk_level: 'Data Unavailable',
         alert_level: 0,
         location: 'Loading...',
         description: 'Loading risk status...',
-        updated_at: new Date().toISOString()
+        updated_at: ''
     });
     const [isVerified, setIsVerified]             = useState(false);
     const [verifyStatus, setVerifyStatus]         = useState<'none' | 'pending' | 'approved'>('none');
@@ -56,173 +59,25 @@ export default function Dashboard() {
     const [userRole, setUserRole]                 = useState<string>('citizen'); // default, will be overridden
     const [refreshing, setRefreshing]             = useState(false);
 
-    // Function to fetch risk status using OpenWeatherMap (real radar + station data)
-    const fetchRiskStatus = async (customCoords?: { latitude: number; longitude: number }, customLocationName?: string) => {
+    const [showLiveRisk, setShowLiveRisk] = useState(false);
+    // Reuse municipality-linked backend telemetry; no provider credentials on-device.
+    const fetchRiskStatus = async (_coords?: { latitude: number; longitude: number }, _locationName?: string) => {
         try {
-            console.log('🔍 Fetching real-time weather from OpenWeatherMap...');
-            
-            let latitude = customCoords?.latitude;
-            let longitude = customCoords?.longitude;
-
-            if (!latitude || !longitude) {
-                const coords = await getFastCoordinates();
-                latitude = coords.latitude || 10.3157;
-                longitude = coords.longitude || 123.9789; // Default to Lapu-Lapu City
-            }
-
-            const userLocation = customLocationName || (fullAddress !== 'Fetching location...' && fullAddress !== 'Location unavailable' ? fullAddress : 'Buaya, Lapu-Lapu City');
-
-            const OWM_KEY = process.env.EXPO_PUBLIC_OPENWEATHER_API_KEY || '1ba5ea9fcb9f3951587b0edaa1d628b7';
-
-            let temperature = 28;
-            let rainfall = 0;
-            let windSpeed = 10;
-            let condition = 'Cloudy';
-            let weatherDesc = 'partly cloudy';
-            let gotData = false;
-
-            // Attempt 1: OpenWeatherMap with timeout
-            try {
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 4000);
-                const response = await fetch(
-                    `https://api.openweathermap.org/data/2.5/weather?lat=${latitude}&lon=${longitude}&appid=${OWM_KEY}&units=metric`,
-                    {
-                        signal: controller.signal,
-                        headers: { Accept: 'application/json' },
-                    }
-                );
-                clearTimeout(timeoutId);
-
-                if (response.ok) {
-                    const data = await response.json();
-                    temperature = Math.round(data.main?.temp || 0);
-                    rainfall = data.rain?.['1h'] || data.rain?.['3h'] || 0;
-                    windSpeed = ((data.wind?.speed || 0) * 3.6);
-                    const owmMain = data.weather?.[0]?.main || 'Clouds';
-                    weatherDesc = data.weather?.[0]?.description || 'cloudy';
-
-                    const mainLower = owmMain.toLowerCase();
-                    if (mainLower === 'clear')             condition = 'Clear';
-                    else if (mainLower === 'clouds')       condition = 'Cloudy';
-                    else if (mainLower === 'drizzle')      condition = rainfall > 0.5 ? 'Drizzle' : 'Cloudy';
-                    else if (mainLower === 'rain')         condition = rainfall > 1.0 ? 'Rain' : 'Partly Cloudy';
-                    else if (mainLower === 'thunderstorm') condition = 'Thunderstorm';
-                    else if (mainLower === 'snow')         condition = 'Snow';
-                    else if (mainLower === 'mist' || mainLower === 'fog') condition = 'Fog';
-
-                    gotData = true;
-                }
-            } catch (owmErr: any) {
-                console.log('⚠️ OpenWeatherMap unavailable, falling back to Open-Meteo:', owmErr?.message);
-            }
-
-            // Attempt 2: High-reliability Open-Meteo fallback
-            if (!gotData) {
-                try {
-                    const meteoRes = await fetch(
-                        `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,relative_humidity_2m,precipitation,weather_code,wind_speed_10m`
-                    );
-                    if (meteoRes.ok) {
-                        const mData = await meteoRes.json();
-                        const curr = mData.current || {};
-                        temperature = Math.round(curr.temperature_2m ?? 28);
-                        rainfall = Number(curr.precipitation ?? 0);
-                        windSpeed = Number(curr.wind_speed_10m ?? 8);
-                        const code = curr.weather_code ?? 1;
-                        if (code === 0) { condition = 'Clear'; weatherDesc = 'clear sky'; }
-                        else if (code <= 3) { condition = 'Cloudy'; weatherDesc = 'cloudy'; }
-                        else if (code <= 48) { condition = 'Fog'; weatherDesc = 'foggy'; }
-                        else if (code <= 57) { condition = 'Drizzle'; weatherDesc = 'light drizzle'; }
-                        else if (code <= 82) { condition = 'Rain'; weatherDesc = 'rainy'; }
-                        else if (code >= 95) { condition = 'Thunderstorm'; weatherDesc = 'thunderstorm'; }
-                        gotData = true;
-                        console.log('✅ Weather fetched from Open-Meteo fallback');
-                    }
-                } catch (meteoErr: any) {
-                    console.log('⚠️ Open-Meteo fallback failed:', meteoErr?.message);
-                }
-            }
-
-            const displayPrecipitation = rainfall > 0
-                ? (rainfall < 1 ? Number(rainfall.toFixed(1)) : Math.round(rainfall * 10) / 10)
-                : 0;
-
-            console.log('☀️ Live weather data:', { temperature, rainfall: displayPrecipitation, windSpeed, condition, weatherDesc, userLocation });
-
-            // Update weather card
-            setWeather({ temperature, condition, precipitation: displayPrecipitation });
-
-            // Determine flood risk based on PAGASA rainfall thresholds
-            let riskLevel = 'Info';
-            let alertLevel = 0;
-            let description = '';
-            const rainStr = displayPrecipitation > 0 ? `${displayPrecipitation}mm/h` : '0mm/h';
-
-            if (rainfall >= 30) {
-                riskLevel = 'High';
-                alertLevel = 3;
-                description = `Torrential rainfall detected (${rainStr}). Wind: ${windSpeed.toFixed(1)} km/h. High risk of flooding in`;
-            } else if (rainfall >= 15) {
-                riskLevel = 'Moderate';
-                alertLevel = 2;
-                description = `Heavy rainfall detected (${rainStr}). Wind: ${windSpeed.toFixed(1)} km/h. Moderate flood risk in`;
-            } else if (rainfall >= 5) {
-                riskLevel = 'Low';
-                alertLevel = 1;
-                description = `Moderate rainfall detected (${rainStr}). Wind: ${windSpeed.toFixed(1)} km/h. Low flood risk in`;
-            } else {
-                riskLevel = 'Info';
-                alertLevel = 0;
-                const weatherContext = rainfall > 0
-                    ? `Light passing shower (${rainStr}), no flood threat`
-                    : temperature >= 30
-                        ? `Warm and sunny/fair conditions`
-                        : `${weatherDesc.charAt(0).toUpperCase() + weatherDesc.slice(1)}`;
-                description = `No immediate flood risk. ${weatherContext}. Wind: ${windSpeed.toFixed(1)} km/h in`;
-            }
-
-            setRiskStatus({
-                risk_level: riskLevel,
-                alert_level: alertLevel,
-                location: userLocation,
-                description,
-                updated_at: new Date().toISOString(),
-            });
-
-            console.log('✅ Risk status updated:', { riskLevel, rainfall: displayPrecipitation, windSpeed, condition, userLocation });
-
-            // ── Log weather fetch to api_activity_logs (fire-and-forget) ──
-            const OWM_API_ID = '9c8a3010-a692-4728-a96e-bcf372e11933'; // Open_Weather_Key
-            supabase.from('api_activity_logs').insert({
-                api_id: OWM_API_ID,
-                event_type: 'Weather Fetch',
-                message: `Realtime weather fetched for ${userLocation}: ${temperature}°C, ${condition}, ${displayPrecipitation}mm/h rainfall, Wind: ${windSpeed.toFixed(1)} km/h. Flood risk: ${riskLevel}`,
-            }).then(({ error: logErr }) => {
-                if (logErr) console.log('⚠️ Weather log skipped:', logErr.message);
-                else console.log('📋 Weather fetch logged to api_activity_logs');
-            }, () => {});
-
-        } catch (err: any) {
-            console.log('ℹ️ Risk status using fallback:', err?.message);
-            const fallbackLoc = customLocationName || (fullAddress !== 'Fetching location...' ? fullAddress : 'Location unavailable');
-            setRiskStatus({
-                risk_level: 'Info',
-                alert_level: 0,
-                location: fallbackLoc,
-                description: 'No active alerts. All systems normal in',
-                updated_at: new Date().toISOString(),
-            });
-            // ── Log weather fetch error to api_activity_logs (fire-and-forget) ──
-            const OWM_API_ID = '9c8a3010-a692-4728-a96e-bcf372e11933'; // Open_Weather_Key
-            supabase.from('api_activity_logs').insert({
-                api_id: OWM_API_ID,
-                event_type: 'Error',
-                message: `Weather fetch failed for ${customLocationName || fallbackLoc}: ${(err as any)?.message || 'Unknown error'}`,
-            }).then(() => {}, () => {});
+            const { snapshot, error } = await loadRiskSnapshot();
+            const priority = await resolvePriority(snapshot.rows);
+            const municipality = snapshot.rows.find(row => row.municipality_id === priority.id);
+            const observation = municipality?.weather_telemetry[0];
+            setWeather({ temperature: observation?.temperature ?? null, condition: observation?.weather_condition || 'Weather unavailable', precipitation: observation?.rainfall_mm ?? null });
+            const risk = municipality ? riskFor(municipality) : null;
+            setRiskStatus({ risk_level: risk?.level || 'Data Unavailable', alert_level: risk?.elevated ? 1 : 0,
+                location: municipality?.name || 'Municipality unavailable',
+                description: error || (isStale(observation) ? 'Weather observation is outdated or unavailable. Check official updates for' : risk?.alert ? 'Active FloodWatch municipality alert for' : 'Monitor weather conditions and official updates for'),
+                updated_at: observation?.fetched_at || '' });
+        } catch {
+            setWeather(previous => ({ ...previous, condition: previous.temperature == null ? 'Weather unavailable' : 'Saved observation · outdated' }));
+            setRiskStatus(previous => ({ ...previous, description: 'Live Risk is unavailable. Check official updates for' }));
         }
     };
-
     const fetchLocation = async () => {
         try {
             clearLocationCache(); // Force a fresh lookup for the most specific address
@@ -234,6 +89,7 @@ export default function Dashboard() {
         } catch (error: any) {
             if (error?.message === 'PERMISSION_DENIED') {
                 setFullAddress('Location permission denied');
+                await fetchRiskStatus();
             } else {
                 // Retry once after short delay
                 setTimeout(async () => {
@@ -508,12 +364,11 @@ export default function Dashboard() {
         }
     };
 
-    const activeLocation = (fullAddress && fullAddress !== 'Fetching location...' && fullAddress !== 'Location unavailable')
-        ? fullAddress
-        : (riskStatus.location && riskStatus.location !== 'Your Location' && riskStatus.location !== 'Loading...' ? riskStatus.location : 'Buaya, Lapu-Lapu City');
+    const activeLocation = riskStatus.location || 'Municipality unavailable';
 
     return (
         <SafeAreaView style={styles.container}>
+            <LiveRiskModal visible={showLiveRisk} onClose={() => setShowLiveRisk(false)} />
             <ScrollView 
                 showsVerticalScrollIndicator={false} 
                 contentContainerStyle={styles.scrollPadding}
@@ -550,13 +405,14 @@ export default function Dashboard() {
                 {/* Weather Card */}
                 <View style={styles.weatherCard}>
                     <View>
-                        <Text style={styles.tempText}>{weather.temperature}°C</Text>
+                        <Text style={styles.tempText}>{weather.temperature == null ? '—' : `${weather.temperature}°C`}</Text>
                         <Text style={styles.weatherDesc}>{weather.condition}</Text>
                     </View>
                     <MaterialCommunityIcons name={getWeatherIcon().name as any} size={48} color="#2563EB" />
                     <View style={{ alignItems: 'flex-end' }}>
-                        <Text style={styles.precipLabel}>PRECIPITATION</Text>
-                        <Text style={styles.precipValue}>{weather.precipitation}mm</Text>
+                        <Text style={styles.precipLabel}>RAINFALL</Text>
+                        <Text style={styles.precipValue}>{weather.precipitation == null ? 'Unavailable' : `${weather.precipitation} mm`}</Text>
+
                     </View>
                 </View>
 
@@ -621,9 +477,9 @@ export default function Dashboard() {
                         </View>
                         <View style={{ flex: 1, marginLeft: 12 }}>
                             <Text style={styles.riskTitle}>
-                                {riskStatus.risk_level === 'Info' ? 'Flood Risk: Normal' : `Flood Risk: ${riskStatus.risk_level}`}
+                                {`Flood Risk: ${riskStatus.risk_level === 'Data Unavailable' ? 'Normal' : riskStatus.risk_level}`}
                             </Text>
-                            <Text style={styles.riskTime}>Updated {getTimeAgo(riskStatus.updated_at)}</Text>
+                            <Text style={styles.riskTime}>{riskStatus.updated_at ? `Updated ${getTimeAgo(riskStatus.updated_at)}` : 'Update unavailable'}</Text>
                         </View>
                         {riskStatus.alert_level > 0 && (
                             <View style={[
@@ -634,7 +490,7 @@ export default function Dashboard() {
                                     '#10B981'
                                 }
                             ]}>
-                                <Text style={styles.alertLevelText}>ALERT LEVEL {riskStatus.alert_level}</Text>
+                                <Text style={styles.alertLevelText}>ACTIVE ALERT</Text>
                             </View>
                         )}
                     </View>
@@ -665,8 +521,11 @@ export default function Dashboard() {
                             <Text style={styles.tabTextHigh}>HIGH</Text>
                         </View>
                     </View>
+                    <TouchableOpacity accessibilityRole="button" accessibilityLabel="Explore municipality weather and flood risk" onPress={() => setShowLiveRisk(true)} activeOpacity={0.75} style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 16, paddingBottom: 2 }}>
+                        <Text style={{ color: '#2563EB', fontWeight: '700', fontSize: 13 }}>Explore municipalities</Text>
+                        <Ionicons name="arrow-forward" size={18} color="#2563EB" />
+                    </TouchableOpacity>
                 </View>
-
 
                 {/* News Section */}
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 25, marginBottom: 15 }}>

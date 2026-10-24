@@ -2,6 +2,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useRef, useState } from 'react';
+import type { TextInputInstance } from 'react-native';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, TextInput, Image, ActivityIndicator, KeyboardAvoidingView, Platform, Alert, Modal, Animated, Dimensions, StatusBar, Switch, FlatList, RefreshControl, Linking } from 'react-native';
 
 import { supabase } from '@/utils/supabase';
@@ -14,7 +15,7 @@ export default function ResetPasswordScreen() {
     const [isEditingEmail, setIsEditingEmail] = useState(!initialEmail);
 
     const [code, setCode] = useState(['', '', '', '', '', '']);
-    const inputRefs = useRef<(TextInput | null)[]>([]);
+    const inputRefs = useRef<(TextInputInstance | null)[]>([]);
 
     const [password, setPassword] = useState('');
     const [showPassword, setShowPassword] = useState(false);
