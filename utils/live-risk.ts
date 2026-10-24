@@ -93,16 +93,3 @@ export async function resolvePriority(rows: Municipality[]): Promise<Priority> {
     } catch { /* Use registered municipality when GPS cannot be verified. */ }
     return { id: registered, label: 'My Municipality', explanation: registered ? 'Registered municipality; a verified current GPS locality is unavailable.' : 'Location could not be matched. You can still explore all supported municipalities.' };
 }
-export type VerifiedArea = { report_id: string; description: string | null; created_at: string; reviewed_at: string | null; specific_locations: { name: string } | null };
-export async function loadVerifiedAreas(id: string): Promise<VerifiedArea[]> {
-    const results: VerifiedArea[] = [];
-    for (let page = 0; ; page++) {
-        const { data, error } = await supabase.from('incident_report')
-            .select('report_id,description,created_at,reviewed_at,specific_locations(name)')
-            .eq('municipality_id', id).in('status', ['Verified', 'verified']).ilike('hazard_type', '%flood%')
-            .order('created_at', { ascending: false }).order('report_id').range(page * 100, page * 100 + 99).abortSignal(AbortSignal.timeout(15000));
-        if (error) throw new Error('Verified reports could not be loaded.');
-        results.push(...(data || []) as unknown as VerifiedArea[]);
-        if (!data || data.length < 100) return results;
-    }
-}

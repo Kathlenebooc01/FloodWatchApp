@@ -5,8 +5,9 @@ import { supabase } from '@/utils/supabase';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, AppState, FlatList, Linking, Modal, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { invalidateRiskSnapshot, loadRiskSnapshot, loadVerifiedAreas, resolvePriority, type RiskSnapshot, type VerifiedArea } from '@/utils/live-risk';
+import { invalidateRiskSnapshot, loadRiskSnapshot, resolvePriority, type RiskSnapshot } from '@/utils/live-risk';
 import { isStale, prioritize, riskFor, timestamp, value, weatherIcon, type Municipality, type Priority } from '@/utils/live-risk-model';
+import { cachedForecast, loadForecast, type Forecast } from '@/utils/live-forecast';
 
 const precautions = 'Stay alert in flood-prone areas. Avoid crossing floodwater, prepare essential supplies, and follow evacuation instructions from your LGU.';
 export default function LiveRiskModal({ visible, onClose }: { visible: boolean; onClose: () => void }) {
@@ -16,9 +17,9 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
     const [selectedId, setSelectedId] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
-    const [areas, setAreas] = useState<VerifiedArea[] | null>(null);
-    const [areaError, setAreaError] = useState('');
-    const [areaAttempt, setAreaAttempt] = useState(0);
+    const [forecastState, setForecastState] = useState<{ key: string; data: Forecast | null; loading: boolean; error: string }>({ key: '', data: null, loading: false, error: '' });
+    const [forecastRefresh, setForecastRefresh] = useState(0);
+    const forceForecast = useRef<string | null>(null);
     const [linkError, setLinkError] = useState('');
     const busy = useRef<number | null>(null);
     const generation = useRef(0);
@@ -59,13 +60,48 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
         const subscription = AppState.addEventListener('change', state => { if (state === 'active') void refresh(); });
         return () => { generation.current = current + 1; clearTimeout(initial); clearInterval(timer); subscription.remove(); };
     }, [visible, refresh]);
+    const selected = snapshot?.rows.find(row => row.municipality_id === selectedId);
+    const forecastKey = selected ? `${selected.municipality_id}:${selected.center_latitude}:${selected.center_longitude}` : '';
+    const requestForecastRefresh = () => { forceForecast.current = forecastKey; setForecastRefresh(attempt => attempt + 1); };
     useEffect(() => {
         if (!visible || !selectedId) return;
+        const latitude = selected?.center_latitude;
+        const longitude = selected?.center_longitude;
+        if (latitude == null || longitude == null) {
+            const timer = setTimeout(() => setForecastState({ key: forecastKey, data: null, loading: false, error: 'Forecast coordinates are unavailable for this municipality.' }), 0);
+            return () => clearTimeout(timer);
+        }
         let active = true;
-        loadVerifiedAreas(selectedId).then(result => { if (active) { setAreas(result); setAreaError(''); } }).catch(err => { if (active) setAreaError(err.message); });
-        const timer = setInterval(() => setAreaAttempt(attempt => attempt + 1), 5 * 60000);
-        return () => { active = false; clearInterval(timer); };
-    }, [visible, selectedId, areaAttempt]);
+        const controller = new AbortController();
+        let retryTimer: ReturnType<typeof setTimeout> | undefined;
+        const cached = cachedForecast(latitude, longitude);
+        const forced = forceForecast.current === forecastKey;
+        forceForecast.current = null;
+        const attempt = async (count: number) => {
+            try {
+                const data = await loadForecast(latitude, longitude, controller.signal, forced || count > 0);
+                if (active) setForecastState({ key: forecastKey, data, loading: false, error: '' });
+            } catch (error) {
+                if (!active || controller.signal.aborted) return;
+                setForecastState({ key: forecastKey, data: cachedForecast(latitude, longitude), loading: false, error: error instanceof Error ? error.message : 'Forecast could not be loaded. Please retry.' });
+                if (count < 1) retryTimer = setTimeout(() => void attempt(count + 1), 1500);
+            }
+        };
+        const initialTimer = setTimeout(() => { setForecastState({ key: forecastKey, data: cached, loading: true, error: '' }); void attempt(0); }, 0);
+        return () => { active = false; controller.abort(); clearTimeout(initialTimer); if (retryTimer) clearTimeout(retryTimer); };
+    }, [visible, selectedId, forecastKey, forecastRefresh, selected?.center_latitude, selected?.center_longitude]);
+    useEffect(() => {
+        if (!visible || !selectedId) return;
+        const tick = () => { forceForecast.current = forecastKey; setForecastRefresh(attempt => attempt + 1); };
+        const timer = setInterval(tick, 10 * 60_000);
+        let boundaryTimer: ReturnType<typeof setTimeout>;
+        const scheduleBoundary = () => {
+            const nextBoundary = (Math.floor(Date.now() / 3_600_000) + 1) * 3_600_000;
+            boundaryTimer = setTimeout(() => { tick(); scheduleBoundary(); }, nextBoundary - Date.now() + 1000);
+        };
+        scheduleBoundary();
+        return () => { clearInterval(timer); clearTimeout(boundaryTimer); };
+    }, [visible, selectedId, forecastKey]);
     useEffect(() => {
         if (!visible) return;
         let refreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -94,7 +130,6 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
         }).catch(() => {});
         return () => { active = false; };
     }, [visible, snapshot, priority.id, error]);
-    const selected = snapshot?.rows.find(row => row.municipality_id === selectedId);
     const mine = snapshot?.rows.find(row => row.municipality_id === priority.id);
     const observation = selected?.weather_telemetry[0];
     const risk = selected ? riskFor(selected) : null;
@@ -106,7 +141,7 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
         const own = item.municipality_id === priority.id;
         return (
             <Pressable accessibilityRole="button" accessibilityLabel={`View weather and flood risk for ${item.name}`}
-                onPress={() => { setAreas(null); setAreaError(''); setSelectedId(item.municipality_id); }}
+                onPress={() => setSelectedId(item.municipality_id)}
                 style={({ pressed }) => [styles.card, own && styles.featured, pressed && styles.pressed]}>
                 <View style={styles.row}>
                     <View style={styles.flex}>
@@ -149,7 +184,7 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
                 </View>
                 {!!error && <View accessibilityRole="alert" style={styles.notice}><Ionicons name="cloud-offline-outline" size={18} color="#B45309" /><Text style={[styles.small, styles.flex]}>{error}</Text><Pressable accessibilityRole="button" onPress={() => void refresh()}><Text style={styles.link}>Retry</Text></Pressable></View>}
                 {selected ? (
-                    <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content} refreshControl={<RefreshControl refreshing={loading} onRefresh={() => { void refresh(); setAreaAttempt(attempt => attempt + 1); }} />}>
+                    <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content} refreshControl={<RefreshControl refreshing={loading || forecastState.loading} onRefresh={() => { void refresh(); requestForecastRefresh(); }} />}>
                         <View style={styles.hero}>
                             <View style={styles.row}><View style={styles.flex}><Text style={styles.eyebrow}>CURRENT WEATHER</Text><Text style={styles.heroCity}>{placeName(selected.name)}</Text>{selectedId === priority.id && <Text style={styles.location}>{priority.label}</Text>}</View><MaterialCommunityIcons name={weatherIcon(observation?.weather_condition)} size={58} color="#2563EB" /></View>
                             <Text style={styles.heroTemperature}>{temperature(observation?.temperature)}</Text>
@@ -166,14 +201,14 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
                             {!!observation?.rainfall_category && <Text style={styles.small}>Recorded rainfall category: {observation.rainfall_category}</Text>}
                         </Section>
                         <Section title="Next 2-3 hours" icon="time-outline">
-                            <View style={styles.emptyIconRow}><View style={styles.softIcon}><MaterialCommunityIcons name="weather-cloudy-clock" size={25} color="#64748B" /></View><View style={styles.flex}><Text style={styles.emptyTitle}>Forecast not available</Text><Text style={styles.body}>Short-term forecast unavailable for this location.</Text></View></View>
-                            <Text style={styles.small}>Check official weather updates for the latest outlook. Observed rainfall is not a forecast.</Text>
-                        </Section>
-                        <Section title="Verified flooded areas" icon="location-outline">
-                            <Text style={styles.small}>Verified reports available to your account. Conditions may have changed since the report was made.</Text>
-                            {areaError ? <><Text style={styles.body}>{areaError}</Text><Pressable accessibilityRole="button" onPress={() => setAreaAttempt(attempt => attempt + 1)}><Text style={styles.link}>Retry reports</Text></Pressable></> : areas === null ? <ActivityIndicator accessibilityLabel="Loading verified reports" color="#2563EB" /> : areas.length ? areas.map(area => (
-                                <View key={area.report_id} style={styles.area}><View style={styles.row}><Text style={[styles.areaTitle, styles.flex]}>{placeName(area.specific_locations?.name || 'Location not specified')}</Text><View style={styles.verifiedPill}><Ionicons name="checkmark-circle" size={12} color="#15803D" /><Text style={styles.verifiedText}>Verified</Text></View></View><Text style={styles.body}>{area.description || 'Severity and water level not supplied.'}</Text><Text style={styles.small}>Reported {timestamp(area.created_at)} PHT</Text><Text style={styles.small}>Verified {timestamp(area.reviewed_at)} PHT</Text></View>
-                            )) : <View style={styles.emptyPanel}><Ionicons name="documents-outline" size={28} color="#94A3B8" /><Text style={styles.body}>No verified flooded areas have been reported for this location.</Text><Text style={styles.small}>This does not confirm that the municipality is flood-free.</Text></View>}
+                            <Text style={styles.forecastCity}>{placeName(selected.name)}</Text>
+                            {forecastState.key === forecastKey && forecastState.data && cachedForecast(selected.center_latitude!, selected.center_longitude!) ? <>
+                                {forecastState.data.hours.map(hour => <ForecastCard key={hour.end} hour={hour} />)}
+                                <Text style={styles.forecastAdvisory}>{forecastState.data.hours.some(hour => (hour.precipitation ?? 0) > 0) ? 'Rainfall is forecast during the displayed period. Stay alert and monitor official weather updates.' : forecastState.data.hours.every(hour => hour.precipitation === 0) ? 'No rainfall is forecast during the displayed period. Continue monitoring official weather updates.' : 'Rainfall amounts are unavailable. Monitor official weather updates.'}</Text>
+                                <Text style={styles.small}>{forecastState.data.source} forecast · Rainfall and rain chance apply to each displayed {forecastState.data.hours[0].durationHours}-hour period · Times shown in PHT</Text>
+                            </> : forecastState.key !== forecastKey || forecastState.loading ? <View style={styles.forecastLoading}><ActivityIndicator color="#2563EB" /><Text style={styles.body}>Loading forecast…</Text></View> : null}
+                            {forecastState.key === forecastKey && forecastState.loading && forecastState.data && <Text style={styles.small}>Refreshing forecast…</Text>}
+                            {forecastState.key === forecastKey && !!forecastState.error && <View accessibilityRole="alert" style={styles.forecastError}><Text style={styles.body}>{forecastState.error}</Text><Pressable accessibilityRole="button" onPress={requestForecastRefresh}><Text style={styles.link}>Retry forecast</Text></Pressable></View>}
                         </Section>
                         <Section title="Official PAGASA Advisories" icon="megaphone-outline">
                             <Text style={styles.body}>Current official advisories are not available in this app. View PAGASA for rainfall warnings and cyclone bulletins.</Text>
@@ -181,7 +216,7 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
                             {!!linkError && <Text style={styles.small}>{linkError}</Text>}
                         </Section>
                         <Section title="Stay prepared" icon="heart-outline"><Text style={styles.body}>{precautions}</Text></Section>
-                        <Text style={styles.sourceNote}>Weather: Open-Meteo current estimates when saved readings are old, otherwise FloodWatch telemetry. Risk alerts: FloodWatch. Official advisories: PAGASA.</Text>
+                        <Text style={styles.sourceNote}>Current weather: Open-Meteo estimates when saved readings are old, otherwise FloodWatch telemetry. Forecast: OpenWeather or Open-Meteo. Risk alerts: FloodWatch. Official advisories: PAGASA.</Text>
                     </ScrollView>
                 ) : (
                     <FlatList data={rows} keyExtractor={item => item.municipality_id} renderItem={renderCard} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" refreshControl={<RefreshControl refreshing={loading} onRefresh={() => void refresh()} />}
@@ -217,6 +252,25 @@ function ObservationTime({ observation }: { observation?: Municipality['weather_
 }
 function Metric({ label, text, icon }: { label: string; text: string; icon: React.ComponentProps<typeof Ionicons>['name'] }) {
     return <View style={styles.flex}><View style={styles.metricLabelRow}><Ionicons name={icon} size={15} color="#4D7FAD" /><Text style={styles.metricLabel}>{label.toUpperCase()}</Text></View><Text style={styles.metricValue}>{text}</Text></View>;
+}
+function forecastTime(time: number) {
+    return new Date(time).toLocaleTimeString('en-PH', { timeZone: 'Asia/Manila', hour: 'numeric', minute: '2-digit' });
+}
+function forecastDate(time: number) {
+    return new Date(time).toLocaleDateString('en-PH', { timeZone: 'Asia/Manila', month: 'short', day: 'numeric' });
+}
+function ForecastCard({ hour }: { hour: Forecast['hours'][number] }) {
+    const rain = hour.precipitation;
+    const hourlyRain = rain == null ? null : rain / hour.durationHours;
+    const accent = hourlyRain == null ? '#64748B' : hourlyRain >= 7.5 ? '#B45309' : hourlyRain >= 2.5 ? '#2563EB' : hourlyRain > 0 ? '#0284C7' : '#10B981';
+    return <View style={[styles.forecastCard, { borderLeftColor: accent }]}>
+        <View style={styles.forecastTop}><View style={styles.flex}><Text style={styles.forecastTime}>{forecastDate(hour.start)} · {forecastTime(hour.start)} – {forecastTime(hour.end)} PHT</Text><Text style={styles.forecastCondition}>{hour.condition}</Text></View><View style={styles.forecastWeatherIcon}><MaterialCommunityIcons name={hour.icon} size={28} color={accent} /></View></View>
+        <View style={styles.forecastMetrics}>
+            <View style={styles.forecastMetric}><Ionicons name="water-outline" size={14} color={accent} /><Text style={styles.forecastMetricText}>{rain == null ? 'Rainfall unavailable' : `${rain.toFixed(1)} mm / ${hour.durationHours} ${hour.durationHours === 1 ? 'hour' : 'hours'}`}</Text></View>
+            <View style={styles.forecastMetric}><Ionicons name="umbrella-outline" size={14} color="#4D7FAD" /><Text style={styles.forecastMetricText}>{hour.probability == null ? 'Rain chance unavailable' : `${Math.round(hour.probability)}% rain chance`}</Text></View>
+            <View style={styles.forecastMetric}><Ionicons name="thermometer-outline" size={14} color="#4D7FAD" /><Text style={styles.forecastMetricText}>{temperature(hour.temperature)}</Text></View>
+        </View>
+    </View>;
 }
 function Section({ title, icon, children }: { title: string; icon: React.ComponentProps<typeof Ionicons>['name']; children: React.ReactNode }) {
     return <View style={styles.section}><View style={styles.sectionHeading}><View style={styles.sectionIcon}><Ionicons name={icon} size={18} color="#2563EB" /></View><Text style={styles.sectionTitle}>{title}</Text></View><View style={{ gap: 12 }}>{children}</View></View>;
@@ -260,9 +314,15 @@ const styles = StyleSheet.create({
     heroMetrics: { flexDirection: 'row', gap: 20, marginTop: 22, paddingTop: 18, borderTopWidth: 1, borderColor: '#D4E3F7' }, metricValue: { fontSize: 21, fontWeight: '700', color: '#315678', marginTop: 6 }, metricDivider: { width: 1, backgroundColor: '#D4E3F7' },
     section: { backgroundColor: '#FFFFFF', borderRadius: 20, padding: 18, marginBottom: 14, borderWidth: 1, borderColor: '#E7EDF5' }, sectionHeading: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 16 }, sectionIcon: { width: 33, height: 33, borderRadius: 11, backgroundColor: '#EFF6FF', alignItems: 'center', justifyContent: 'center' }, sectionTitle: { fontSize: 15, fontWeight: '800', color: '#15324F', flexShrink: 1 },
     riskScale: { flexDirection: 'row', gap: 8 }, riskSegment: { flex: 1, paddingVertical: 11, borderRadius: 9, alignItems: 'center' },
-    emptyIconRow: { flexDirection: 'row', alignItems: 'center', gap: 12 }, softIcon: { width: 45, height: 45, borderRadius: 14, backgroundColor: '#F1F5F9', justifyContent: 'center', alignItems: 'center' }, emptyTitle: { color: '#4B6582', fontSize: 13, fontWeight: '700' },
-    emptyPanel: { padding: 20, borderRadius: 14, backgroundColor: '#F7F9FC', alignItems: 'center', gap: 10 }, area: { paddingTop: 14, borderTopWidth: 1, borderColor: '#EDF1F6', gap: 7 }, areaTitle: { fontSize: 13, fontWeight: '700', color: '#315678', lineHeight: 19 },
-    verifiedPill: { flexDirection: 'row', alignItems: 'center', gap: 4, borderRadius: 6, paddingHorizontal: 7, paddingVertical: 4, backgroundColor: '#EAF7EF' }, verifiedText: { color: '#15803D', fontSize: 9, fontWeight: '700' },
+    emptyTitle: { color: '#4B6582', fontSize: 13, fontWeight: '700' },
+    emptyPanel: { padding: 20, borderRadius: 14, backgroundColor: '#F7F9FC', alignItems: 'center', gap: 10 }, areaTitle: { fontSize: 13, fontWeight: '700', color: '#315678', lineHeight: 19 },
+    forecastCity: { color: '#315678', fontSize: 13, fontWeight: '700' },
+    forecastCard: { backgroundColor: '#F7FAFE', borderRadius: 14, borderWidth: 1, borderColor: '#E5EDF7', borderLeftWidth: 4, padding: 13, gap: 12 },
+    forecastTop: { flexDirection: 'row', alignItems: 'center', gap: 10 }, forecastTime: { color: '#526F8E', fontSize: 11, fontWeight: '700' }, forecastCondition: { color: '#15324F', fontSize: 15, fontWeight: '800', marginTop: 3 },
+    forecastWeatherIcon: { width: 42, height: 42, borderRadius: 13, backgroundColor: '#EAF2FC', alignItems: 'center', justifyContent: 'center' },
+    forecastMetrics: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, forecastMetric: { flexDirection: 'row', alignItems: 'center', gap: 4 }, forecastMetricText: { color: '#526F8E', fontSize: 11, fontWeight: '600' },
+    forecastAdvisory: { color: '#315678', backgroundColor: '#EDF5FF', borderRadius: 12, padding: 12, fontSize: 12, lineHeight: 19 },
+    forecastLoading: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 22 }, forecastError: { gap: 8, backgroundColor: '#FFF8EE', padding: 12, borderRadius: 12 },
     button: { backgroundColor: '#2563EB', padding: 14, minHeight: 46, borderRadius: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 }, buttonText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700', flexShrink: 1 },
     sourceNote: { color: '#94A3B8', fontSize: 10, lineHeight: 17, textAlign: 'center', marginTop: 4, marginBottom: 12, paddingHorizontal: 18 },
     skeleton: { backgroundColor: '#FFFFFF', padding: 20, borderRadius: 20, gap: 18, marginBottom: 12 }, skeletonLine: { width: '65%', height: 13, backgroundColor: '#E8EEF6', borderRadius: 7 },
