@@ -6,8 +6,9 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, AppState, FlatList, Linking, Modal, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { invalidateRiskSnapshot, loadRiskSnapshot, resolvePriority, type RiskSnapshot } from '@/utils/live-risk';
-import { isStale, prioritize, riskFor, timestamp, value, weatherIcon, type Municipality, type Priority } from '@/utils/live-risk-model';
+import { isStale, matchesRiskFilter, prioritize, riskFor, timestamp, value, weatherIcon, type Municipality, type Priority, type RiskFilter } from '@/utils/live-risk-model';
 import { cachedForecast, loadForecast, type Forecast } from '@/utils/live-forecast';
+import PredictedFloodRisk from '@/components/predicted-flood-risk';
 
 const precautions = 'Stay alert in flood-prone areas. Avoid crossing floodwater, prepare essential supplies, and follow evacuation instructions from your LGU.';
 export default function LiveRiskModal({ visible, onClose }: { visible: boolean; onClose: () => void }) {
@@ -15,6 +16,7 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
     const [priority, setPriority] = useState<Priority>({ id: null, label: '', explanation: 'Identifying your municipality…' });
     const [search, setSearch] = useState('');
     const [selectedId, setSelectedId] = useState<string | null>(null);
+    const [riskFilter, setRiskFilter] = useState<RiskFilter>('all');
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [forecastState, setForecastState] = useState<{ key: string; data: Forecast | null; loading: boolean; error: string }>({ key: '', data: null, loading: false, error: '' });
@@ -24,13 +26,13 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
     const busy = useRef<number | null>(null);
     const generation = useRef(0);
     const priorityResolved = useRef(false);
-    const refresh = useCallback(async () => {
+    const refresh = useCallback(async (force = false) => {
         const current = generation.current;
         if (busy.current === current || AppState.currentState === 'background') return;
         busy.current = current;
         setLoading(true);
         try {
-            const result = await loadRiskSnapshot();
+            const result = await loadRiskSnapshot({ force });
             if (current !== generation.current) return;
             setSnapshot(result.snapshot);
             setError(result.error || '');
@@ -38,7 +40,7 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
                 const resolved = await resolvePriority(result.snapshot.rows);
                 if (current !== generation.current) return;
                 setPriority(resolved);
-                priorityResolved.current = true;
+                priorityResolved.current = !!resolved.id;
             }
         } catch (err) {
             if (current === generation.current) setError(err instanceof Error ? err.message : 'Live Risk is unavailable.');
@@ -52,12 +54,12 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
         const current = generation.current;
         const initial = setTimeout(() => {
             priorityResolved.current = false;
-            setSelectedId(null); setSearch(''); setSnapshot(null); setError(''); setLinkError('');
+            setSelectedId(null); setRiskFilter('all'); setSearch(''); setSnapshot(null); setError(''); setLinkError('');
             setPriority({ id: null, label: '', explanation: 'Identifying your municipality…' });
             void refresh();
         }, 0);
         const timer = setInterval(() => void refresh(), 60000);
-        const subscription = AppState.addEventListener('change', state => { if (state === 'active') void refresh(); });
+        const subscription = AppState.addEventListener('change', state => { if (state === 'active') void refresh(true); });
         return () => { generation.current = current + 1; clearTimeout(initial); clearInterval(timer); subscription.remove(); };
     }, [visible, refresh]);
     const selected = snapshot?.rows.find(row => row.municipality_id === selectedId);
@@ -109,9 +111,15 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
             if (refreshTimer) clearTimeout(refreshTimer);
             refreshTimer = setTimeout(() => { invalidateRiskSnapshot(); void refresh(); }, 1500);
         };
+        const changedMunicipality = (payload: { new: Record<string, unknown>; old: Record<string, unknown> }) => {
+            const id = payload.new?.municipality_id || payload.old?.municipality_id;
+            if (typeof id === 'string') changed();
+        };
         const channel = supabase.channel('live-risk-monitor')
             .on('postgres_changes', { event: '*', schema: 'public', table: 'weather_telemetry' }, changed)
             .on('postgres_changes', { event: '*', schema: 'public', table: 'municipality_alerts' }, changed)
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'road_passability_updates' }, changedMunicipality)
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'incident_report' }, changedMunicipality)
             .subscribe();
         return () => { if (refreshTimer) clearTimeout(refreshTimer); void supabase.removeChannel(channel); };
     }, [visible, refresh]);
@@ -119,21 +127,23 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
         if (!visible || !snapshot || error || !priority.id) return;
         const mine = snapshot.rows.find(row => row.municipality_id === priority.id);
         const risk = mine ? riskFor(mine) : null;
-        if (!mine || !risk?.elevated || !risk.alert) return;
+        if (!mine || !risk?.elevated) return;
         let active = true;
         const key = `live-risk-warning:${snapshot.userId}:${mine.municipality_id}`;
-        const fingerprint = `${risk.alert.id}:${risk.alert.issued_at}:${risk.level}`;
+        const fingerprint = `${risk.alert?.id || 'verified-observation'}:${risk.alert?.issued_at || mine.flood_evidence?.road_observed_at || mine.flood_evidence?.latest_flood_report_at}:${risk.level}`;
         void AsyncStorage.getItem(key).then(async previous => {
             if (!active || previous === fingerprint) return;
             await AsyncStorage.setItem(key, fingerprint);
-            if (active) triggerNotificationBanner({ id: `risk-${fingerprint}`, title: `${risk.level} flood risk · ${mine.name}`, message: `Active FloodWatch municipality alert. ${precautions}`, type: 'Emergency' }, false);
+            if (active) triggerNotificationBanner({ id: `risk-${fingerprint}`, title: `${risk.level} · ${mine.name}`, message: `${risk.explanation} ${precautions}`, type: 'Emergency' }, false);
         }).catch(() => {});
         return () => { active = false; };
     }, [visible, snapshot, priority.id, error]);
     const mine = snapshot?.rows.find(row => row.municipality_id === priority.id);
     const observation = selected?.weather_telemetry[0];
     const risk = selected ? riskFor(selected) : null;
-    const rows = prioritize(snapshot?.rows || [], priority.id, search);
+    const rows = prioritize((snapshot?.rows || []).filter(row => riskFilter === 'all' || (!error && matchesRiskFilter(row, riskFilter, Date.now()))), priority.id, search);
+    const emptyTitle = error && riskFilter !== 'all' ? 'Current risk could not be confirmed' : search.trim() ? 'No matching municipalities' : riskFilter === 'high' ? 'No confirmed High Risk assessments' : riskFilter === 'safe' ? 'No confirmed Safe assessments' : riskFilter === 'normal' ? 'No confirmed Normal assessments' : 'Locations are unavailable';
+    const emptyDescription = error && riskFilter !== 'all' ? 'Refresh to check the latest municipality alerts.' : search.trim() ? 'Try another city or municipality name or change the filter.' : riskFilter === 'high' ? 'No municipalities currently have a confirmed High Risk assessment. Continue monitoring official updates.' : riskFilter === 'safe' || riskFilter === 'normal' ? 'The backend has not published this classification for a municipality. Missing assessments are not treated as safe.' : 'Pull down to refresh or try again shortly.';
     const close = () => { setSnapshot(null); onClose(); };
     const renderCard = ({ item }: { item: Municipality }) => {
         const weather = item.weather_telemetry[0];
@@ -152,12 +162,13 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
                 </View>
                 <View style={styles.observationRow}>
                     <View style={styles.flex}><Text style={styles.temperature}>{temperature(weather?.temperature)}</Text><Text style={styles.condition}>{weather?.weather_condition || 'Weather unavailable'}</Text></View>
-                    <View style={styles.rainMetric}><View style={styles.metricLabelRow}><Ionicons name="water-outline" size={14} color="#4D7FAD" /><Text style={styles.metricLabel}>RAINFALL</Text></View><Text style={styles.rainValue}>{value(weather?.rainfall_mm, ' mm')}</Text></View>
+                    <View style={styles.rainMetric}><View style={styles.metricLabelRow}><Ionicons name="water-outline" size={14} color="#4D7FAD" /><Text style={styles.metricLabel}>RAINFALL</Text></View><Text style={styles.rainValue}>{value(weather?.rainfall_mm, ' mm')}</Text>{weather?.measurement_period_seconds != null && <Text style={styles.rainPeriod}>per {Math.round(weather.measurement_period_seconds / 60)} min</Text>}</View>
                 </View>
                 <View style={styles.cardFooter}>
                     <RiskBadge level={badge.level} color={badge.color} />
                     <View style={styles.detailsLink}><Text style={styles.link}>View details</Text><Ionicons name="arrow-forward" size={16} color="#2563EB" /></View>
                 </View>
+                {badge.category === 'unknown' && <Text style={styles.small}>{badge.confirmedFlood ? 'Flooding reported; severity is not confirmed.' : 'No current verified flood assessment.'}</Text>}
                 <ObservationTime observation={weather} />
             </Pressable>
         );
@@ -180,11 +191,14 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
                             <TextInput accessibilityLabel="Search city or municipality" value={search} onChangeText={setSearch} placeholder="Search city or municipality" placeholderTextColor="#94A3B8" style={styles.input} autoCorrect={false} returnKeyType="search" />
                             {!!search && <Pressable accessibilityRole="button" accessibilityLabel="Clear search" hitSlop={10} onPress={() => setSearch('')}><Ionicons name="close-circle" size={18} color="#94A3B8" /></Pressable>}
                         </View>
+                        <View style={styles.filterRow} accessibilityRole="radiogroup" accessibilityLabel="Flood risk filter">
+                            {([{ value: 'all', label: 'All' }, { value: 'safe', label: 'Safe' }, { value: 'normal', label: 'Normal' }, { value: 'high', label: 'High Risk' }] as { value: RiskFilter; label: string }[]).map(option => <Pressable key={option.value} accessibilityRole="radio" accessibilityState={{ checked: riskFilter === option.value }} onPress={() => setRiskFilter(option.value)} style={[styles.filterPill, riskFilter === option.value && styles.filterPillActive]}><Text numberOfLines={1} style={[styles.filterText, riskFilter === option.value && styles.filterTextActive]}>{option.label}</Text></Pressable>)}
+                        </View>
                     </>}
                 </View>
-                {!!error && <View accessibilityRole="alert" style={styles.notice}><Ionicons name="cloud-offline-outline" size={18} color="#B45309" /><Text style={[styles.small, styles.flex]}>{error}</Text><Pressable accessibilityRole="button" onPress={() => void refresh()}><Text style={styles.link}>Retry</Text></Pressable></View>}
+                {!!error && <View accessibilityRole="alert" style={styles.notice}><Ionicons name="cloud-offline-outline" size={18} color="#B45309" /><Text style={[styles.small, styles.flex]}>{error}</Text><Pressable accessibilityRole="button" onPress={() => void refresh(true)}><Text style={styles.link}>Retry</Text></Pressable></View>}
                 {selected ? (
-                    <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content} refreshControl={<RefreshControl refreshing={loading || forecastState.loading} onRefresh={() => { void refresh(); requestForecastRefresh(); }} />}>
+                    <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content} refreshControl={<RefreshControl refreshing={loading || forecastState.loading} onRefresh={() => { void refresh(true); requestForecastRefresh(); }} />}>
                         <View style={styles.hero}>
                             <View style={styles.row}><View style={styles.flex}><Text style={styles.eyebrow}>CURRENT WEATHER</Text><Text style={styles.heroCity}>{placeName(selected.name)}</Text>{selectedId === priority.id && <Text style={styles.location}>{priority.label}</Text>}</View><MaterialCommunityIcons name={weatherIcon(observation?.weather_condition)} size={58} color="#2563EB" /></View>
                             <Text style={styles.heroTemperature}>{temperature(observation?.temperature)}</Text>
@@ -197,7 +211,8 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
                         <Section title="Flood risk assessment" icon="shield-checkmark-outline">
                             <RiskBadge level={risk?.level || 'Data Unavailable'} color={risk?.color || '#64748B'} />
                             <RiskScale level={risk?.level} />
-                            <Text style={styles.body}>{risk?.alert ? `FloodWatch municipality alert issued ${timestamp(risk.alert.issued_at)} PHT. Follow local guidance and monitor official updates.` : 'A current flood risk assessment is not available for this location. Stay aware and monitor official updates.'}</Text>
+                            <Text style={styles.body}>{risk?.explanation}</Text>
+                            {risk?.alert && <Text style={styles.small}>FloodWatch alert issued {timestamp(risk.alert.issued_at)} PHT.</Text>}
                             {!!observation?.rainfall_category && <Text style={styles.small}>Recorded rainfall category: {observation.rainfall_category}</Text>}
                         </Section>
                         <Section title="Next 2-3 hours" icon="time-outline">
@@ -209,6 +224,7 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
                             </> : forecastState.key !== forecastKey || forecastState.loading ? <View style={styles.forecastLoading}><ActivityIndicator color="#2563EB" /><Text style={styles.body}>Loading forecast…</Text></View> : null}
                             {forecastState.key === forecastKey && forecastState.loading && forecastState.data && <Text style={styles.small}>Refreshing forecast…</Text>}
                             {forecastState.key === forecastKey && !!forecastState.error && <View accessibilityRole="alert" style={styles.forecastError}><Text style={styles.body}>{forecastState.error}</Text><Pressable accessibilityRole="button" onPress={requestForecastRefresh}><Text style={styles.link}>Retry forecast</Text></Pressable></View>}
+                            <PredictedFloodRisk key={selected.municipality_id} municipalityId={selected.municipality_id} latitude={selected.center_latitude} longitude={selected.center_longitude} refreshKey={forecastRefresh} />
                         </Section>
                         <Section title="Official PAGASA Advisories" icon="megaphone-outline">
                             <Text style={styles.body}>Current official advisories are not available in this app. View PAGASA for rainfall warnings and cyclone bulletins.</Text>
@@ -216,17 +232,17 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
                             {!!linkError && <Text style={styles.small}>{linkError}</Text>}
                         </Section>
                         <Section title="Stay prepared" icon="heart-outline"><Text style={styles.body}>{precautions}</Text></Section>
-                        <Text style={styles.sourceNote}>Current weather: Open-Meteo estimates when saved readings are old, otherwise FloodWatch telemetry. Forecast: OpenWeather or Open-Meteo. Risk alerts: FloodWatch. Official advisories: PAGASA.</Text>
+                        <Text style={styles.sourceNote}>Current weather: Open-Meteo estimates when saved readings are old, otherwise FloodWatch telemetry. Forecast: OpenWeather or Open-Meteo. Flood risk: verified road and incident observations plus current FloodWatch assessments. Official advisories: PAGASA.</Text>
                     </ScrollView>
                 ) : (
-                    <FlatList data={rows} keyExtractor={item => item.municipality_id} renderItem={renderCard} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" refreshControl={<RefreshControl refreshing={loading} onRefresh={() => void refresh()} />}
+                    <FlatList data={rows} keyExtractor={item => item.municipality_id} renderItem={renderCard} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" refreshControl={<RefreshControl refreshing={loading} onRefresh={() => void refresh(true)} />}
                         ListHeaderComponent={<>
                             <View style={styles.overview}><View style={styles.flex}><Text style={styles.overviewTitle}>Across Cebu</Text><Text style={styles.small}>{snapshot ? `${snapshot.rows.length} cities & municipalities` : 'Loading supported locations'}</Text></View><View style={styles.updatePill}><View style={styles.updateDot} /><Text style={styles.updateText}>Auto refresh</Text></View></View>
-                            {mine && riskFor(mine).elevated && <View accessibilityRole="alert" style={styles.warning}><Ionicons name="warning-outline" size={21} color="#C2410C" /><View style={styles.flex}><Text style={styles.areaTitle}>{riskFor(mine).level} risk in {placeName(mine.name)}</Text><Text style={styles.body}>An active FloodWatch alert applies to your municipality. Tap your card for guidance.</Text></View></View>}
+                            {mine && !error && matchesRiskFilter(mine, riskFilter, Date.now()) && riskFor(mine).elevated && <View accessibilityRole="alert" style={styles.warning}><Ionicons name="warning-outline" size={21} color="#C2410C" /><View style={styles.flex}><Text style={styles.areaTitle}>{riskFor(mine).level} in {placeName(mine.name)}</Text><Text style={styles.body}>{riskFor(mine).explanation} Tap your card for guidance.</Text></View></View>}
                             <View style={styles.listLabelRow}><Text style={styles.listLabel}>{search.trim() ? 'SEARCH RESULTS' : 'MUNICIPALITIES'}</Text>{snapshot && <Text style={styles.small}>Checked {timestamp(new Date(snapshot.fetchedAt).toISOString())}</Text>}</View>
                             {!priority.id && !loading && <Text style={[styles.small, { marginBottom: 12 }]}>Explore any location below. Your municipality could not be identified.</Text>}
                         </>}
-                        ListEmptyComponent={loading ? <View accessibilityLabel="Loading weather cards">{[1, 2, 3].map(key => <View key={key} style={styles.skeleton}><View style={styles.skeletonLine} /><View style={[styles.skeletonLine, { width: '40%', height: 32 }]} /><View style={[styles.skeletonLine, { width: '75%' }]} /></View>)}<ActivityIndicator color="#2563EB" /></View> : <View style={styles.emptyPanel}><Ionicons name="search-outline" size={30} color="#94A3B8" /><Text style={styles.emptyTitle}>{search ? 'No matching municipalities' : 'Locations are unavailable'}</Text><Text style={styles.body}>{search ? 'Try another city or municipality name.' : 'Pull down to refresh or try again shortly.'}</Text></View>}
+                        ListEmptyComponent={loading ? <View accessibilityLabel="Loading weather cards">{[1, 2, 3].map(key => <View key={key} style={styles.skeleton}><View style={styles.skeletonLine} /><View style={[styles.skeletonLine, { width: '40%', height: 32 }]} /><View style={[styles.skeletonLine, { width: '75%' }]} /></View>)}<ActivityIndicator color="#2563EB" /></View> : <View style={styles.emptyPanel}><Ionicons name="search-outline" size={30} color="#94A3B8" /><Text style={styles.emptyTitle}>{emptyTitle}</Text><Text style={styles.body}>{emptyDescription}</Text></View>}
                         ListFooterComponent={snapshot && rows.length ? <Text style={styles.sourceNote}>Pull down to refresh. Older observations are marked on each card.</Text> : undefined}
                     />
                 )}
@@ -241,10 +257,10 @@ function temperature(number?: number | null) {
     return value(number == null ? null : Math.round(number * 10) / 10, '\u00b0C');
 }
 function RiskBadge({ level, color }: { level: string; color: string }) {
-    return <View style={[styles.riskBadge, { backgroundColor: `${color}10` }]}><View style={[styles.riskDot, { backgroundColor: color }]} /><Text style={[styles.riskText, { color }]}>{level === 'Data Unavailable' ? 'Normal' : `${level.replace(/ risk$/i, '')} risk`}</Text></View>;
+    return <View style={[styles.riskBadge, { backgroundColor: `${color}10` }]}><View style={[styles.riskDot, { backgroundColor: color }]} /><Text style={[styles.riskText, { color }]}>{level}</Text></View>;
 }
 function RiskScale({ level }: { level?: string }) {
-    return <View style={styles.riskScale}>{[{ label: 'Low', color: '#10B981', background: '#D1FAE5' }, { label: 'Moderate', color: '#F59E0B', background: '#FFEDD5' }, { label: 'High', color: '#EF4444', background: '#FEE2E2' }].map(item => <View key={item.label} style={[styles.riskSegment, { backgroundColor: item.background }, level?.toLowerCase().replace(/ risk$/, '') === item.label.toLowerCase() && { borderBottomWidth: 3, borderBottomColor: item.color }]}><Text style={{ fontSize: 11, fontWeight: '700', color: item.color }}>{item.label.toUpperCase()}</Text></View>)}</View>;
+    return <View style={styles.riskScale}>{[{ label: 'Normal', color: '#16A34A', background: '#DCFCE7' }, { label: 'Safe', color: '#EA580C', background: '#FFEDD5' }, { label: 'High Risk', color: '#DC2626', background: '#FEE2E2' }].map(item => <View key={item.label} style={[styles.riskSegment, { backgroundColor: item.background }, level === item.label && { borderBottomWidth: 3, borderBottomColor: item.color }]}><Text style={{ fontSize: 11, fontWeight: '700', color: item.color }}>{item.label.toUpperCase()}</Text></View>)}</View>;
 }
 function ObservationTime({ observation }: { observation?: Municipality['weather_telemetry'][number] }) {
     const outdated = isStale(observation);
@@ -285,6 +301,11 @@ const styles = StyleSheet.create({
     subtitle: { color: '#7A8BA0', fontSize: 12, lineHeight: 18, marginTop: 12 },
     iconButton: { width: 40, height: 40, borderRadius: 14, backgroundColor: '#F3F6FA', justifyContent: 'center', alignItems: 'center' },
     search: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F5F8FC', borderWidth: 1, borderColor: '#E4EBF3', borderRadius: 14, paddingHorizontal: 14, gap: 10, marginTop: 15 },
+    filterRow: { flexDirection: 'row', gap: 6, marginTop: 12 },
+    filterPill: { flex: 1, minWidth: 0, minHeight: 38, borderRadius: 20, borderWidth: 1, borderColor: '#DCE6F0', backgroundColor: '#F6F9FD', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 5 },
+    filterPillActive: { backgroundColor: '#2563EB', borderColor: '#2563EB' },
+    filterText: { color: '#526F8E', fontSize: 11, fontWeight: '700' },
+    filterTextActive: { color: '#FFFFFF' },
     input: { flex: 1, minWidth: 0, minHeight: 46, fontSize: 13, color: '#15324F', paddingVertical: 10 },
     content: { padding: 18, paddingBottom: 28, width: '100%', maxWidth: 680, alignSelf: 'center' },
     overview: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 22, marginTop: 2 },
@@ -302,6 +323,7 @@ const styles = StyleSheet.create({
     temperature: { color: '#15324F', fontSize: 34, fontWeight: '800', letterSpacing: -1.5 }, condition: { color: '#6C8298', fontSize: 12, marginTop: 3 },
     rainMetric: { alignItems: 'flex-end', flexShrink: 1, maxWidth: '46%' }, metricLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 5 }, metricLabel: { color: '#7A8EA6', fontSize: 9, fontWeight: '800', letterSpacing: 0.8 },
     rainValue: { color: '#315678', fontSize: 18, fontWeight: '700', marginTop: 6 },
+    rainPeriod: { color: '#8393A7', fontSize: 9, marginTop: 2 },
     cardFooter: { borderTopWidth: 1, borderColor: '#E2EAF4', paddingTop: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' },
     riskBadge: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 9, paddingVertical: 6, borderRadius: 8 }, riskDot: { width: 5, height: 5, borderRadius: 3 }, riskText: { fontSize: 10, fontWeight: '700', flexShrink: 1 },
     detailsLink: { flexDirection: 'row', alignItems: 'center', gap: 6 }, link: { color: '#2563EB', fontSize: 12, fontWeight: '700' },

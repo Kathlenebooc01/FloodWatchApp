@@ -98,8 +98,15 @@ export interface FullAddress {
 // Once resolved, the address is reused for the entire app session.
 // GPS + Nominatim only run ONCE no matter how many screens call this.
 let _cachedAddress: FullAddress | null = null;
+let _cachedAddressAt = 0;
 let _pendingPromise: Promise<FullAddress> | null = null;
 let _cacheVersion = 0;
+
+/** Reuse a recently geocoded GPS address across dashboard and Live Risk. */
+export function getRecentFullAddress(): FullAddress | null {
+    const age = Date.now() - _cachedAddressAt;
+    return age >= 0 && age < 5 * 60000 ? _cachedAddress : null;
+}
 // ──────────────────────────────────────────────────────────────────────────
 
     /** Detect Google Plus Codes like "8X9V+8R8" — never show these */
@@ -378,7 +385,10 @@ export async function getCurrentFullAddress(): Promise<FullAddress> {
         const result = assembleAddress(nominatimData, bigDataCloudData, expoGeo, latitude, longitude);
 
         // Store in cache for all future calls
-        if (version === _cacheVersion) _cachedAddress = result;
+        if (version === _cacheVersion) {
+            _cachedAddress = result;
+            _cachedAddressAt = Date.now();
+        }
         return result;
     })().catch(async error => {
         await reportChangedLocationAccess();
@@ -396,6 +406,7 @@ export async function getCurrentFullAddress(): Promise<FullAddress> {
 export function clearLocationCache(): void {
     _cacheVersion++;
     _cachedAddress = null;
+    _cachedAddressAt = 0;
     _pendingPromise = null;
 }
 

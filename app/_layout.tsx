@@ -203,6 +203,7 @@ export default function RootLayout() {
                 <Stack.Screen name="inquiry" />
                 <Stack.Screen name="localreports" />
                 <Stack.Screen name="lgu-report" />
+                <Stack.Screen name="lgu-road-status" />
                 <Stack.Screen name="situational-lgu" />
                 <Stack.Screen name="situational-admin" />
                 <Stack.Screen name="logistics-lgu" />

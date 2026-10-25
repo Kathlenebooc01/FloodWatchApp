@@ -125,3 +125,30 @@ export async function loadForecast(latitude: number, longitude: number, signal?:
     }
     throw new Error('Forecast providers are unavailable. Check your connection and retry.');
 }
+
+// The added prediction needs actual hourly amounts. Keep the existing forecast
+// provider preference intact; never split OpenWeather's 3-hour total into hours.
+const hourlyCache = new Map<string, Forecast>();
+export function cachedHourlyForecast(latitude: number, longitude: number): Forecast | null {
+    const existing = cachedForecast(latitude, longitude);
+    const forecast = hourlyCache.get(`${latitude}:${longitude}`);
+    const shared = existing?.source === 'Open-Meteo' ? existing : null;
+    if (!forecast || Date.now() - forecast.fetchedAt >= TTL || forecast.fetchedAt > Date.now() + 60000) return shared;
+    if (forecast.hours.length !== 3 || forecast.hours[0].start < Math.ceil(Date.now() / 3_600_000) * 3_600_000) return shared;
+    return shared && shared.fetchedAt > forecast.fetchedAt ? shared : forecast;
+}
+
+export async function loadHourlyForecast(latitude: number, longitude: number, signal?: AbortSignal, force = false): Promise<Forecast> {
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || Math.abs(latitude) > 90 || Math.abs(longitude) > 180) throw new Error('Forecast coordinates are unavailable.');
+    if (signal?.aborted) throw new Error('Forecast request cancelled.');
+    const existing = !force && cachedHourlyForecast(latitude, longitude);
+    if (existing) return existing;
+    const params = new URLSearchParams({ latitude: String(latitude), longitude: String(longitude), hourly: 'temperature_2m,precipitation,precipitation_probability,weather_code', forecast_hours: '8', timeformat: 'unixtime', timezone: 'UTC', precipitation_unit: 'mm' });
+    const payload = await requestForecast(`https://api.open-meteo.com/v1/forecast?${params}`, signal, 6000) as HourlyResponse;
+    if (payload.error) throw new Error('Hourly forecast is unavailable. Please retry.');
+    const hours = parseForecast(payload);
+    if (hours.length !== 3) throw new Error('Not enough hourly forecast data is available. Please retry.');
+    const forecast: Forecast = { hours, source: 'Open-Meteo', fetchedAt: Date.now() };
+    hourlyCache.set(`${latitude}:${longitude}`, forecast);
+    return forecast;
+}

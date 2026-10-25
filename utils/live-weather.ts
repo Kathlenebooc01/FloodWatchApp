@@ -43,6 +43,20 @@ export function parseCurrentWeather(payload: CurrentResponse | null, row: Munici
         source: 'Open-Meteo', wind_speed_unit: 'km/h', measurement_period_seconds: numeric(current.interval),
     };
 }
+export async function currentWeatherAt(latitude: number, longitude: number): Promise<Observation | null> {
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
+    try {
+        const params = new URLSearchParams({ latitude: String(latitude), longitude: String(longitude), current: 'temperature_2m,relative_humidity_2m,precipitation,weather_code,wind_speed_10m', timeformat: 'unixtime', timezone: 'UTC', wind_speed_unit: 'kmh', precipitation_unit: 'mm', forecast_days: '1' });
+        const response = await fetch(`https://api.open-meteo.com/v1/forecast?${params}`, { signal: controller.signal });
+        if (!response.ok) return null;
+        const row = { municipality_id: 'device-location', center_latitude: latitude, center_longitude: longitude } as Municipality;
+        const observation = parseCurrentWeather(await response.json(), row);
+        return observation && !isStale(observation) ? observation : null;
+    } catch { return null; }
+    finally { clearTimeout(timer); }
+}
 async function restoreCache() {
     if (!restored) restored = (async () => {
         try {
@@ -75,7 +89,8 @@ async function refreshBatch(rows: Municipality[]) {
 export async function refreshCurrentWeather(rows: Municipality[]): Promise<Municipality[]> {
     await restoreCache();
     const candidates = rows.filter(row => {
-        if (!isStale(row.weather_telemetry[0]) || !coordinatesAvailable(row)) return false;
+        const fetchedAt = Date.parse(row.weather_telemetry[0]?.fetched_at || '');
+        if (!coordinatesAvailable(row) || (!isStale(row.weather_telemetry[0]) && Date.now() - fetchedAt < CACHE_MS)) return false;
         const key = keyFor(row), entry = cache.get(key);
         return !(entry && Date.now() - entry.checkedAt < CACHE_MS && !isStale(entry.observation)) && Date.now() - (attempts.get(key) || 0) >= 3 * 60000;
     });

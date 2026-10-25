@@ -227,6 +227,12 @@ export default function LguReportScreen() {
                     <Ionicons name="chevron-forward" size={20} color="#CBD5E1" />
                 </TouchableOpacity>
 
+                <TouchableOpacity style={s.optionCard} activeOpacity={0.7} onPress={() => router.push('/lgu-road-status' as any)}>
+                    <View style={s.optionIconCircle}><Ionicons name="car-outline" size={22} color="#2563EB" /></View>
+                    <View style={s.optionTextContainer}><Text style={s.optionTitle}>Road observations</Text><Text style={s.optionDesc}>Record flood-related road conditions for your municipality.</Text></View>
+                    <Ionicons name="chevron-forward" size={20} color="#CBD5E1" />
+                </TouchableOpacity>
+
                 <TouchableOpacity style={s.optionCard} activeOpacity={0.7} onPress={() => router.push('/incident-lgu' as any)}>
                     <View style={[s.optionIconCircle, { backgroundColor: '#FEF2F2' }]}>
                         <Ionicons name="warning-outline" size={22} color="#EF4444" />

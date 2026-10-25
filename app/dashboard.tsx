@@ -7,8 +7,9 @@ import { View, Text, StyleSheet, TouchableOpacity, ScrollView, TextInput, Image,
 
 import Navbar from '@/components/navbar';
 import LiveRiskModal from '@/components/live-risk-modal';
-import { loadRiskSnapshot, resolvePriority } from '@/utils/live-risk';
-import { isStale, riskFor } from '@/utils/live-risk-model';
+import { invalidateRiskSnapshot, loadRiskSnapshot, resolvePriority } from '@/utils/live-risk';
+import { currentWeatherAt } from '@/utils/live-weather';
+import { riskFor } from '@/utils/live-risk-model';
 import { clearLocationCache, getCurrentFullAddress, subscribeLocationRestored } from '@/utils/location';
 import { supabase } from '@/utils/supabase';
 
@@ -28,6 +29,7 @@ interface WeatherData {
 
 interface RiskStatusData {
     risk_level: string;
+    color: string;
     alert_level: number;
     location: string;
     description: string;
@@ -45,7 +47,8 @@ export default function Dashboard() {
     const [weather, setWeather] = useState<WeatherData>({ temperature: null, condition: 'Fetching...', precipitation: null });
     const [weatherLoading, setWeatherLoading] = useState(false);
     const [riskStatus, setRiskStatus] = useState<RiskStatusData>({
-        risk_level: 'Data Unavailable',
+        risk_level: 'Loading...',
+        color: '#64748B',
         alert_level: 0,
         location: 'Loading...',
         description: 'Loading risk status...',
@@ -60,22 +63,26 @@ export default function Dashboard() {
     const [refreshing, setRefreshing]             = useState(false);
 
     const [showLiveRisk, setShowLiveRisk] = useState(false);
-    // Reuse municipality-linked backend telemetry; no provider credentials on-device.
-    const fetchRiskStatus = async (_coords?: { latitude: number; longitude: number }, _locationName?: string) => {
+    // Current weather follows the device location; flood risk follows the linked municipality.
+    const fetchRiskStatus = async (coords?: { latitude: number; longitude: number }, _locationName?: string) => {
+        const locationWeather = coords ? currentWeatherAt(coords.latitude, coords.longitude) : Promise.resolve(null);
         try {
             const { snapshot, error } = await loadRiskSnapshot();
             const priority = await resolvePriority(snapshot.rows);
             const municipality = snapshot.rows.find(row => row.municipality_id === priority.id);
-            const observation = municipality?.weather_telemetry[0];
+            const observation = (await locationWeather) || municipality?.weather_telemetry[0];
             setWeather({ temperature: observation?.temperature ?? null, condition: observation?.weather_condition || 'Weather unavailable', precipitation: observation?.rainfall_mm ?? null });
             const risk = municipality ? riskFor(municipality) : null;
-            setRiskStatus({ risk_level: risk?.level || 'Data Unavailable', alert_level: risk?.elevated ? 1 : 0,
+            setRiskStatus({ risk_level: risk?.level || 'Unknown', color: risk?.color || '#64748B', alert_level: risk?.elevated ? 1 : 0,
                 location: municipality?.name || 'Municipality unavailable',
-                description: error || (isStale(observation) ? 'Weather observation is outdated or unavailable. Check official updates for' : risk?.alert ? 'Active FloodWatch municipality alert for' : 'Monitor weather conditions and official updates for'),
-                updated_at: observation?.fetched_at || '' });
+                description: error || risk?.explanation || priority.explanation,
+                updated_at: new Date(snapshot.fetchedAt).toISOString() });
         } catch {
-            setWeather(previous => ({ ...previous, condition: previous.temperature == null ? 'Weather unavailable' : 'Saved observation · outdated' }));
-            setRiskStatus(previous => ({ ...previous, description: 'Live Risk is unavailable. Check official updates for' }));
+            const observation = await locationWeather;
+            if (observation) setWeather({ temperature: observation.temperature, condition: observation.weather_condition || 'Weather unavailable', precipitation: observation.rainfall_mm });
+            else setWeather(previous => ({ ...previous, condition: previous.temperature == null ? 'Weather unavailable' : 'Saved observation · outdated' }));
+            setRiskStatus(previous => ({ ...previous, risk_level: 'Unknown', color: '#64748B', alert_level: 0,
+                description: 'Could not refresh flood assessments. Pull down to retry.', updated_at: '' }));
         }
     };
     const fetchLocation = async () => {
@@ -316,6 +323,7 @@ export default function Dashboard() {
     const onRefresh = async () => {
         setRefreshing(true);
         try {
+            invalidateRiskSnapshot();
             clearLocationCache();
             await fetchLocation();
             await fetchNews();
@@ -447,78 +455,59 @@ export default function Dashboard() {
                 {/* Dynamic Risk Alert Card */}
                 <View style={[
                     styles.riskCard,
-                    { borderLeftColor: 
-                        riskStatus.risk_level === 'High' ? '#EF4444' : 
-                        riskStatus.risk_level === 'Moderate' ? '#F59E0B' : 
-                        riskStatus.risk_level === 'Low' ? '#10B981' : 
-                        '#2563EB' // Blue for Info/No data
-                    }
+                    { borderLeftColor: riskStatus.color }
                 ]}>
                     <View style={styles.riskHeader}>
                         <View style={[
                             styles.riskIconCircle,
-                            { backgroundColor: 
-                                riskStatus.risk_level === 'High' ? '#FEE2E2' : 
-                                riskStatus.risk_level === 'Moderate' ? '#FEF3C7' : 
-                                riskStatus.risk_level === 'Low' ? '#ECFDF5' :
-                                '#EFF6FF' // Light blue for Info
-                            }
+                            { backgroundColor: `${riskStatus.color}15` }
                         ]}>
                             <Ionicons 
                                 name={riskStatus.risk_level === 'Info' ? 'information-circle-outline' : 'warning-outline'}
                                 size={20} 
-                                color={
-                                    riskStatus.risk_level === 'High' ? '#EF4444' : 
-                                    riskStatus.risk_level === 'Moderate' ? '#F59E0B' : 
-                                    riskStatus.risk_level === 'Low' ? '#10B981' :
-                                    '#2563EB' // Blue for Info
-                                } 
+                                color={riskStatus.color}
                             />
                         </View>
                         <View style={{ flex: 1, marginLeft: 12 }}>
                             <Text style={styles.riskTitle}>
-                                {`Flood Risk: ${riskStatus.risk_level === 'Data Unavailable' ? 'Normal' : riskStatus.risk_level}`}
+                                {`Flood Risk: ${riskStatus.risk_level}`}
                             </Text>
-                            <Text style={styles.riskTime}>{riskStatus.updated_at ? `Updated ${getTimeAgo(riskStatus.updated_at)}` : 'Update unavailable'}</Text>
+                            <Text style={styles.riskTime}>{riskStatus.updated_at ? `Checked ${getTimeAgo(riskStatus.updated_at)}` : 'Awaiting current assessment'}</Text>
                         </View>
                         {riskStatus.alert_level > 0 && (
                             <View style={[
                                 styles.alertLevel,
-                                { backgroundColor: 
-                                    riskStatus.risk_level === 'High' ? '#EF4444' : 
-                                    riskStatus.risk_level === 'Moderate' ? '#F59E0B' : 
-                                    '#10B981'
-                                }
+                                { backgroundColor: riskStatus.color }
                             ]}>
-                                <Text style={styles.alertLevelText}>ACTIVE ALERT</Text>
+                                <Text style={styles.alertLevelText}>HIGH RISK</Text>
                             </View>
                         )}
                     </View>
                     <Text style={styles.riskBody}>
-                        {riskStatus.description}{' '}
-                        <Text style={{ fontWeight: '700' }}>{activeLocation}</Text>
+                        <Text style={{ fontWeight: '700' }}>{activeLocation}{'\n'}</Text>
+                        {riskStatus.description}
                     </Text>
                     <View style={styles.riskBarContainer}>
                         <View style={[
                             styles.riskTab, 
                             styles.tabLow, 
-                            riskStatus.risk_level === 'Low' && { borderBottomWidth: 4, borderBottomColor: '#10B981' }
+                            riskStatus.risk_level === 'Normal' && { borderBottomWidth: 4, borderBottomColor: '#16A34A' }
                         ]}>
-                            <Text style={styles.tabTextLow}>LOW</Text>
+                            <Text style={styles.tabTextLow}>NORMAL</Text>
                         </View>
                         <View style={[
                             styles.riskTab, 
                             styles.tabMod, 
-                            riskStatus.risk_level === 'Moderate' && { borderBottomWidth: 4, borderBottomColor: '#F59E0B' }
+                            riskStatus.risk_level === 'Safe' && { borderBottomWidth: 4, borderBottomColor: '#EA580C' }
                         ]}>
-                            <Text style={styles.tabTextMod}>MODERATE</Text>
+                            <Text style={[styles.tabTextMod, { color: '#EA580C' }]}>SAFE</Text>
                         </View>
                         <View style={[
                             styles.riskTab, 
                             styles.tabHigh, 
-                            riskStatus.risk_level === 'High' && { borderBottomWidth: 4, borderBottomColor: '#EF4444' }
+                            riskStatus.risk_level === 'High Risk' && { borderBottomWidth: 4, borderBottomColor: '#DC2626' }
                         ]}>
-                            <Text style={styles.tabTextHigh}>HIGH</Text>
+                            <Text style={styles.tabTextHigh}>HIGH RISK</Text>
                         </View>
                     </View>
                     <TouchableOpacity accessibilityRole="button" accessibilityLabel="Explore municipality weather and flood risk" onPress={() => setShowLiveRisk(true)} activeOpacity={0.75} style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 16, paddingBottom: 2 }}>

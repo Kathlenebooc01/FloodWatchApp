@@ -2,17 +2,19 @@ import { refreshCurrentWeather } from './live-weather';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
 import { supabase } from './supabase';
-import { matchMunicipality, type Municipality, type Priority } from './live-risk-model';
+import { getRecentFullAddress } from './location';
+import { matchMunicipality, type FloodEvidence, type Municipality, type Priority } from './live-risk-model';
 
-export type RiskSnapshot = { rows: Municipality[]; fetchedAt: number; userId: string };
-const TTL = 5 * 60000;
+export type RiskSnapshot = { rows: Municipality[]; fetchedAt: number; userId: string; evidenceError?: string };
+const TTL = 60000;
 let memory: RiskSnapshot | null = null;
 let pending: { userId: string; promise: Promise<RiskSnapshot> } | null = null;
 let invalidated = false;
 export function invalidateRiskSnapshot() { invalidated = true; }
 const storageKey = (id: string) => `live-risk-v2:${id}`;
 // Reads stay under the signed-in user's existing RLS policies. No provider credentials on-device.
-export async function loadRiskSnapshot(): Promise<{ snapshot: RiskSnapshot; error?: string }> {
+export async function loadRiskSnapshot({ force = false }: { force?: boolean } = {}): Promise<{ snapshot: RiskSnapshot; error?: string }> {
+    if (force) invalidateRiskSnapshot();
     const { data, error: authError } = await supabase.auth.getSession();
     const userId = data.session?.user.id;
     if (authError || !userId) throw new Error('Sign in to view Live Risk.');
@@ -24,7 +26,7 @@ export async function loadRiskSnapshot(): Promise<{ snapshot: RiskSnapshot; erro
             if (parsed?.userId === userId && Array.isArray(parsed.rows)) cached = parsed;
         } catch { /* Storage is optional. */ }
     }
-    if (!invalidated && cached && Date.now() - cached.fetchedAt < TTL) return { snapshot: cached };
+    if (!invalidated && cached && !cached.evidenceError && Date.now() - cached.fetchedAt < TTL) return { snapshot: cached };
     try {
         if (!pending || pending.userId !== userId) {
             const promise = fetchRows(userId);
@@ -35,9 +37,9 @@ export async function loadRiskSnapshot(): Promise<{ snapshot: RiskSnapshot; erro
         memory = snapshot;
         invalidated = false;
         await AsyncStorage.setItem(storageKey(userId), JSON.stringify(snapshot)).catch(() => {});
-        return { snapshot };
+        return { snapshot, error: snapshot.evidenceError };
     } catch {
-        if (cached) return { snapshot: cached, error: 'Could not refresh. Showing saved data; check observation times and official updates.' };
+        if (cached) return { snapshot: { ...cached, rows: cached.rows.map(row => ({ ...row, flood_evidence: null, municipality_alerts: [] })) }, error: 'Could not refresh flood evidence. Saved weather is shown; current risk is Unknown.' };
         throw new Error('Weather data could not be loaded. Check your connection and try again.');
     }
 }
@@ -62,7 +64,13 @@ async function fetchRows(userId: string): Promise<RiskSnapshot> {
             if (!data || data.length < 500) break;
         } finally { clearTimeout(timer); }
     }
-    return { rows: await refreshCurrentWeather(rows), userId, fetchedAt: Date.now() };
+    const { data: evidence, error: evidenceError } = await supabase.from('municipality_flood_risk_evidence')
+        .select('municipality_id,severe_flood_roads,flooded_roads,precaution_roads,verified_flood_reports,severe_flood_reports,road_observed_at,latest_flood_report_at')
+        .abortSignal(AbortSignal.timeout(15000));
+    if (evidenceError) return { rows: await refreshCurrentWeather(rows.map(row => ({ ...row, municipality_alerts: [], flood_evidence: null }))),
+        userId, fetchedAt: Date.now(), evidenceError: 'Could not load current flood assessments. Tap Retry to reconnect.' };
+    const byMunicipality = new Map(((evidence || []) as FloodEvidence[]).map(item => [item.municipality_id, item]));
+    return { rows: await refreshCurrentWeather(rows.map(row => ({ ...row, flood_evidence: byMunicipality.get(row.municipality_id) || null }))), userId, fetchedAt: Date.now() };
 }
 async function withLocationDeadline<T>(request: Promise<T>): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -81,6 +89,9 @@ export async function resolvePriority(rows: Municipality[]): Promise<Priority> {
         // Never request permission here or use default/nearest-city coordinates as a verified locality.
         const permission = await Location.getForegroundPermissionsAsync();
         if (permission.granted && await Location.hasServicesEnabledAsync()) {
+            const address = getRecentFullAddress();
+            const resolvedId = address?.city ? matchMunicipality(rows, address.city) : null;
+            if (resolvedId) return { id: resolvedId, label: 'My Location', explanation: 'Matched from the recent GPS address shown on your dashboard.' };
             const position = await withLocationDeadline(Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }));
             const age = Date.now() - position.timestamp;
             if (age >= -60000 && age < 5 * 60000 && position.coords.accuracy != null && position.coords.accuracy >= 0 && position.coords.accuracy <= 100) {
