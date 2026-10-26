@@ -24,7 +24,7 @@ test('100% probability of light rain remains Low; probability does not determine
 });
 
 test('uses existing 5 and 20 mm cutoffs without elevating values below the boundary', () => {
-    for (const [amount, level, color] of [[0, 'Low', '#16A34A'], [4.99, 'Low', '#16A34A'], [5, 'Moderate', '#EA580C'], [19.99, 'Moderate', '#EA580C'], [20, 'High', '#DC2626']]) {
+    for (const [amount, level, color] of [[0, 'Normal', '#2563EB'], [4.99, 'Low', '#16A34A'], [5, 'Moderate', '#EA580C'], [19.99, 'Moderate', '#EA580C'], [20, 'High', '#DC2626']]) {
         const result = assessForecastRisk(forecast([amount, 0, 0]), now);
         assert.equal(result.level, level);
         assert.equal(result.color, color);
@@ -43,7 +43,7 @@ test('sums rainfall, reports peak intensity, and labels the highest hourly proba
 
 test('excludes later rainfall outside the next three hours and does not prorate it', () => {
     const result = assessForecastRisk(forecast([0, 0, 100]), now);
-    assert.equal(result.level, 'Low');
+    assert.equal(result.level, 'Normal');
     assert.equal(result.rainfallMm, 0);
     assert.equal(result.hours, 2);
     assert.equal(result.start, firstStart);
@@ -62,7 +62,7 @@ test('three complete hours are included exactly on an hour boundary', () => {
 test('missing, negative, and non-finite rain amounts never become zero or a prediction', () => {
     for (const value of [null, undefined, -1, NaN, Infinity]) {
         const result = assessForecastRisk(forecast([value, 2, 0]), now);
-        assert.equal(result.level, 'Unknown');
+        assert.equal(result.level, 'Data Unavailable');
         assert.equal(result.rainfallMm, null);
         assert.equal(result.rainProbability, 100);
     }
@@ -76,11 +76,11 @@ test('missing probability stays unavailable while valid rainfall can still be as
     }
 });
 
-test('missing, expired, and future-dated forecasts are Unknown without stale metrics', () => {
-    assert.equal(assessForecastRisk(null, now).level, 'Unknown');
+test('missing, expired, and future-dated forecasts are unavailable without stale metrics', () => {
+    assert.equal(assessForecastRisk(null, now).level, 'Data Unavailable');
     for (const fetchedAt of [now - 10 * 60_000, now + 60_001, NaN]) {
         const result = assessForecastRisk({ ...forecast(), fetchedAt }, now);
-        assert.equal(result.level, 'Unknown');
+        assert.equal(result.level, 'Data Unavailable');
         assert.equal(result.rainfallMm, null);
         assert.equal(result.rainProbability, null);
     }
@@ -93,12 +93,14 @@ test('incomplete, overlapping, or three-hour block data cannot fabricate hourly 
     const block = forecast([20]);
     block.hours[0].durationHours = 3;
     block.hours[0].end = block.hours[0].start + 3 * HOUR;
-    for (const data of [insufficient, overlap, block]) assert.equal(assessForecastRisk(data, now).level, 'Unknown');
+    for (const data of [insufficient, overlap, block]) assert.equal(assessForecastRisk(data, now).level, 'Data Unavailable');
 });
 
 test('predicted High never changes current Normal, its color, or its filter', () => {
     const municipality = Object.freeze({ municipality_id: 'lapu', province_id: 'cebu', name: 'Lapu-Lapu City',
-        center_latitude: 10.312203, center_longitude: 123.949109, weather_telemetry: [],
+        center_latitude: 10.312203, center_longitude: 123.949109,
+        weather_telemetry: [{ rainfall_mm: 0, measurement_period_seconds: 3600, fetched_at: new Date(now).toISOString() }],
+        flood_evidence: { municipality_id: 'lapu', severe_flood_roads: 0, flooded_roads: 0, precaution_roads: 0, verified_flood_reports: 0, severe_flood_reports: 0 },
         municipality_alerts: [{ id: 'normal-assessment', is_active: true, alert_level: 'Normal', issued_at: new Date(now).toISOString() }] });
     const before = riskFor(municipality, now);
     const future = Object.freeze(forecast([20, 10, 0]));

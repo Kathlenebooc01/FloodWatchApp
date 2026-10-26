@@ -10,7 +10,7 @@ const HOUR = 3_600_000;
 const MAX_AGE = 10 * 60_000;
 
 export type PredictedFloodRisk = {
-    level: 'Low' | 'Moderate' | 'High' | 'Unknown';
+    level: 'Normal' | 'Low' | 'Moderate' | 'High' | 'Data Unavailable';
     color: string;
     rainfallMm: number | null;
     peakHourlyMm: number | null;
@@ -26,7 +26,7 @@ export const forecastAmount = (value: number) => value.toFixed(2).replace(/\.?0+
 
 /** Read-only forecast calculation; does not consume or update current flood risk. */
 export function assessForecastRisk(forecast: Forecast | null, now = Date.now()): PredictedFloodRisk {
-    const unknown: PredictedFloodRisk = { level: 'Unknown', color: '#64748B', rainfallMm: null, peakHourlyMm: null,
+    const unknown: PredictedFloodRisk = { level: 'Data Unavailable', color: 'transparent', rainfallMm: null, peakHourlyMm: null,
         rainProbability: null, start: null, end: null, hours: 0, explanation: 'Hourly forecast data is unavailable. Retry when your connection is restored.' };
     if (!forecast) return unknown;
     if (!Number.isFinite(forecast.fetchedAt) || forecast.fetchedAt > now + 60000 || now - forecast.fetchedAt >= MAX_AGE) {
@@ -50,10 +50,11 @@ export function assessForecastRisk(forecast: Forecast | null, now = Date.now()):
     const peakHourlyMm = Math.max(...periods.map(period => period.precipitation!));
     if (!Number.isFinite(rainfallMm)) return { ...unknown, ...window, rainProbability, explanation: 'The forecast rainfall total is invalid. Please refresh.' };
     const level = rainfallMm >= FORECAST_RAINFALL_RULE.highMm ? 'High'
-        : rainfallMm >= FORECAST_RAINFALL_RULE.moderateMm ? 'Moderate' : 'Low';
-    const color = { Low: '#16A34A', Moderate: '#EA580C', High: '#DC2626' }[level];
+        : rainfallMm >= FORECAST_RAINFALL_RULE.moderateMm ? 'Moderate' : rainfallMm > 0 ? 'Low' : 'Normal';
+    const color = { Normal: '#2563EB', Low: '#16A34A', Moderate: '#EA580C', High: '#DC2626' }[level];
     const amountRule = level === 'High' ? 'at or above the existing 20 mm cutoff'
-        : level === 'Moderate' ? 'at or above the existing 5 mm cutoff and below 20 mm' : 'below the existing 5 mm cutoff';
+        : level === 'Moderate' ? 'at or above the existing 5 mm cutoff and below 20 mm'
+        : level === 'Low' ? 'above 0 mm and below the existing 5 mm cutoff' : 'exactly 0 mm';
     const explanation = `${forecastAmount(rainfallMm)} mm is forecast over ${periods.length} hours, with a peak hourly amount of ${forecastAmount(peakHourlyMm)} mm. The total is ${amountRule}, giving a provisional ${level.toLowerCase()} rainfall-based flood risk. Rain probability does not set this level.`;
     return { level, color, rainfallMm, peakHourlyMm, rainProbability, ...window, explanation };
 }

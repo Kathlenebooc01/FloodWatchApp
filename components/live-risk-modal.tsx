@@ -142,8 +142,8 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
     const observation = selected?.weather_telemetry[0];
     const risk = selected ? riskFor(selected) : null;
     const rows = prioritize((snapshot?.rows || []).filter(row => riskFilter === 'all' || (!error && matchesRiskFilter(row, riskFilter, Date.now()))), priority.id, search);
-    const emptyTitle = error && riskFilter !== 'all' ? 'Current risk could not be confirmed' : search.trim() ? 'No matching municipalities' : riskFilter === 'high' ? 'No confirmed High Risk assessments' : riskFilter === 'safe' ? 'No confirmed Safe assessments' : riskFilter === 'normal' ? 'No confirmed Normal assessments' : 'Locations are unavailable';
-    const emptyDescription = error && riskFilter !== 'all' ? 'Refresh to check the latest municipality alerts.' : search.trim() ? 'Try another city or municipality name or change the filter.' : riskFilter === 'high' ? 'No municipalities currently have a confirmed High Risk assessment. Continue monitoring official updates.' : riskFilter === 'safe' || riskFilter === 'normal' ? 'The backend has not published this classification for a municipality. Missing assessments are not treated as safe.' : 'Pull down to refresh or try again shortly.';
+    const emptyTitle = error && riskFilter !== 'all' ? 'Current risk could not be confirmed' : search.trim() ? 'No matching municipalities' : riskFilter === 'all' ? 'Locations are unavailable' : `No ${riskFilter} assessments`;
+    const emptyDescription = error && riskFilter !== 'all' ? 'Refresh to check the latest municipality data.' : search.trim() ? 'Try another city or municipality name or change the filter.' : riskFilter !== 'all' ? 'No municipality currently meets this rainfall and verified flood classification.' : 'Pull down to refresh or try again shortly.';
     const close = () => { setSnapshot(null); onClose(); };
     const renderCard = ({ item }: { item: Municipality }) => {
         const weather = item.weather_telemetry[0];
@@ -165,10 +165,10 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
                     <View style={styles.rainMetric}><View style={styles.metricLabelRow}><Ionicons name="water-outline" size={14} color="#4D7FAD" /><Text style={styles.metricLabel}>RAINFALL</Text></View><Text style={styles.rainValue}>{value(weather?.rainfall_mm, ' mm')}</Text>{weather?.measurement_period_seconds != null && <Text style={styles.rainPeriod}>per {Math.round(weather.measurement_period_seconds / 60)} min</Text>}</View>
                 </View>
                 <View style={styles.cardFooter}>
-                    <RiskBadge level={badge.level} color={badge.color} />
+                    {badge.category === 'unavailable' ? <Text style={styles.small}>Data Unavailable</Text> : <RiskBadge level={badge.level} color={badge.color} />}
                     <View style={styles.detailsLink}><Text style={styles.link}>View details</Text><Ionicons name="arrow-forward" size={16} color="#2563EB" /></View>
                 </View>
-                {badge.category === 'unknown' && <Text style={styles.small}>{badge.confirmedFlood ? 'Flooding reported; severity is not confirmed.' : 'No current verified flood assessment.'}</Text>}
+                {(badge.category === 'unavailable' || badge.category === 'normal') && <Text style={styles.small}>{badge.explanation}</Text>}
                 <ObservationTime observation={weather} />
             </Pressable>
         );
@@ -192,7 +192,7 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
                             {!!search && <Pressable accessibilityRole="button" accessibilityLabel="Clear search" hitSlop={10} onPress={() => setSearch('')}><Ionicons name="close-circle" size={18} color="#94A3B8" /></Pressable>}
                         </View>
                         <View style={styles.filterRow} accessibilityRole="radiogroup" accessibilityLabel="Flood risk filter">
-                            {([{ value: 'all', label: 'All' }, { value: 'safe', label: 'Safe' }, { value: 'normal', label: 'Normal' }, { value: 'high', label: 'High Risk' }] as { value: RiskFilter; label: string }[]).map(option => <Pressable key={option.value} accessibilityRole="radio" accessibilityState={{ checked: riskFilter === option.value }} onPress={() => setRiskFilter(option.value)} style={[styles.filterPill, riskFilter === option.value && styles.filterPillActive]}><Text numberOfLines={1} style={[styles.filterText, riskFilter === option.value && styles.filterTextActive]}>{option.label}</Text></Pressable>)}
+                            {([{ value: 'all', label: 'All' }, { value: 'normal', label: 'Normal' }, { value: 'low', label: 'Low' }, { value: 'moderate', label: 'Moderate' }, { value: 'high', label: 'High' }] as { value: RiskFilter; label: string }[]).map(option => <Pressable key={option.value} accessibilityRole="radio" accessibilityState={{ checked: riskFilter === option.value }} onPress={() => setRiskFilter(option.value)} style={[styles.filterPill, riskFilter === option.value && styles.filterPillActive]}><Text numberOfLines={1} style={[styles.filterText, riskFilter === option.value && styles.filterTextActive]}>{option.label}</Text></Pressable>)}
                         </View>
                     </>}
                 </View>
@@ -209,7 +209,7 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
                             {observation?.wind_speed != null && <Text style={[styles.small, { marginTop: 8 }]}>Wind: {value(observation.wind_speed, observation.wind_speed_unit ? ` ${observation.wind_speed_unit}` : ' (unit not supplied)')}</Text>}
                         </View>
                         <Section title="Flood risk assessment" icon="shield-checkmark-outline">
-                            <RiskBadge level={risk?.level || 'Data Unavailable'} color={risk?.color || '#64748B'} />
+                            {risk && risk.category !== 'unavailable' ? <RiskBadge level={risk.level} color={risk.color} /> : <Text style={styles.small}>Data Unavailable</Text>}
                             <RiskScale level={risk?.level} />
                             <Text style={styles.body}>{risk?.explanation}</Text>
                             {risk?.alert && <Text style={styles.small}>FloodWatch alert issued {timestamp(risk.alert.issued_at)} PHT.</Text>}
@@ -220,7 +220,7 @@ export default function LiveRiskModal({ visible, onClose }: { visible: boolean; 
                             {forecastState.key === forecastKey && forecastState.data && cachedForecast(selected.center_latitude!, selected.center_longitude!) ? <>
                                 {forecastState.data.hours.map(hour => <ForecastCard key={hour.end} hour={hour} />)}
                                 <Text style={styles.forecastAdvisory}>{forecastState.data.hours.some(hour => (hour.precipitation ?? 0) > 0) ? 'Rainfall is forecast during the displayed period. Stay alert and monitor official weather updates.' : forecastState.data.hours.every(hour => hour.precipitation === 0) ? 'No rainfall is forecast during the displayed period. Continue monitoring official weather updates.' : 'Rainfall amounts are unavailable. Monitor official weather updates.'}</Text>
-                                <Text style={styles.small}>{forecastState.data.source} forecast · Rainfall and rain chance apply to each displayed {forecastState.data.hours[0].durationHours}-hour period · Times shown in PHT</Text>
+                                <Text style={styles.small}>{forecastState.data.source} forecast{forecastState.data.hours.some(hour => hour.rainfallSource === 'Open-Meteo') ? ' · Rainfall: Open-Meteo' : ''} · Rainfall and rain chance apply to each displayed {forecastState.data.hours[0].durationHours}-hour period · Times shown in PHT</Text>
                             </> : forecastState.key !== forecastKey || forecastState.loading ? <View style={styles.forecastLoading}><ActivityIndicator color="#2563EB" /><Text style={styles.body}>Loading forecast…</Text></View> : null}
                             {forecastState.key === forecastKey && forecastState.loading && forecastState.data && <Text style={styles.small}>Refreshing forecast…</Text>}
                             {forecastState.key === forecastKey && !!forecastState.error && <View accessibilityRole="alert" style={styles.forecastError}><Text style={styles.body}>{forecastState.error}</Text><Pressable accessibilityRole="button" onPress={requestForecastRefresh}><Text style={styles.link}>Retry forecast</Text></Pressable></View>}
@@ -260,7 +260,7 @@ function RiskBadge({ level, color }: { level: string; color: string }) {
     return <View style={[styles.riskBadge, { backgroundColor: `${color}10` }]}><View style={[styles.riskDot, { backgroundColor: color }]} /><Text style={[styles.riskText, { color }]}>{level}</Text></View>;
 }
 function RiskScale({ level }: { level?: string }) {
-    return <View style={styles.riskScale}>{[{ label: 'Normal', color: '#16A34A', background: '#DCFCE7' }, { label: 'Safe', color: '#EA580C', background: '#FFEDD5' }, { label: 'High Risk', color: '#DC2626', background: '#FEE2E2' }].map(item => <View key={item.label} style={[styles.riskSegment, { backgroundColor: item.background }, level === item.label && { borderBottomWidth: 3, borderBottomColor: item.color }]}><Text style={{ fontSize: 11, fontWeight: '700', color: item.color }}>{item.label.toUpperCase()}</Text></View>)}</View>;
+    return <View style={styles.riskScale}>{[{ label: 'Normal', color: '#2563EB', background: '#DBEAFE' }, { label: 'Low', color: '#16A34A', background: '#DCFCE7' }, { label: 'Moderate', color: '#EA580C', background: '#FFEDD5' }, { label: 'High', color: '#DC2626', background: '#FEE2E2' }].map(item => <View key={item.label} style={[styles.riskSegment, { backgroundColor: item.background }, level === item.label && { borderBottomWidth: 3, borderBottomColor: item.color }]}><Text style={{ fontSize: 11, fontWeight: '700', color: item.color }}>{item.label.toUpperCase()}</Text></View>)}</View>;
 }
 function ObservationTime({ observation }: { observation?: Municipality['weather_telemetry'][number] }) {
     const outdated = isStale(observation);

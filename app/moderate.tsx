@@ -1,6 +1,7 @@
 import { resolveReportMunicipality } from '@/utils/report-municipality';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system/legacy';
 import { optimizeImage, uploadOptimizedImage } from '@/utils/upload-optimization';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
@@ -36,11 +37,16 @@ const SUBJECT_CHOICES = [
     { label: 'Bridge / Road Submerged',  icon: 'swap-horizontal',color: '#DC2626' },
 ];
 
+type ImageCheck = { subject: string; status: 'checking' | 'match' | 'unrelated' | 'uncertain' | 'error'; message?: string };
+
 export default function ModerateReportScreen() {
     const router = useRouter();
     const [subject, setSubject] = useState('');
     const [observations, setObservations] = useState('');
     const [images, setImages] = useState<string[]>([]);
+    const [imageChecks, setImageChecks] = useState<Record<string, ImageCheck>>({});
+    const [imageCheckRetry, setImageCheckRetry] = useState(0);
+    const [warningImageUri, setWarningImageUri] = useState<string | null>(null);
     const [showSuccess, setShowSuccess] = useState(false);
     const [showSubjectPicker, setShowSubjectPicker] = useState(false);
     const [loadingLocation, setLoadingLocation] = useState(false);
@@ -54,15 +60,68 @@ export default function ModerateReportScreen() {
     const aiSuggestedDescRef = useRef(''); // sync-readable version for submit
 
     // Valid if subject chosen + not currently submitting (description optional — AI fills it)
-    const isFormValid = subject.trim().length > 0 && !isSubmitting;
+    const imagesReady = images.every(uri => imageChecks[uri]?.subject === subject &&
+        ['match', 'uncertain', 'error'].includes(imageChecks[uri].status));
+    const imageCheckNotice = images.map(uri => imageChecks[uri]).find(check => check?.subject === subject &&
+        ['uncertain', 'error'].includes(check.status))?.message;
+    const isFormValid = subject.trim().length > 0 && !isSubmitting && imagesReady;
+
+    useEffect(() => {
+        if (!subject || images.length === 0) return;
+        let active = true;
+        const controllers = images.map(() => new AbortController());
+        setImageChecks(Object.fromEntries(images.map(uri => [uri, { subject, status: 'checking' as const }])));
+        images.forEach((uri, index) => {
+            const controller = controllers[index];
+            void (async () => {
+                let status: ImageCheck['status'] = 'error';
+                let message = '';
+                try {
+                    const { data } = await supabase.auth.getSession();
+                    const token = data.session?.access_token;
+                    if (!token) throw new Error('Sign in again, then retry the image check.');
+                    const imageBase64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+                    const timer = setTimeout(() => controller.abort(), 30000);
+                    try {
+                        const response = await fetch(`${SUPABASE_URL}/functions/v1/validate-report-image`, {
+                            method: 'POST', signal: controller.signal,
+                            headers: { 'Content-Type': 'application/json', apikey: ANON_KEY, Authorization: `Bearer ${token}` },
+                            body: JSON.stringify({ imageBase64, selectedIncidentType: subject, validationScope: 'moderate_incident_image' }),
+                        });
+                        if (!response.ok) throw new Error(response.status === 404
+                            ? 'Image check service is temporarily unavailable. Retry or submit for manual review.'
+                            : response.status === 401 || response.status === 403
+                                ? 'Your session expired. Sign in again, then retry the image check.'
+                                : 'Image check service is unavailable. Retry or submit for manual review.');
+                        const result = await response.json();
+                        if (!['match', 'unrelated', 'uncertain'].includes(result.decision)) {
+                            console.warn('Moderate image check: unsupported service response');
+                            throw new Error('Image check could not complete. Retry or submit for manual review.');
+                        }
+                        status = result.success ? result.decision : 'error';
+                        if (status === 'uncertain') message = 'AI could not confidently verify this photo. A reviewer can assess it.';
+                        if (status === 'error') message = 'AI image check is temporarily unavailable. Retry or submit for manual review.';
+                    } finally { clearTimeout(timer); }
+                } catch (error) {
+                    status = 'error';
+                    message = controller.signal.aborted ? 'Image check timed out. Retry or submit for manual review.'
+                        : error instanceof Error && error.message ? error.message : 'Could not check this photo. Retry or submit for manual review.';
+                }
+                if (!active) return;
+                setImageChecks(current => ({ ...current, [uri]: { subject, status, message } }));
+                if (status === 'unrelated') setWarningImageUri(current => current || uri);
+            })();
+        });
+        return () => { active = false; controllers.forEach(controller => controller.abort()); };
+    }, [images, subject, imageCheckRetry]);
 
     // ── Image picker ────────────────────────────────────────────────────────
-    const pickImage = async () => {
+    const pickImage = async (replaceUri?: string) => {
         const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
         if (status !== 'granted') return;
         const result = await ImagePicker.launchImageLibraryAsync({
             mediaTypes: ['images'],
-            allowsMultipleSelection: true,
+            allowsMultipleSelection: !replaceUri,
             quality: 0.85,
         });
         if (!result.canceled) {
@@ -73,7 +132,9 @@ export default function ModerateReportScreen() {
                 Alert.alert('Photo too large', error.message || 'Please choose a smaller photo.');
                 return;
             }
-            const updated = [...images, ...newUris].slice(0, 5);
+            const updated = replaceUri && images.includes(replaceUri)
+                ? images.map(uri => uri === replaceUri ? newUris[0] : uri)
+                : [...images, ...newUris].slice(0, 5);
             setImages(updated);
             // Fire AI silently — store promise so submit can await it
             if (newUris.length > 0) {
@@ -85,6 +146,7 @@ export default function ModerateReportScreen() {
     const removeImage = (index: number) => {
         const next = images.filter((_, i) => i !== index);
         setImages(next);
+        if (warningImageUri === images[index]) setWarningImageUri(null);
         if (next.length === 0) {
             setAiSuggestedDesc('');
             aiSuggestedDescRef.current = '';
@@ -325,12 +387,12 @@ export default function ModerateReportScreen() {
 
                 {/* ── VISUAL EVIDENCE ── */}
                 <Text style={styles.sectionTitle}>VISUAL EVIDENCE</Text>
-                <TouchableOpacity style={styles.uploadBox} onPress={pickImage} activeOpacity={0.7}>
+                <TouchableOpacity style={styles.uploadBox} onPress={() => void pickImage()} activeOpacity={0.7}>
                     <View style={styles.iconCircle}>
                         <Ionicons name="images-outline" size={28} color="#2563EB" />
                     </View>
                     <Text style={styles.uploadTitle}>Add Incident Images</Text>
-                    <Text style={styles.uploadSubtitle}>AI will describe what it sees</Text>
+                    <Text style={styles.uploadSubtitle}>AI will check the selected incident image</Text>
                 </TouchableOpacity>
 
                 {images.length > 0 && (
@@ -343,9 +405,17 @@ export default function ModerateReportScreen() {
                                     <TouchableOpacity style={styles.removeBadge} onPress={() => removeImage(index)}>
                                         <Ionicons name="close" size={12} color="white" />
                                     </TouchableOpacity>
+                                    {imageChecks[uri]?.subject === subject && imageChecks[uri]?.status === 'match' && <Text style={styles.imageCheckGood}>Checked</Text>}
+                                    {imageChecks[uri]?.subject === subject && imageChecks[uri]?.status === 'unrelated' && <Text style={styles.imageCheckBad}>Unrelated</Text>}
+                                    {imageChecks[uri]?.subject === subject && ['uncertain', 'error'].includes(imageChecks[uri].status) && <Text style={styles.imageCheckNote}>Review needed</Text>}
                                 </View>
                             ))}
                         </ScrollView>
+                        {!subject && <Text style={styles.imageCheckMessage}>Select an incident type to check these images.</Text>}
+                        {subject && images.some(uri => imageChecks[uri]?.subject !== subject || imageChecks[uri].status === 'checking') &&
+                            <View style={styles.imageCheckRow}><ActivityIndicator size="small" color="#2563EB" /><Text style={styles.imageCheckMessage}>Checking incident image...</Text></View>}
+                        {subject && images.some(uri => imageChecks[uri]?.subject === subject && ['uncertain', 'error'].includes(imageChecks[uri].status)) &&
+                            <View style={styles.imageCheckRow}><Text style={styles.imageCheckMessage}>{imageCheckNotice || 'Image check is uncertain or unavailable. Your report can still go to manual review.'}</Text><TouchableOpacity onPress={() => setImageCheckRetry(value => value + 1)}><Text style={styles.imageCheckRetry}>Retry</Text></TouchableOpacity></View>}
                     </View>
                 )}
 
@@ -418,6 +488,7 @@ export default function ModerateReportScreen() {
                                 ]}
                                 onPress={() => {
                                     setSubject(choice.label);
+                                    setWarningImageUri(null);
                                     setShowSubjectPicker(false);
                                 }}
                                 activeOpacity={0.7}
@@ -438,6 +509,22 @@ export default function ModerateReportScreen() {
                         ))}
                     </View>
                 </TouchableOpacity>
+            </Modal>
+
+            <Modal visible={!!warningImageUri} transparent animationType="fade" onRequestClose={() => setWarningImageUri(null)}>
+                <View style={styles.imageWarningOverlay}>
+                    <View style={styles.imageWarningCard}>
+                        <View style={styles.imageWarningIcon}><Ionicons name="warning-outline" size={30} color="#B45309" /></View>
+                        <Text style={styles.imageWarningTitle}>Image Doesn't Match the Incident</Text>
+                        <Text style={styles.imageWarningMessage}>The photo you uploaded doesn't appear to match the selected incident type: {subject}.{ '\n\n' }Please upload a clear photo showing the actual incident so responders can properly assess your report.</Text>
+                        <TouchableOpacity style={styles.imageWarningChoose} onPress={() => {
+                            const uri = warningImageUri;
+                            setWarningImageUri(null);
+                            if (uri) setTimeout(() => void pickImage(uri), 250);
+                        }}><Text style={styles.imageWarningChooseText}>Choose Another Photo</Text></TouchableOpacity>
+                        <TouchableOpacity style={styles.imageWarningCancel} onPress={() => setWarningImageUri(null)}><Text style={styles.imageWarningCancelText}>Cancel</Text></TouchableOpacity>
+                    </View>
+                </View>
             </Modal>
 
             {/* ── SUCCESS MODAL ── */}
@@ -530,6 +617,21 @@ const styles = StyleSheet.create({
         backgroundColor: '#EF4444', borderRadius: 10, padding: 3,
         borderWidth: 1.5, borderColor: 'white',
     },
+    imageCheckGood: { color: '#15803D', fontSize: 10, fontWeight: '700', marginTop: 5 },
+    imageCheckBad: { color: '#DC2626', fontSize: 10, fontWeight: '700', marginTop: 5 },
+    imageCheckNote: { color: '#B45309', fontSize: 10, fontWeight: '700', marginTop: 5 },
+    imageCheckRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 10 },
+    imageCheckMessage: { color: '#64748B', fontSize: 11, lineHeight: 17, flexShrink: 1, marginTop: 7 },
+    imageCheckRetry: { color: '#2563EB', fontSize: 12, fontWeight: '700' },
+    imageWarningOverlay: { flex: 1, backgroundColor: 'rgba(15,23,42,0.55)', justifyContent: 'center', padding: 24 },
+    imageWarningCard: { backgroundColor: '#FFFFFF', borderRadius: 24, padding: 24, alignItems: 'center' },
+    imageWarningIcon: { width: 60, height: 60, borderRadius: 18, backgroundColor: '#FEF3C7', alignItems: 'center', justifyContent: 'center', marginBottom: 14 },
+    imageWarningTitle: { color: '#1E293B', fontSize: 18, fontWeight: '800', textAlign: 'center' },
+    imageWarningMessage: { color: '#475569', fontSize: 13, lineHeight: 20, textAlign: 'center', marginTop: 12, marginBottom: 22 },
+    imageWarningChoose: { backgroundColor: '#2563EB', borderRadius: 12, padding: 14, alignItems: 'center', alignSelf: 'stretch' },
+    imageWarningChooseText: { color: '#FFFFFF', fontSize: 14, fontWeight: '700' },
+    imageWarningCancel: { padding: 14, marginTop: 5 },
+    imageWarningCancelText: { color: '#64748B', fontSize: 13, fontWeight: '700' },
 
     // Observations
     observationsHeader: {

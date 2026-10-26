@@ -5,6 +5,7 @@ export type ForecastHour = {
     durationHours: 1 | 3;
     temperature: number | null;
     precipitation: number | null;
+    rainfallSource?: 'OpenWeather' | 'Open-Meteo';
     probability: number | null;
     condition: string;
     icon: 'weather-sunny' | 'weather-partly-cloudy' | 'weather-cloudy' | 'weather-fog' | 'weather-rainy' | 'weather-pouring' | 'weather-lightning-rainy' | 'help-circle-outline';
@@ -68,6 +69,7 @@ export function parseOpenWeatherForecast(payload: OpenWeatherResponse, now = Dat
     return [{ start: end - 3 * 3_600_000, end, durationHours: 3,
         temperature: typeof entry.main?.temp === 'number' && Number.isFinite(entry.main.temp) ? entry.main.temp : null,
         precipitation: typeof entry.rain?.['3h'] === 'number' && Number.isFinite(entry.rain['3h']) ? entry.rain['3h'] : null,
+        rainfallSource: typeof entry.rain?.['3h'] === 'number' && Number.isFinite(entry.rain['3h']) ? 'OpenWeather' : undefined,
         probability: typeof entry.pop === 'number' && entry.pop >= 0 && entry.pop <= 1 ? entry.pop * 100 : null,
         condition: description ? description.charAt(0).toUpperCase() + description.slice(1) : 'Condition unavailable', icon }];
 }
@@ -104,11 +106,13 @@ export async function loadForecast(latitude: number, longitude: number, signal?:
         return forecast;
     };
     const key = process.env.EXPO_PUBLIC_OPENWEATHER_API_KEY?.trim();
+    let openWeatherHours: ForecastHour[] = [];
     if (key) {
         try {
             const url = `https://api.openweathermap.org/data/2.5/forecast?lat=${latitude}&lon=${longitude}&appid=${encodeURIComponent(key)}&units=metric&cnt=6`;
             const hours = parseOpenWeatherForecast(await requestForecast(url, signal, 7000) as OpenWeatherResponse);
-            if (hours.length) return save(hours, 'OpenWeather');
+            if (hours.length && hours[0].precipitation !== null) return save(hours, 'OpenWeather');
+            openWeatherHours = hours;
         } catch (error) {
             if (signal?.aborted) throw error;
             // Try the existing no-key provider if OpenWeather is unavailable.
@@ -119,10 +123,25 @@ export async function loadForecast(latitude: number, longitude: number, signal?:
         const payload = await requestForecast(`https://api.open-meteo.com/v1/forecast?${params}`, signal, 6000) as HourlyResponse;
         if (payload.error) throw new Error(payload.reason || 'Forecast service rejected the request.');
         const hours = parseForecast(payload);
+        if (openWeatherHours.length) {
+            const block = openWeatherHours[0];
+            const times = payload.hourly?.time;
+            const amounts = payload.hourly?.precipitation;
+            if (Array.isArray(times) && Array.isArray(amounts)) {
+                const matching = [1, 2, 3].map(index => {
+                    const position = times.indexOf((block.start + index * 3_600_000) / 1000);
+                    return position < 0 ? null : numberAt(amounts, position);
+                });
+                if (matching.every(amount => amount !== null && amount >= 0)) {
+                    return save([{ ...block, precipitation: matching.reduce<number>((sum, amount) => sum + amount!, 0), rainfallSource: 'Open-Meteo' }], 'OpenWeather');
+                }
+            }
+        }
         if (hours.length === 3) return save(hours, 'Open-Meteo');
     } catch (error) {
         if (signal?.aborted) throw error;
     }
+    if (openWeatherHours.length) return save(openWeatherHours, 'OpenWeather');
     throw new Error('Forecast providers are unavailable. Check your connection and retry.');
 }
 

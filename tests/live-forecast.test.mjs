@@ -75,6 +75,34 @@ test('uses working OpenWeather first and keeps coordinates in its request', asyn
     }
 });
 
+test('fills a missing OpenWeather 3-hour rainfall amount from the matching Open-Meteo hours', async () => {
+    const originalFetch = globalThis.fetch;
+    const originalKey = process.env.EXPO_PUBLIC_OPENWEATHER_API_KEY;
+    process.env.EXPO_PUBLIC_OPENWEATHER_API_KEY = 'test-key';
+    const start = Math.ceil(Date.now() / 3_600_000) * 3_600_000;
+    const end = start + 3 * 3_600_000;
+    const requests = [];
+    globalThis.fetch = async url => {
+        requests.push(String(url));
+        return { ok: true, json: async () => String(url).includes('openweathermap.org')
+            ? { list: [{ dt: end / 1000, main: { temp: 28 }, pop: 0, weather: [{ id: 804, description: 'overcast clouds' }] }] }
+            : { hourly: { time: [start + 3_600_000, start + 2 * 3_600_000, end].map(value => value / 1000),
+                precipitation: [0.1, 0.2, 0.3], temperature_2m: [28, 28, 28], precipitation_probability: [10, 20, 30], weather_code: [3, 3, 3] } } };
+    };
+    try {
+        const result = await loadForecast(10.312203, 123.949109, undefined, true);
+        assert.equal(result.hours.length, 1);
+        assert.equal(result.hours[0].precipitation, 0.6000000000000001);
+        assert.equal(result.hours[0].rainfallSource, 'Open-Meteo');
+        assert.equal(result.hours[0].durationHours, 3);
+        assert.equal(requests.length, 2);
+    } finally {
+        globalThis.fetch = originalFetch;
+        if (originalKey === undefined) delete process.env.EXPO_PUBLIC_OPENWEATHER_API_KEY;
+        else process.env.EXPO_PUBLIC_OPENWEATHER_API_KEY = originalKey;
+    }
+});
+
 test('requests each selected municipality coordinates separately', async () => {
     const originalFetch = globalThis.fetch;
     const requests = [];

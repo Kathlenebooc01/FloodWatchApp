@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import { matchMunicipality, matchesRiskFilter, prioritize, riskFor } from '../utils/live-risk-model.ts';
 
 const now = Date.parse('2026-10-25T06:00:00Z');
+const clearEvidence = id => ({ municipality_id: id, severe_flood_roads: 0, flooded_roads: 0, precaution_roads: 0, verified_flood_reports: 0, severe_flood_reports: 0, road_observed_at: null, latest_flood_report_at: null });
 const row = (id, name, level, active = true, issuedAt = '2026-10-25T05:00:00Z') => ({
   municipality_id: id, province_id: 'cebu', name,
   center_latitude: null, center_longitude: null, weather_telemetry: [],
   municipality_alerts: level ? [{ id: `${id}-alert`, alert_level: level, issued_at: issuedAt, is_active: active }] : [],
+  flood_evidence: clearEvidence(id),
 });
 
 test('Lapu-Lapu geocoder spelling variants resolve to the same municipality ID', () => {
@@ -19,21 +21,40 @@ test('Lapu-Lapu geocoder spelling variants resolve to the same municipality ID',
   assert.equal(matchMunicipality(municipalities, ''), null);
 });
 
-test('a working feed with no current reports remains Unknown even with zero rainfall', () => {
+test('current zero rainfall with no active verified flooding is Normal', () => {
   const place = row('lapu', 'Lapu-Lapu City', null);
-  place.weather_telemetry = [{ rainfall_mm: 0, fetched_at: new Date(now).toISOString() }];
+  place.weather_telemetry = [{ rainfall_mm: 0, measurement_period_seconds: 3600, fetched_at: new Date(now).toISOString() }];
   place.flood_evidence = { municipality_id: 'lapu', severe_flood_roads: 0, flooded_roads: 0, precaution_roads: 0, verified_flood_reports: 0, severe_flood_reports: 0, road_observed_at: null, latest_flood_report_at: null };
-  assert.equal(riskFor(place, now).level, 'Unknown');
-  assert.equal(matchesRiskFilter(place, 'normal', now), false);
-  assert.equal(matchesRiskFilter(place, 'safe', now), false);
+  assert.equal(riskFor(place, now).level, 'Normal');
+  assert.equal(matchesRiskFilter(place, 'normal', now), true);
+  assert.equal(matchesRiskFilter(place, 'low', now), false);
   assert.equal(matchesRiskFilter(place, 'all', now), true);
 });
 
-test('filters require an explicit active backend classification', () => {
+test('current hourly rainfall follows intensity thresholds without claiming confirmed flooding', () => {
+  const place = row('lapu', 'Lapu-Lapu City', null);
+  for (const [mm, expected] of [[0, 'Normal'], [1.5, 'Low'], [2.5, 'Moderate'], [7.5, 'Moderate'], [10, 'High']]) {
+    place.weather_telemetry = [{ rainfall_mm: mm, measurement_period_seconds: 3600, fetched_at: new Date(now).toISOString() }];
+    assert.equal(riskFor(place, now).level, expected);
+  }
+  assert.match(riskFor(place, now).explanation, /Flooding is not confirmed by rainfall alone/);
+  place.weather_telemetry[0].measurement_period_seconds = undefined;
+  assert.equal(riskFor(place, now).level, 'Data Unavailable');
+  place.weather_telemetry[0].measurement_period_seconds = 900;
+  assert.equal(riskFor(place, now).level, 'Data Unavailable');
+  place.weather_telemetry[0].measurement_period_seconds = 3600;
+  place.weather_telemetry[0].fetched_at = new Date(now - 91 * 60000).toISOString();
+  assert.equal(riskFor(place, now).level, 'Data Unavailable');
+});
+
+test('filters follow current rainfall and verified alerts', () => {
   const rows = [row('1', 'Alpha', 'Safe'), row('2', 'Bravo', 'Normal'), row('3', 'Charlie', 'High Risk'), row('4', 'Delta', 'Critical'), row('5', 'Echo', null), row('6', 'Foxtrot', 'High', false), row('7', 'Golf', 'High', true, '2026-10-26T00:00:00Z')];
+  rows[1].weather_telemetry = [{ rainfall_mm: 0, measurement_period_seconds: 3600, fetched_at: new Date(now).toISOString() }];
+  rows[4].weather_telemetry = [{ rainfall_mm: 0.8, measurement_period_seconds: 3600, fetched_at: new Date(now).toISOString() }];
   assert.equal(rows.filter(item => matchesRiskFilter(item, 'all', now)).length, 7);
-  assert.deepEqual(rows.filter(item => matchesRiskFilter(item, 'safe', now)).map(item => item.name), ['Alpha']);
+  assert.deepEqual(rows.filter(item => matchesRiskFilter(item, 'moderate', now)).map(item => item.name), ['Alpha']);
   assert.deepEqual(rows.filter(item => matchesRiskFilter(item, 'normal', now)).map(item => item.name), ['Bravo']);
+  assert.deepEqual(rows.filter(item => matchesRiskFilter(item, 'low', now)).map(item => item.name), ['Echo']);
   assert.deepEqual(rows.filter(item => matchesRiskFilter(item, 'high', now)).map(item => item.name), ['Charlie', 'Delta']);
 });
 
@@ -41,20 +62,23 @@ test('verified severe flooding changes only the affected municipality and expire
   const flooded = row('1', 'Lapu-Lapu City', null);
   flooded.flood_evidence = { municipality_id: '1', severe_flood_roads: 1, flooded_roads: 0, precaution_roads: 0, verified_flood_reports: 0, road_observed_at: '2026-10-25T05:30:00Z', latest_flood_report_at: null };
   const neighbor = row('2', 'Cebu City', null);
-  assert.equal(riskFor(flooded, now).level, 'High Risk');
+  assert.equal(riskFor(flooded, now).level, 'High');
   assert.equal(riskFor(flooded, now).color, '#DC2626');
   assert.equal(matchesRiskFilter(flooded, 'high', now), true);
-  assert.equal(riskFor(neighbor, now).level, 'Unknown');
+  assert.equal(riskFor(neighbor, now).level, 'Data Unavailable');
   flooded.flood_evidence.severe_flood_roads = 0;
   assert.equal(matchesRiskFilter(flooded, 'high', now), false);
 });
 
 test('normal clearance must be newer than a verified flood report', () => {
   const place = row('1', 'Mandaue City', 'Normal', true, '2026-10-25T05:45:00Z');
+  place.weather_telemetry = [{ rainfall_mm: 0, measurement_period_seconds: 3600, fetched_at: new Date(now).toISOString() }];
   place.flood_evidence = { municipality_id: '1', severe_flood_roads: 0, flooded_roads: 0, precaution_roads: 0, verified_flood_reports: 1, road_observed_at: null, latest_flood_report_at: '2026-10-25T05:30:00Z' };
   assert.equal(riskFor(place, now).level, 'Normal');
+  assert.equal(riskFor(place, now).color, '#2563EB');
+  assert.equal(riskFor(place, now).explanation, 'Hourly rainfall is 0 mm/h; no active flooding is reported.');
   place.flood_evidence.latest_flood_report_at = '2026-10-25T05:50:00Z';
-  assert.equal(riskFor(place, now).level, 'Unknown');
+  assert.equal(riskFor(place, now).level, 'Moderate');
   assert.equal(matchesRiskFilter(place, 'normal', now), false);
 });
 

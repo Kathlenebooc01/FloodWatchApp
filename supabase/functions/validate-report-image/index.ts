@@ -6,13 +6,51 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+const moderateIncidentExpectations: Record<string, string> = {
+  'Severe Flooding': 'significant floodwater or heavily flooded surroundings',
+  'Flash Flood': 'rapid flooding or visible flash-flood conditions; a still photo may show the resulting floodwater',
+  'Flooded Road': 'a road or street affected by floodwater',
+  'Flooded Residential Area': 'floodwater affecting houses or residential surroundings',
+  'Rising Water Level': 'visible elevated or rising water affecting an area; a still photo need not prove movement',
+  'Drainage Overflow': 'overflowing drainage, canals, or drainage-related flooding',
+  'Flood Debris / Blockage': 'debris or blockage associated with flooding or drainage',
+  'Bridge / Road Submerged': 'a bridge or road visibly submerged or covered by floodwater',
+};
+
+async function checkModerateIncidentImage(imagePart: unknown, incidentType: string, geminiApiKey: string, backupApiKey: string) {
+  const prompt = `Check whether this actual photo reasonably relates to the selected Cebu flood incident: ${incidentType}. Expected evidence: ${moderateIncidentExpectations[incidentType]}. Related flooding evidence can match even when a still photo cannot prove timing or water movement. Be conservative: mark unrelated only when the image is clearly unrelated (such as a selfie, food, or unrelated scenery). If unclear, obscured, or uncertain, choose uncertain. Return JSON only: {"decision":"match|unrelated|uncertain","confidence":0-100,"reason":"short explanation"}.`;
+  const body = JSON.stringify({ contents: [{ parts: [imagePart, { text: prompt }] }],
+    generationConfig: { temperature: 0.1, maxOutputTokens: 250, responseMimeType: 'application/json' } });
+  for (const [model, apiKey] of [['gemini-3.6-flash', geminiApiKey], ['gemini-2.5-flash-lite', backupApiKey]]) {
+    if (!apiKey) continue;
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(12000) });
+      if (!response.ok) {
+        console.warn(`Moderate image check ${model} returned HTTP ${response.status}`);
+        continue;
+      }
+      const payload = await response.json();
+      const text = payload.candidates?.[0]?.content?.parts?.find((part: { text?: string }) => part.text)?.text || '';
+      const parsed = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || '{}');
+      const confidence = Number(parsed.confidence);
+      const decision = parsed.decision === 'unrelated' && confidence >= 85 ? 'unrelated'
+        : parsed.decision === 'match' && confidence >= 60 ? 'match' : 'uncertain';
+      return { success: true, decision, confidence: Number.isFinite(confidence) ? confidence : 0,
+        reason: typeof parsed.reason === 'string' ? parsed.reason.slice(0, 240) : '' };
+    } catch (error) { console.warn(`Moderate image check ${model} failed:`, error instanceof Error ? error.name : 'request error'); }
+  }
+  return { success: false, decision: 'uncertain', confidence: 0, error_code: 'ai_unavailable',
+    reason: 'The AI image check is temporarily unavailable. Retry or submit for manual review.' };
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }
 
   try {
-    const { imageUrl, imageBase64, reportId } = await req.json();
+    const { imageUrl, imageBase64, reportId, selectedIncidentType, validationScope } = await req.json();
 
     // Get Gemini API key from database api_monitoring table
     const supabase = createClient(
@@ -35,7 +73,8 @@ Deno.serve(async (req) => {
       }
     }
 
-    if (!geminiApiKey) {
+    const backupGeminiApiKey = Deno.env.get('GEMINI_API_KEY_BACKUP') || Deno.env.get('EXPO_PUBLIC_GEMINI_LANTAW_BACKUP_AI') || '';
+    if (!geminiApiKey && !(validationScope === 'moderate_incident_image' && backupGeminiApiKey)) {
       throw new Error('GEMINI_API_KEY not set');
     }
     console.log('✅ Got API key');
@@ -58,6 +97,18 @@ Deno.serve(async (req) => {
       };
     } else {
       throw new Error('No image provided');
+    }
+
+    // Pre-submit check only for Moderate Report. No report record is changed here.
+    if (validationScope === 'moderate_incident_image' && !reportId) {
+      if (!Object.prototype.hasOwnProperty.call(moderateIncidentExpectations, selectedIncidentType)) {
+        return new Response(JSON.stringify({ success: false, decision: 'uncertain', reason: 'Select an incident type first.' }),
+          { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      const decision = await checkModerateIncidentImage(imagePart, selectedIncidentType,
+        geminiApiKey || backupGeminiApiKey, backupGeminiApiKey || geminiApiKey);
+      return new Response(JSON.stringify(decision),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
     // Try main model first, fallback to backup

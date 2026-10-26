@@ -11,7 +11,7 @@ let memory: RiskSnapshot | null = null;
 let pending: { userId: string; promise: Promise<RiskSnapshot> } | null = null;
 let invalidated = false;
 export function invalidateRiskSnapshot() { invalidated = true; }
-const storageKey = (id: string) => `live-risk-v2:${id}`;
+const storageKey = (id: string) => `live-risk-v3:${id}`;
 // Reads stay under the signed-in user's existing RLS policies. No provider credentials on-device.
 export async function loadRiskSnapshot({ force = false }: { force?: boolean } = {}): Promise<{ snapshot: RiskSnapshot; error?: string }> {
     if (force) invalidateRiskSnapshot();
@@ -39,7 +39,7 @@ export async function loadRiskSnapshot({ force = false }: { force?: boolean } = 
         await AsyncStorage.setItem(storageKey(userId), JSON.stringify(snapshot)).catch(() => {});
         return { snapshot, error: snapshot.evidenceError };
     } catch {
-        if (cached) return { snapshot: { ...cached, rows: cached.rows.map(row => ({ ...row, flood_evidence: null, municipality_alerts: [] })) }, error: 'Could not refresh flood evidence. Saved weather is shown; current risk is Unknown.' };
+        if (cached) return { snapshot: { ...cached, rows: cached.rows.map(row => ({ ...row, flood_evidence: null, municipality_alerts: [] })) }, error: 'Could not refresh flood evidence. Saved weather is shown; risk data is unavailable.' };
         throw new Error('Weather data could not be loaded. Check your connection and try again.');
     }
 }
@@ -52,17 +52,28 @@ async function fetchRows(userId: string): Promise<RiskSnapshot> {
         try {
             const { data, error } = await supabase.from('municipality_or_city').select(`
                 municipality_id, province_id, name, center_latitude, center_longitude,
-                weather_telemetry(telemetry_id,temperature,rainfall_mm,weather_condition,humidity,wind_speed,rainfall_category,fetched_at,expires_at),
-                municipality_alerts(id,alert_level,issued_at,is_active)
-            `).eq('municipality_alerts.is_active', true)
+                weather_telemetry(telemetry_id,temperature,rainfall_mm,weather_condition,humidity,wind_speed,rainfall_category,fetched_at,expires_at)
+            `)
                 .order('municipality_id').order('fetched_at', { referencedTable: 'weather_telemetry', ascending: false, nullsFirst: false })
                 .limit(1, { referencedTable: 'weather_telemetry' })
-                .order('issued_at', { referencedTable: 'municipality_alerts', ascending: false })
-                .limit(1, { referencedTable: 'municipality_alerts' }).range(page * 500, page * 500 + 499).abortSignal(controller.signal);
+                .range(page * 500, page * 500 + 499).abortSignal(controller.signal);
             if (error) throw error;
             rows.push(...(data || []) as Municipality[]);
             if (!data || data.length < 500) break;
         } finally { clearTimeout(timer); }
+    }
+    // Fetch assessments directly: embedded per-parent limits can hide an active
+    // assessment when another alert for the same municipality sorts first.
+    const { data: alerts, error: alertError } = await supabase.from('municipality_alerts')
+        .select('id,municipality_id,alert_level,issued_at,is_active')
+        .eq('is_active', true).order('issued_at', { ascending: false })
+        .abortSignal(AbortSignal.timeout(15000));
+    if (alertError) throw alertError;
+    const alertsByMunicipality = new Map<string, Municipality['municipality_alerts']>();
+    for (const alert of alerts || []) {
+        const existing = alertsByMunicipality.get(alert.municipality_id) || [];
+        existing.push(alert);
+        alertsByMunicipality.set(alert.municipality_id, existing);
     }
     const { data: evidence, error: evidenceError } = await supabase.from('municipality_flood_risk_evidence')
         .select('municipality_id,severe_flood_roads,flooded_roads,precaution_roads,verified_flood_reports,severe_flood_reports,road_observed_at,latest_flood_report_at')
@@ -70,7 +81,7 @@ async function fetchRows(userId: string): Promise<RiskSnapshot> {
     if (evidenceError) return { rows: await refreshCurrentWeather(rows.map(row => ({ ...row, municipality_alerts: [], flood_evidence: null }))),
         userId, fetchedAt: Date.now(), evidenceError: 'Could not load current flood assessments. Tap Retry to reconnect.' };
     const byMunicipality = new Map(((evidence || []) as FloodEvidence[]).map(item => [item.municipality_id, item]));
-    return { rows: await refreshCurrentWeather(rows.map(row => ({ ...row, flood_evidence: byMunicipality.get(row.municipality_id) || null }))), userId, fetchedAt: Date.now() };
+    return { rows: await refreshCurrentWeather(rows.map(row => ({ ...row, municipality_alerts: alertsByMunicipality.get(row.municipality_id) || [], flood_evidence: byMunicipality.get(row.municipality_id) || null }))), userId, fetchedAt: Date.now() };
 }
 async function withLocationDeadline<T>(request: Promise<T>): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;

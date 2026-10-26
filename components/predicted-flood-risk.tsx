@@ -52,7 +52,7 @@ export default function PredictedFloodRisk({ municipalityId, latitude, longitude
     const data = state.key === key ? state.data : null;
     const assessment = assessForecastRisk(data, now);
     const loading = state.key !== key || state.loading;
-    const unavailable = assessment.level === 'Unknown';
+    const unavailable = assessment.level === 'Data Unavailable';
     const error = state.key === key ? state.error : '';
     const period = assessment.start != null && assessment.end != null
         ? `${periodTime(assessment.start)} – ${periodTime(assessment.end)} PHT (${assessment.hours} complete hours)` : null;
@@ -60,10 +60,11 @@ export default function PredictedFloodRisk({ municipalityId, latitude, longitude
     return <View style={styles.card} accessibilityLabel="Next 2–3 hours predicted flood risk">
         <Text accessibilityRole="header" style={styles.title}>Predicted Flood Risk</Text>
         <View style={styles.statusRow}>
-            <View style={[styles.badge, { backgroundColor: `${assessment.color}15` }]}>
+            {!unavailable && <View style={[styles.badge, { backgroundColor: `${assessment.color}15` }]}>
                 <View style={[styles.dot, { backgroundColor: assessment.color }]} />
                 <Text style={[styles.level, { color: assessment.color }]}>{loading && !data ? 'Loading…' : assessment.level}</Text>
-            </View>
+            </View>}
+            {unavailable && <Text style={styles.unavailable}>{loading && !data ? 'Loading…' : 'Data Unavailable'}</Text>}
             {loading && <ActivityIndicator size="small" color="#2563EB" accessibilityLabel="Refreshing forecast risk" />}
         </View>
         {!!period && <Text style={styles.small}>{period}</Text>}
@@ -79,7 +80,6 @@ export default function PredictedFloodRisk({ municipalityId, latitude, longitude
                 <Text style={styles.small}>Total for the displayed period</Text>
             </View>
         </View>
-        {unavailable && !loading && <Text style={styles.unavailable}>Forecast Risk Unavailable</Text>}
         {!(loading && !data) && <Text style={styles.body}>{error && !data ? error : assessment.explanation}</Text>}
         {!unavailable && <Text style={styles.small}>{FORECAST_RISK_QUALIFICATION}</Text>}
         <Text style={styles.small}>Forecast guidance only. It does not confirm flooding or change the current flood risk assessment.</Text>
