@@ -112,6 +112,8 @@ const formatStatusUI = (status: string) => {
     if (s === 'verified') return 'Verified';
     if (s === 'resolved') return 'Resolved';
     if (s === 'rejected') return 'Rejected';
+    if (s === 'dispatched') return 'Dispatched';
+    if (s === 'done') return 'Done';
     return status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 };
 
@@ -246,6 +248,8 @@ export default function IncidentLguScreen() {
     const [selectedIncident, setSelectedIncident] = useState<IncidentData | null>(null);
     const [rejectTarget, setRejectTarget] = useState<IncidentData | null>(null);
     const [acceptingIncidentId, setAcceptingIncidentId] = useState<string | null>(null);
+    const [dispatchingIncidentId, setDispatchingIncidentId] = useState<string | null>(null);
+    const [completingIncidentId, setCompletingIncidentId] = useState<string | null>(null);
     const [successModalData, setSuccessModalData] = useState<{ title: string; message: string } | null>(null);
 
     // ── DOCUMENTATION MODAL STATE ──
@@ -676,6 +680,102 @@ export default function IncidentLguScreen() {
         setRejectTarget(incident);
     };
 
+    const handleDispatch = async (incident: IncidentData) => {
+        if (dispatchingIncidentId) return;
+        setDispatchingIncidentId(incident.fullId);
+        try {
+            if (!assignedMunicipalityId) throw new Error('No municipality assigned.');
+            const { data: updated, error } = await supabase.from('incident_report')
+                .update({ status: 'Dispatched', updated_at: new Date().toISOString() })
+                .eq('report_id', incident.fullId)
+                .eq('municipality_id', assignedMunicipalityId)
+                .select('report_id, status, user_id, report_type').maybeSingle();
+            if (error) throw error;
+            if (!updated) throw new Error('Could not update this report.');
+            setIncidents(prev => prev.map(inc => inc.fullId === incident.fullId
+                ? { ...inc, status: 'Dispatched', reportStatus: 'Dispatched' } : inc));
+            setSelectedIncident(prev => prev?.fullId === incident.fullId
+                ? { ...prev, status: 'Dispatched', reportStatus: 'Dispatched' } : prev);
+            // Notify citizen directly
+            if (updated.user_id) {
+                try {
+                    const reportLabel =
+                        updated.report_type === 'quick_snap' ? 'Quick Snap Report' :
+                        updated.report_type === 'moderate_report' ? 'Moderate Report' :
+                        updated.report_type === 'general_inquiries' ? 'General Inquiry' : 'Report';
+                    await supabase.from('notifications').insert({
+                        user_id: updated.user_id,
+                        title: 'Responders Dispatched 🚗',
+                        message: `The LGU has dispatched responders for your ${reportLabel.toLowerCase()}. Help is on the way!`,
+                        type: 'Updates',
+                        is_read: false,
+                        target_role: 'user',
+                        created_at: new Date().toISOString(),
+                    });
+                } catch (notifErr) {
+                    console.warn('Notification could not be sent:', notifErr);
+                }
+            }
+            setSuccessModalData({
+                title: 'Dispatched ✅',
+                message: `Responders have been dispatched for Incident #${incident.id}. The citizen has been notified.`,
+            });
+        } catch (err: any) {
+            Alert.alert('Update Failed', err.message || 'Could not dispatch this report.');
+            fetchIncidents();
+        } finally {
+            setDispatchingIncidentId(null);
+        }
+    };
+
+    const handleDone = async (incident: IncidentData) => {
+        if (completingIncidentId) return;
+        setCompletingIncidentId(incident.fullId);
+        try {
+            if (!assignedMunicipalityId) throw new Error('No municipality assigned.');
+            const { data: updated, error } = await supabase.from('incident_report')
+                .update({ status: 'Done', updated_at: new Date().toISOString() })
+                .eq('report_id', incident.fullId)
+                .eq('municipality_id', assignedMunicipalityId)
+                .select('report_id, status, user_id, report_type').maybeSingle();
+            if (error) throw error;
+            if (!updated) throw new Error('Could not update this report.');
+            setIncidents(prev => prev.map(inc => inc.fullId === incident.fullId
+                ? { ...inc, status: 'Done', reportStatus: 'Done' } : inc));
+            setSelectedIncident(prev => prev?.fullId === incident.fullId
+                ? { ...prev, status: 'Done', reportStatus: 'Done' } : prev);
+            // Notify citizen directly
+            if (updated.user_id) {
+                try {
+                    const reportLabel =
+                        updated.report_type === 'quick_snap' ? 'Quick Snap Report' :
+                        updated.report_type === 'moderate_report' ? 'Moderate Report' :
+                        updated.report_type === 'general_inquiries' ? 'General Inquiry' : 'Report';
+                    await supabase.from('notifications').insert({
+                        user_id: updated.user_id,
+                        title: `Your ${reportLabel} has been Completed ✅`,
+                        message: `The LGU has resolved and completed the response for your ${reportLabel.toLowerCase()}. Thank you for reporting!`,
+                        type: 'Updates',
+                        is_read: false,
+                        target_role: 'user',
+                        created_at: new Date().toISOString(),
+                    });
+                } catch (notifErr) {
+                    console.warn('Notification could not be sent:', notifErr);
+                }
+            }
+            setSuccessModalData({
+                title: 'Completed ✅',
+                message: `Incident #${incident.id} has been marked as Done. The citizen has been notified.`,
+            });
+        } catch (err: any) {
+            Alert.alert('Update Failed', err.message || 'Could not complete this report.');
+            fetchIncidents();
+        } finally {
+            setCompletingIncidentId(null);
+        }
+    };
+
     const handleConfirmAction = (fullId: string, _displayId: string, actionName: string) => {
         const incident = incidents.find(item => item.fullId === fullId);
         if (incident) handleAcceptReport(incident);
@@ -897,8 +997,8 @@ export default function IncidentLguScreen() {
                                 <View style={[s.docStatusBanner, { backgroundColor: '#F8FAFC', borderColor: '#E2E8F0' }]}>
                                     <View style={s.docBannerTopRow}>
                                         <Text style={s.docBannerLabel}>REPORT STATUS:</Text>
-                                        <View style={[s.docStatusPill, item.status === 'Rejected' ? s.docPillRejected : ['Verified', 'Accepted'].includes(item.status) ? s.docPillCompleted : s.docPillPending]}>
-                                            <Text style={[s.docStatusPillText, item.status === 'Rejected' ? s.docTextRejected : ['Verified', 'Accepted'].includes(item.status) ? s.docTextCompleted : s.docTextPending]}>{item.reportStatus}</Text>
+                                        <View style={[s.docStatusPill, item.status === 'Rejected' ? s.docPillRejected : ['Verified', 'Accepted', 'Dispatched', 'Done'].includes(item.status) ? s.docPillCompleted : s.docPillPending]}>
+                                            <Text style={[s.docStatusPillText, item.status === 'Rejected' ? s.docTextRejected : ['Verified', 'Accepted', 'Dispatched', 'Done'].includes(item.status) ? s.docTextCompleted : s.docTextPending]}>{item.reportStatus}</Text>
                                         </View>
                                     </View>
                                 </View>
@@ -1003,6 +1103,28 @@ export default function IncidentLguScreen() {
                                             </TouchableOpacity>
                                         </>
                                     )}
+                                    {item.status === 'Verified' && (
+                                        <TouchableOpacity
+                                            style={[s.actionHalfBtn, s.dispatchBtn]}
+                                            disabled={!!dispatchingIncidentId}
+                                            onPress={() => handleDispatch(item)}
+                                        >
+                                            {dispatchingIncidentId === item.fullId
+                                                ? <ActivityIndicator size="small" color="#FFFFFF" />
+                                                : <Text style={s.reviewBtnText}>Dispatched</Text>}
+                                        </TouchableOpacity>
+                                    )}
+                                    {item.status === 'Dispatched' && (
+                                        <TouchableOpacity
+                                            style={[s.actionHalfBtn, s.doneBtn]}
+                                            disabled={!!completingIncidentId}
+                                            onPress={() => handleDone(item)}
+                                        >
+                                            {completingIncidentId === item.fullId
+                                                ? <ActivityIndicator size="small" color="#FFFFFF" />
+                                                : <Text style={s.reviewBtnText}>Done</Text>}
+                                        </TouchableOpacity>
+                                    )}
                                     {(item.status === 'Verified' || item.docStatus !== 'Pending') && (
                                         <TouchableOpacity
                                             style={[s.actionHalfBtn, s.docActionBtn]}
@@ -1080,12 +1202,38 @@ export default function IncidentLguScreen() {
                                             </TouchableOpacity>
                                         </View>
                                     )}
+                                    {selectedIncident.status === 'Verified' && (
+                                        <View style={s.cardActionRow}>
+                                            <TouchableOpacity
+                                                style={[s.actionHalfBtn, s.dispatchBtn]}
+                                                disabled={!!dispatchingIncidentId}
+                                                onPress={() => handleDispatch(selectedIncident)}
+                                            >
+                                                {dispatchingIncidentId === selectedIncident.fullId
+                                                    ? <ActivityIndicator size="small" color="#FFFFFF" />
+                                                    : <Text style={s.reviewBtnText}>Dispatched</Text>}
+                                            </TouchableOpacity>
+                                        </View>
+                                    )}
+                                    {selectedIncident.status === 'Dispatched' && (
+                                        <View style={s.cardActionRow}>
+                                            <TouchableOpacity
+                                                style={[s.actionHalfBtn, s.doneBtn]}
+                                                disabled={!!completingIncidentId}
+                                                onPress={() => handleDone(selectedIncident)}
+                                            >
+                                                {completingIncidentId === selectedIncident.fullId
+                                                    ? <ActivityIndicator size="small" color="#FFFFFF" />
+                                                    : <Text style={s.reviewBtnText}>Done</Text>}
+                                            </TouchableOpacity>
+                                        </View>
+                                    )}
 
                                     <View style={s.detailDocSection}>
                                         <View style={[s.detailDocHeader, { marginBottom: 0 }]}>
                                             <Text style={s.detailDocTitle}>REPORT STATUS</Text>
-                                            <View style={[s.docStatusPill, selectedIncident.status === 'Rejected' ? s.docPillRejected : ['Verified', 'Accepted'].includes(selectedIncident.status) ? s.docPillCompleted : s.docPillPending]}>
-                                                <Text style={[s.docStatusPillText, selectedIncident.status === 'Rejected' ? s.docTextRejected : ['Verified', 'Accepted'].includes(selectedIncident.status) ? s.docTextCompleted : s.docTextPending]}>{selectedIncident.reportStatus}</Text>
+                                            <View style={[s.docStatusPill, selectedIncident.status === 'Rejected' ? s.docPillRejected : ['Verified', 'Accepted', 'Dispatched', 'Done'].includes(selectedIncident.status) ? s.docPillCompleted : s.docPillPending]}>
+                                                <Text style={[s.docStatusPillText, selectedIncident.status === 'Rejected' ? s.docTextRejected : ['Verified', 'Accepted', 'Dispatched', 'Done'].includes(selectedIncident.status) ? s.docTextCompleted : s.docTextPending]}>{selectedIncident.reportStatus}</Text>
                                             </View>
                                         </View>
                                     </View>
@@ -2275,6 +2423,8 @@ const s = StyleSheet.create({
     },
     acceptReportBtn: { backgroundColor: '#059669' },
     rejectReportBtn: { backgroundColor: '#DC2626' },
+    dispatchBtn: { backgroundColor: '#7C3AED' },
+    doneBtn: { backgroundColor: '#0369A1' },
     reviewBtnText: { color: '#FFFFFF', fontSize: 13, fontWeight: '700' },
     docActionBtn: {
         backgroundColor: '#EFF6FF',

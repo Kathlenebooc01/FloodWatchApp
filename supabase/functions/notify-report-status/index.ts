@@ -29,7 +29,7 @@ Deno.serve(async (req) => {
     }
 
     // Only notify on meaningful status changes
-    const notifiableStatuses = ['Verified', 'Resolved', 'Rejected', 'ready_for_lgu'];
+    const notifiableStatuses = ['Verified', 'Resolved', 'Rejected', 'ready_for_lgu', 'Dispatched', 'Done'];
     if (!notifiableStatuses.includes(new_status)) {
       return new Response(JSON.stringify({ skipped: true, reason: 'Status not notifiable' }), {
         status: 200,
@@ -97,6 +97,14 @@ Deno.serve(async (req) => {
     } else if (new_status === 'Rejected') {
       title   = `Your ${reportLabel} was not accepted`;
       message = `We reviewed your ${reportLabel.toLowerCase()} and could not verify it as a valid flood or hazard incident. Please submit a clearer photo if the situation is real.`;
+      type    = 'Updates';
+    } else if (new_status === 'Dispatched') {
+      title   = `Responders Dispatched 🚗`;
+      message = `The LGU has dispatched responders for your ${reportLabel.toLowerCase()}. Help is on the way!`;
+      type    = 'Updates';
+    } else if (new_status === 'Done') {
+      title   = `Your ${reportLabel} has been Completed ✅`;
+      message = `The LGU has resolved and completed the response for your ${reportLabel.toLowerCase()}. Thank you for reporting!`;
       type    = 'Updates';
     }
 

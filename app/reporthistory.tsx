@@ -71,6 +71,10 @@ function getStatusStyle(status: string) {
             return { bg: '#FEF3C7', text: '#D97706', label: 'Pending' };
         case 'rejected':
             return { bg: '#FED7AA', text: '#EA580C', label: 'Rejected' }; // Orange instead of red
+        case 'dispatched':
+            return { bg: '#EDE9FE', text: '#7C3AED', label: 'Dispatched' };
+        case 'done':
+            return { bg: '#D1FAE5', text: '#059669', label: 'Done' };
         default:
             return { bg: '#F1F5F9', text: '#64748B', label: status?.toUpperCase() || 'UNKNOWN' };
     }
@@ -84,6 +88,8 @@ function getStatusIcon(status: string) {
         case 'pending_ai':
         case 'pending':         return 'time';
         case 'rejected':        return 'close-circle';
+        case 'dispatched':      return 'car-outline';
+        case 'done':            return 'checkmark-done-circle';
         default:                return 'ellipse';
     }
 }

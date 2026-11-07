@@ -62,10 +62,10 @@ export function riskFor(row: Municipality, now = Date.now()) {
         : confirmedSevere || highAssessment ? 'high'
         : confirmedFlood ? 'moderate'
         : (evidence?.precaution_roads || ['safe', 'moderate'].includes(alertLevel || '')) ? 'moderate'
-        : hourlyRain !== null && hourlyRain > 7.5 ? 'high'
-        : hourlyRain !== null && hourlyRain >= 2.5 ? 'moderate'
-        : hourlyRain !== null && hourlyRain > 0 ? 'low'
-        : hourlyRain === 0 ? 'normal' : 'unavailable';
+        : hourlyRain !== null && hourlyRain > 30 ? 'high'
+        : hourlyRain !== null && hourlyRain >= 15 ? 'moderate'
+        : hourlyRain !== null && hourlyRain >= 7.5 ? 'low'
+        : hourlyRain !== null ? 'normal' : 'unavailable';
     const level = category === 'unavailable' ? 'Data Unavailable' : category.charAt(0).toUpperCase() + category.slice(1);
     const color = { high: '#DC2626', moderate: '#EA580C', low: '#16A34A', normal: '#2563EB', unavailable: 'transparent' }[category];
     const rainSource = observation?.source === 'Open-Meteo' ? 'Estimated hourly rainfall' : 'Hourly rainfall';
@@ -73,10 +73,10 @@ export function riskFor(row: Municipality, now = Date.now()) {
         : highAssessment ? 'Current FloodWatch alert indicates high flood risk; severe flooding is not confirmed here.'
         : confirmedFlood ? 'Verified flooding is reported; severity is unconfirmed. Take precautions and follow local guidance.'
         : category === 'high' && hourlyRain !== null ? `Heavy ${rainSource.toLowerCase()} (${hourlyRain.toFixed(1)} mm/h) raises flood risk. Flooding is not confirmed by rainfall alone.`
-        : category === 'moderate' && hourlyRain !== null && hourlyRain >= 2.5 ? `${rainSource} (${hourlyRain.toFixed(1)} mm/h) calls for precaution. Flooding is not confirmed by rainfall alone.`
+        : category === 'moderate' && hourlyRain !== null && hourlyRain >= 15 ? `${rainSource} (${hourlyRain.toFixed(1)} mm/h) calls for precaution. Flooding is not confirmed by rainfall alone.`
         : category === 'moderate' ? 'Current verified precautions or a FloodWatch precautionary assessment are in effect.'
         : category === 'low' ? `Light ${rainSource.toLowerCase()} (${hourlyRain!.toFixed(1)} mm/h); no active flooding is reported.`
-        : category === 'normal' ? `${rainSource} is 0 mm/h; no active flooding is reported.`
+        : category === 'normal' ? (hourlyRain !== null && hourlyRain > 0 ? `${rainSource} (${hourlyRain.toFixed(1)} mm/h); no active flooding is reported.` : `${rainSource} is 0 mm/h; no active flooding is reported.`)
         : 'Current rainfall or flood evidence is unavailable. Retry to check this municipality.';
     return { level, color, category, elevated: category === 'high', alert, confirmedFlood, explanation };
 }

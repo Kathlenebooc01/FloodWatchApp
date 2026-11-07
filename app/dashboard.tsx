@@ -71,7 +71,12 @@ export default function Dashboard() {
             const priority = await resolvePriority(snapshot.rows);
             const municipality = snapshot.rows.find(row => row.municipality_id === priority.id);
             const observation = (await locationWeather) || municipality?.weather_telemetry[0];
-            if (!riskOnly) setWeather({ temperature: observation?.temperature ?? null, condition: observation?.weather_condition || 'Weather unavailable', precipitation: observation?.rainfall_mm ?? null });
+            const accurateRainfall = typeof municipality?.risk_observation?.rainfall_mm === 'number'
+                ? Number(municipality.risk_observation.rainfall_mm.toFixed(1))
+                : typeof observation?.rainfall_mm === 'number'
+                ? Number(observation.rainfall_mm.toFixed(1))
+                : null;
+            if (!riskOnly) setWeather({ temperature: observation?.temperature ?? null, condition: observation?.weather_condition || 'Weather unavailable', precipitation: accurateRainfall });
             const risk = municipality ? riskFor(municipality) : null;
             setRiskStatus({ risk_level: risk?.level || 'Data Unavailable', color: risk?.color || 'transparent', alert_level: risk?.elevated ? 1 : 0,
                 location: municipality?.name || 'Municipality unavailable',

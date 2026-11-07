@@ -33,7 +33,7 @@ test('current zero rainfall with no active verified flooding is Normal', () => {
 
 test('current hourly rainfall follows intensity thresholds without claiming confirmed flooding', () => {
   const place = row('lapu', 'Lapu-Lapu City', null);
-  for (const [mm, expected] of [[0, 'Normal'], [1.5, 'Low'], [2.5, 'Moderate'], [7.5, 'Moderate'], [10, 'High']]) {
+  for (const [mm, expected] of [[0, 'Normal'], [5, 'Normal'], [7.5, 'Low'], [10, 'Low'], [15, 'Moderate'], [30, 'Moderate'], [35, 'High']]) {
     place.weather_telemetry = [{ rainfall_mm: mm, measurement_period_seconds: 3600, fetched_at: new Date(now).toISOString() }];
     assert.equal(riskFor(place, now).level, expected);
   }
@@ -50,7 +50,7 @@ test('current hourly rainfall follows intensity thresholds without claiming conf
 test('filters follow current rainfall and verified alerts', () => {
   const rows = [row('1', 'Alpha', 'Safe'), row('2', 'Bravo', 'Normal'), row('3', 'Charlie', 'High Risk'), row('4', 'Delta', 'Critical'), row('5', 'Echo', null), row('6', 'Foxtrot', 'High', false), row('7', 'Golf', 'High', true, '2026-10-26T00:00:00Z')];
   rows[1].weather_telemetry = [{ rainfall_mm: 0, measurement_period_seconds: 3600, fetched_at: new Date(now).toISOString() }];
-  rows[4].weather_telemetry = [{ rainfall_mm: 0.8, measurement_period_seconds: 3600, fetched_at: new Date(now).toISOString() }];
+  rows[4].weather_telemetry = [{ rainfall_mm: 8, measurement_period_seconds: 3600, fetched_at: new Date(now).toISOString() }];
   assert.equal(rows.filter(item => matchesRiskFilter(item, 'all', now)).length, 7);
   assert.deepEqual(rows.filter(item => matchesRiskFilter(item, 'moderate', now)).map(item => item.name), ['Alpha']);
   assert.deepEqual(rows.filter(item => matchesRiskFilter(item, 'normal', now)).map(item => item.name), ['Bravo']);
