@@ -277,8 +277,7 @@ function forecastDate(time: number) {
 }
 function ForecastCard({ hour }: { hour: Forecast['hours'][number] }) {
     const rain = hour.precipitation;
-    const hourlyRain = rain == null ? null : rain / hour.durationHours;
-    const accent = hourlyRain == null ? '#64748B' : hourlyRain >= 7.5 ? '#B45309' : hourlyRain >= 2.5 ? '#2563EB' : hourlyRain > 0 ? '#0284C7' : '#10B981';
+    const accent = rain == null ? '#64748B' : rain >= 31 ? '#DC2626' : rain >= 30 ? '#EA580C' : rain >= 15 ? '#16A34A' : '#2563EB';
     return <View style={[styles.forecastCard, { borderLeftColor: accent }]}>
         <View style={styles.forecastTop}><View style={styles.flex}><Text style={styles.forecastTime}>{forecastDate(hour.start)} · {forecastTime(hour.start)} – {forecastTime(hour.end)} PHT</Text><Text style={styles.forecastCondition}>{hour.condition}</Text></View><View style={styles.forecastWeatherIcon}><MaterialCommunityIcons name={hour.icon} size={28} color={accent} /></View></View>
         <View style={styles.forecastMetrics}>

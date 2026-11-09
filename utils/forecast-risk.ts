@@ -1,11 +1,9 @@
 import type { Forecast } from './live-forecast';
 
-// Existing public.municipality_flood_risk amount cutoffs, inspected 2026-10-26.
-// That view has no documented measurement period or validation metadata.
-// Applying these cutoffs to the forecast window is PROVISIONAL, not a validated
-// municipal flood model. Keep this qualification visible next to the result.
-export const FORECAST_RAINFALL_RULE = { moderateMm: 5, highMm: 20 } as const;
-export const FORECAST_RISK_QUALIFICATION = 'Provisional rainfall estimate: the existing 5 / 20 mm rules need local validation for this forecast period.';
+// Rainfall advisory cutoffs applied to the Municipality Details forecast total.
+// The forecast window is provisional, not a validated municipal flood model.
+export const FORECAST_RAINFALL_RULE = { lowMm: 15, moderateMm: 30, highMm: 31 } as const;
+export const FORECAST_RISK_QUALIFICATION = 'Provisional rainfall estimate for the displayed forecast period.';
 const HOUR = 3_600_000;
 const MAX_AGE = 10 * 60_000;
 
@@ -50,11 +48,12 @@ export function assessForecastRisk(forecast: Forecast | null, now = Date.now()):
     const peakHourlyMm = Math.max(...periods.map(period => period.precipitation!));
     if (!Number.isFinite(rainfallMm)) return { ...unknown, ...window, rainProbability, explanation: 'The forecast rainfall total is invalid. Please refresh.' };
     const level = rainfallMm >= FORECAST_RAINFALL_RULE.highMm ? 'High'
-        : rainfallMm >= FORECAST_RAINFALL_RULE.moderateMm ? 'Moderate' : rainfallMm > 0 ? 'Low' : 'Normal';
+        : rainfallMm >= FORECAST_RAINFALL_RULE.moderateMm ? 'Moderate'
+        : rainfallMm >= FORECAST_RAINFALL_RULE.lowMm ? 'Low' : 'Normal';
     const color = { Normal: '#2563EB', Low: '#16A34A', Moderate: '#EA580C', High: '#DC2626' }[level];
-    const amountRule = level === 'High' ? 'at or above the existing 20 mm cutoff'
-        : level === 'Moderate' ? 'at or above the existing 5 mm cutoff and below 20 mm'
-        : level === 'Low' ? 'above 0 mm and below the existing 5 mm cutoff' : 'exactly 0 mm';
+    const amountRule = level === 'High' ? 'at or above 31 mm'
+        : level === 'Moderate' ? 'at or above 30 mm and below 31 mm'
+        : level === 'Low' ? 'at or above 15 mm and below 30 mm' : 'below 15 mm';
     const explanation = `${forecastAmount(rainfallMm)} mm is forecast over ${periods.length} hours, with a peak hourly amount of ${forecastAmount(peakHourlyMm)} mm. The total is ${amountRule}, giving a provisional ${level.toLowerCase()} rainfall-based flood risk. Rain probability does not set this level.`;
     return { level, color, rainfallMm, peakHourlyMm, rainProbability, ...window, explanation };
 }

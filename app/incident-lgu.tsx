@@ -467,7 +467,7 @@ export default function IncidentLguScreen() {
 
     // ── OPEN DOCUMENTATION FORM MODAL ──
     const openDocumentationModal = async (incident: IncidentData) => {
-        if (incident.status !== 'Verified' && incident.docStatus === 'Pending') return;
+        if (incident.status !== 'Done') return;
         setDocTargetIncident(incident);
         setAttemptedDocSubmit(false);
 
@@ -519,7 +519,7 @@ export default function IncidentLguScreen() {
     // ── SAVE DOCUMENTATION (Draft or Final Submit) ──
     const handleSaveDocumentation = async (mode: 'draft' | 'submit') => {
         if (!docTargetIncident) return;
-        if (docTargetIncident.status !== 'Verified' && docTargetIncident.docStatus === 'Pending') return;
+        if (docTargetIncident.status !== 'Done') return;
 
         // Validation for final submission (only fields 4 and 5 are required from the user, 1-3 are auto-filled)
         if (mode === 'submit') {
@@ -573,7 +573,7 @@ export default function IncidentLguScreen() {
                         })
                         .eq('report_id', docTargetIncident.fullId)
                         .eq('municipality_id', assignedMunicipalityId)
-                        .eq('status', 'Verified')
+                        .eq('status', 'Done')
                         .select('report_id').maybeSingle();
                     if (error) throw error;
                     if (!updated) throw new Error('This report is no longer available to your municipality.');
@@ -620,6 +620,7 @@ export default function IncidentLguScreen() {
             setDocModalVisible(false);
 
             if (mode === 'submit') {
+                setActiveFilter('docs_completed');
                 setSuccessModalData({
                     title: "Documentation Completed ✅",
                     message: `Required documentation for Incident #${docTargetIncident.id} has been submitted.`,
@@ -662,7 +663,7 @@ export default function IncidentLguScreen() {
                 setSuccessModalData({
                     title: decision === 'Verified' ? 'Report Accepted' : 'Report Rejected',
                     message: decision === 'Verified'
-                        ? `Incident #${incident.id} is now Verified. Documentation can be created.`
+                        ? `Incident #${incident.id} is now Verified. Documentation becomes available after Done.`
                         : `Incident #${incident.id} is now Rejected.`,
                 });
         } catch (err: any) {
@@ -1125,10 +1126,11 @@ export default function IncidentLguScreen() {
                                                 : <Text style={s.reviewBtnText}>Done</Text>}
                                         </TouchableOpacity>
                                     )}
-                                    {(item.status === 'Verified' || item.docStatus !== 'Pending') && (
+                                    {item.status !== 'Rejected' && (
                                         <TouchableOpacity
-                                            style={[s.actionHalfBtn, s.docActionBtn]}
+                                            style={[s.actionHalfBtn, s.docActionBtn, item.status !== 'Done' && { opacity: 0.45 }]}
                                             activeOpacity={0.8}
+                                            disabled={item.status !== 'Done'}
                                             onPress={() => openDocumentationModal(item)}
                                         >
                                             <Ionicons name="document-text-outline" size={17} color="#2563EB" style={{ marginRight: 6 }} />
@@ -1290,9 +1292,10 @@ export default function IncidentLguScreen() {
                                             </View>
                                         )}
 
-                                        {(selectedIncident.status === 'Verified' || selectedIncident.docStatus !== 'Pending') && (
+                                        {selectedIncident.status !== 'Rejected' && (
                                             <TouchableOpacity
-                                                style={s.docManageBtn}
+                                                style={[s.docManageBtn, selectedIncident.status !== 'Done' && { opacity: 0.45 }]}
+                                                disabled={selectedIncident.status !== 'Done'}
                                                 onPress={() => {
                                                     setSelectedIncident(null);
                                                     openDocumentationModal(selectedIncident);

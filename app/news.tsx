@@ -42,6 +42,8 @@ export default function NewsScreen() {
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [selectedNews, setSelectedNews] = useState<NewsItem | null>(null);
   const [modalVisible, setModalVisible] = useState(false);
+  const [linkErrorVisible, setLinkErrorVisible] = useState(false);
+  const [failedLink, setFailedLink] = useState("");
   const [filterModalVisible, setFilterModalVisible] = useState(false);
   const [newsData, setNewsData] = useState<NewsItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -121,6 +123,16 @@ export default function NewsScreen() {
   const handleNewsPress = (item: NewsItem) => {
     setSelectedNews(item);
     setModalVisible(true);
+  };
+
+  const openReferenceLink = async (link: string) => {
+    const url = link.trim();
+    try {
+      await Linking.openURL(url);
+    } catch {
+      setFailedLink(url);
+      setLinkErrorVisible(true);
+    }
   };
 
   const getCategoryStyle = (category: string) => {
@@ -303,9 +315,11 @@ export default function NewsScreen() {
               {selectedNews?.external_reference_link && (
                 <View style={styles.affectedSection}>
                   <Text style={styles.affectedLabel}>REFERENCE LINK</Text>
-                  <Text style={styles.affectedValue} numberOfLines={2}>
-                    {selectedNews.external_reference_link}
-                  </Text>
+                  <TouchableOpacity onPress={() => selectedNews?.external_reference_link && openReferenceLink(selectedNews.external_reference_link)} accessibilityRole="link" accessibilityLabel="Open reference link">
+                    <Text style={styles.referenceLink} numberOfLines={2}>
+                      {selectedNews.external_reference_link}
+                    </Text>
+                  </TouchableOpacity>
                 </View>
               )}
 
@@ -317,6 +331,27 @@ export default function NewsScreen() {
                 <Text style={styles.acknowledgeText}>Close</Text>
               </TouchableOpacity>
             </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={linkErrorVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setLinkErrorVisible(false)}
+      >
+        <View style={styles.linkErrorOverlay}>
+          <View style={styles.linkErrorCard}>
+            <View style={styles.linkErrorIcon}>
+              <Ionicons name="link-outline" size={28} color="#2563EB" />
+            </View>
+            <Text style={styles.linkErrorTitle}>Unable to open link</Text>
+            <Text style={styles.linkErrorMessage}>The attached reference link could not be opened. Please check that the link is correct and try again.</Text>
+            <Text style={styles.linkErrorUrl} numberOfLines={3}>{failedLink}</Text>
+            <TouchableOpacity style={styles.linkErrorButton} onPress={() => setLinkErrorVisible(false)}>
+              <Text style={styles.linkErrorButtonText}>Got it</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -604,6 +639,15 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   affectedValue: { fontSize: 14, color: "#475569" },
+  referenceLink: { fontSize: 14, color: "#2563EB", textDecorationLine: "underline" },
+  linkErrorOverlay: { flex: 1, backgroundColor: "rgba(15,23,42,0.5)", justifyContent: "center", paddingHorizontal: 24 },
+  linkErrorCard: { backgroundColor: "#FFFFFF", borderRadius: 24, padding: 24, alignItems: "center" },
+  linkErrorIcon: { width: 56, height: 56, borderRadius: 28, backgroundColor: "#EFF6FF", alignItems: "center", justifyContent: "center", marginBottom: 16 },
+  linkErrorTitle: { fontSize: 20, fontWeight: "800", color: "#1E293B", marginBottom: 8 },
+  linkErrorMessage: { fontSize: 14, lineHeight: 21, color: "#64748B", textAlign: "center", marginBottom: 12 },
+  linkErrorUrl: { fontSize: 12, lineHeight: 18, color: "#475569", textAlign: "center", marginBottom: 24 },
+  linkErrorButton: { backgroundColor: "#2563EB", borderRadius: 14, paddingVertical: 14, alignSelf: "stretch", alignItems: "center" },
+  linkErrorButtonText: { color: "#FFFFFF", fontSize: 15, fontWeight: "700" },
   acknowledgeButton: {
     backgroundColor: "#2563EB",
     paddingVertical: 16,
