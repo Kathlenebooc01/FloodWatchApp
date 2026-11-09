@@ -141,9 +141,7 @@ export default function LguLoginScreen() {
                 >
                     {/* ── HEADER ── */}
                     <View style={s.header}>
-                        <View style={s.iconCircle}>
-                            <Ionicons name="shield-checkmark" size={36} color="#2563EB" />
-                        </View>
+                        <Image source={require('@/assets/images/logo.png')} style={s.headerLogo} resizeMode="contain" />
 
                         <View style={s.badge}>
                             <Text style={s.badgeText}>AUTHORIZED ACCESS ONLY</Text>
@@ -406,14 +404,7 @@ const s = StyleSheet.create({
     // Header
     header: { alignItems: 'center', marginBottom: 24 },
 
-    iconCircle: {
-        width: 70, height: 70,
-        borderRadius: 35,
-        backgroundColor: '#DBEAFE',
-        justifyContent: 'center',
-        alignItems: 'center',
-        marginBottom: 14,
-    },
+    headerLogo: { width: 120, height: 120, marginBottom: 14 },
 
     badge: {
         borderWidth: 1, borderColor: '#93C5FD',

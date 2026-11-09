@@ -2713,7 +2713,7 @@ export default function LogisticsLguScreen() {
                                     <Text style={{ marginTop: 12, color: '#64748B' }}>Loading resources...</Text>
                                 </View>
                             ) : (
-                                utilities.map((item) => {
+                                utilities.filter((item) => item.quantity > 0).map((item) => {
                                     const isSelected = selectedItemIds.includes(item.id);
                                     return (
                                         <TouchableOpacity 
