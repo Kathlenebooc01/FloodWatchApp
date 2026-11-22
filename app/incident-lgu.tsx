@@ -178,7 +178,59 @@ export interface IncidentAttachment {
     fileType: 'image' | 'pdf' | 'word' | 'excel' | 'document';
     uploadedAt: string;
     base64?: string;
+    storagePath?: string;
 }
+
+const DOC_BUCKET = 'incident-documentation';
+
+const documentationFromRow = (row: any): IncidentDocumentation => ({
+    incidentId: row.incident_id,
+    status: row.status,
+    situation: row.situation,
+    location: row.location,
+    incidentDateTime: row.incident_date_time,
+    actionsTaken: row.actions_taken,
+    responseOutcome: row.response_outcome,
+    supportingInfo: row.supporting_info,
+    attachments: row.attachments || [],
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    completedBy: row.completed_by,
+});
+
+const withAttachmentUrls = async (doc: IncidentDocumentation): Promise<IncidentDocumentation> => ({
+    ...doc,
+    attachments: await Promise.all((doc.attachments || []).map(async attachment => {
+        if (!attachment.storagePath) return attachment;
+        const { data, error } = await supabase.storage.from(DOC_BUCKET).createSignedUrl(attachment.storagePath, 3600);
+        if (error) return attachment;
+        return { ...attachment, uri: data.signedUrl };
+    })),
+});
+
+const decodeBase64 = (value: string): ArrayBuffer => {
+    const binary = atob(value.replace(/^data:[^,]+,/, ''));
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+    return bytes.buffer;
+};
+
+const uploadDocAttachments = async (incidentId: string, attachments: IncidentAttachment[]): Promise<IncidentAttachment[]> =>
+    Promise.all(attachments.map(async attachment => {
+        if (attachment.storagePath) return attachment;
+        const base64 = attachment.base64 || await FileSystem.readAsStringAsync(attachment.uri, { encoding: 'base64' });
+        const safeName = attachment.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const storagePath = `${incidentId}/${attachment.id}_${safeName}`;
+        const { error } = await supabase.storage.from(DOC_BUCKET).upload(storagePath, decodeBase64(base64), {
+            contentType: attachment.mimeType || 'application/octet-stream', upsert: false,
+        });
+        if (error) throw error;
+        const { data } = await supabase.storage.from(DOC_BUCKET).createSignedUrl(storagePath, 3600);
+        return { ...attachment, storagePath, uri: data?.signedUrl || attachment.uri, base64: undefined };
+    }));
+
+const attachmentMetadata = (attachments: IncidentAttachment[]) =>
+    attachments.map(({ base64, uri, ...metadata }) => metadata);
 
 const INC_ALLOWED_EXTENSIONS = ['pdf', 'docx', 'xlsx', 'xls', 'doc', 'jpg', 'jpeg', 'png'];
 
@@ -336,6 +388,14 @@ export default function IncidentLguScreen() {
                 submitters?.forEach(submitter => citizenIds.add(submitter.id));
             }
 
+            const reportIds = (data || []).filter(row => citizenIds.has(row.user_id)).map(row => row.report_id);
+            const { data: savedDocs, error: docsError } = reportIds.length
+                ? await supabase.from('incident_documentation').select('*').in('incident_id', reportIds)
+                : { data: [], error: null };
+            if (docsError) throw docsError;
+            const docsById = new Map(await Promise.all((savedDocs || []).map(async row =>
+                [row.incident_id, await withAttachmentUrls(documentationFromRow(row))] as const)));
+
             const mapped: IncidentData[] = await Promise.all(
                 (data || []).filter(row => citizenIds.has(row.user_id)).map(async (row) => {
                     const rt = row.report_type;
@@ -358,38 +418,10 @@ export default function IncidentLguScreen() {
 
                     const locStr = reportLocation(row.description || '');
 
-                    // Load persisted documentation for this incident from description and AsyncStorage
-                    let docStatus: DocStatus = 'Pending';
-                    let docCreatedAt: string | undefined = undefined;
-                    let docUpdatedAt: string | undefined = undefined;
-                    let documentation: IncidentDocumentation | undefined = undefined;
-
-                    // 1. Check if description has embedded documentation status
-                    if (row.description) {
-                        if (row.description.includes('[DOCUMENTATION STATUS: COMPLETED]')) {
-                            docStatus = 'Completed';
-                        } else if (row.description.includes('[DOCUMENTATION STATUS: IN PROGRESS]')) {
-                            docStatus = 'In Progress';
-                        }
-                    }
-
-                    // 2. Check AsyncStorage using both row.report_id and 8-char short ID
-                    try {
-                        let savedDoc = await AsyncStorage.getItem(`${DOC_STORAGE_PREFIX}${row.report_id}`);
-                        if (!savedDoc) {
-                            const shortId = row.report_id.substring(0, 8).toUpperCase();
-                            savedDoc = await AsyncStorage.getItem(`${DOC_STORAGE_PREFIX}${shortId}`);
-                        }
-                        if (savedDoc) {
-                            const parsed: IncidentDocumentation = JSON.parse(savedDoc);
-                            docStatus = parsed.status || docStatus;
-                            docCreatedAt = parsed.createdAt;
-                            docUpdatedAt = parsed.updatedAt;
-                            documentation = parsed;
-                        }
-                    } catch (e) {
-                        console.warn('Error reading documentation storage:', e);
-                    }
+                    const documentation = docsById.get(row.report_id);
+                    const docStatus: DocStatus = documentation?.status || 'Pending';
+                    const docCreatedAt = documentation?.createdAt;
+                    const docUpdatedAt = documentation?.updatedAt;
 
                     return {
                         id: row.report_id.substring(0, 8).toUpperCase(),
@@ -471,23 +503,44 @@ export default function IncidentLguScreen() {
         setDocTargetIncident(incident);
         setAttemptedDocSubmit(false);
 
-        // Always check persisted documentation in AsyncStorage first to ensure saved draft is restored!
         let activeDoc: IncidentDocumentation | undefined = incident.documentation;
         try {
-            let saved = await AsyncStorage.getItem(`${DOC_STORAGE_PREFIX}${incident.fullId}`);
-            if (!saved) {
-                saved = await AsyncStorage.getItem(`${DOC_STORAGE_PREFIX}${incident.id}`);
-            }
+            const { data: saved, error } = await supabase.from('incident_documentation').select('*')
+                .eq('incident_id', incident.fullId).maybeSingle();
+            if (error) throw error;
             if (saved) {
-                activeDoc = JSON.parse(saved);
+                activeDoc = await withAttachmentUrls(documentationFromRow(saved));
                 setDocTargetIncident(prev => prev ? {
                     ...prev,
                     docStatus: activeDoc?.status || prev.docStatus,
                     documentation: activeDoc,
                 } : null);
+            } else if (assignedMunicipalityId && currentUserId) {
+                const legacy = await AsyncStorage.getItem(`${DOC_STORAGE_PREFIX}${incident.fullId}`)
+                    || await AsyncStorage.getItem(`${DOC_STORAGE_PREFIX}${incident.id}`);
+                if (legacy) {
+                    const previous: IncidentDocumentation = JSON.parse(legacy);
+                    const attachments = await uploadDocAttachments(incident.fullId, previous.attachments || []);
+                    const { data: imported, error: importError } = await supabase.from('incident_documentation').upsert({
+                        incident_id: incident.fullId,
+                        municipality_id: assignedMunicipalityId,
+                        status: previous.status === 'Completed' ? 'Completed' : 'In Progress',
+                        situation: previous.situation || '',
+                        location: previous.location || '',
+                        incident_date_time: previous.incidentDateTime || '',
+                        actions_taken: previous.actionsTaken || '',
+                        response_outcome: previous.responseOutcome || '',
+                        supporting_info: previous.supportingInfo || '',
+                        attachments: attachmentMetadata(attachments),
+                        created_by: currentUserId,
+                    }, { onConflict: 'incident_id' }).select('*').single();
+                    if (importError) throw importError;
+                    activeDoc = { ...documentationFromRow(imported), attachments };
+                    setDocTargetIncident(prev => prev ? { ...prev, docStatus: activeDoc?.status || prev.docStatus, documentation: activeDoc } : null);
+                }
             }
         } catch (e) {
-            console.warn('Error fetching persisted draft:', e);
+            console.warn('Error fetching incident documentation:', e);
         }
 
         // Fields 1, 2, 3: prefilled from incident report (system record)
@@ -562,28 +615,24 @@ export default function IncidentLguScreen() {
                 completedBy: 'Assigned LGU Responder',
             };
 
-            // Persist to Supabase before saving a local draft or showing success.
-            {
-                try {
-                    const appendNotes = `\n\n[DOCUMENTATION STATUS: ${newStatus.toUpperCase()}]\nActions: ${docActionsTaken.trim()}\nOutcome: ${docResponseOutcome.trim()}`;
-                    if (!assignedMunicipalityId) throw new Error('No municipality assigned.');
-                    const { data: updated, error } = await supabase.from('incident_report')
-                        .update({
-                            description: `${docTargetIncident.desc}${appendNotes}`,
-                        })
-                        .eq('report_id', docTargetIncident.fullId)
-                        .eq('municipality_id', assignedMunicipalityId)
-                        .eq('status', 'Done')
-                        .select('report_id').maybeSingle();
-                    if (error) throw error;
-                    if (!updated) throw new Error('This report is no longer available to your municipality.');
-                } catch (dbErr) {
-                    throw dbErr;
-                }
-            }
-
-            await AsyncStorage.setItem(`${DOC_STORAGE_PREFIX}${docTargetIncident.fullId}`, JSON.stringify(docData));
-            await AsyncStorage.setItem(`${DOC_STORAGE_PREFIX}${docTargetIncident.id}`, JSON.stringify(docData));
+            if (!assignedMunicipalityId || !currentUserId) throw new Error('No assigned LGU account.');
+            const attachments = await uploadDocAttachments(docTargetIncident.fullId, docAttachments);
+            const attachmentRecords = attachmentMetadata(attachments);
+            const { data: savedDoc, error: saveError } = await supabase.from('incident_documentation').upsert({
+                incident_id: docTargetIncident.fullId,
+                municipality_id: assignedMunicipalityId,
+                status: newStatus,
+                situation: docData.situation,
+                location: docData.location,
+                incident_date_time: docData.incidentDateTime,
+                actions_taken: docData.actionsTaken,
+                response_outcome: docData.responseOutcome,
+                supporting_info: docData.supportingInfo,
+                attachments: attachmentRecords,
+                created_by: currentUserId,
+            }, { onConflict: 'incident_id' }).select('*').single();
+            if (saveError) throw saveError;
+            const persistedDoc = { ...documentationFromRow(savedDoc), attachments };
 
             // 3. Update target incident and state immediately
             setDocTargetIncident(prev => prev ? {
@@ -591,7 +640,7 @@ export default function IncidentLguScreen() {
                 docStatus: newStatus,
                 docCreatedAt: existingCreated,
                 docUpdatedAt: now,
-                documentation: docData,
+                documentation: persistedDoc,
             } : null);
 
             setIncidents(prev => prev.map(inc => {
@@ -601,7 +650,7 @@ export default function IncidentLguScreen() {
                         docStatus: newStatus,
                         docCreatedAt: existingCreated,
                         docUpdatedAt: now,
-                        documentation: docData,
+                        documentation: persistedDoc,
                     };
                 }
                 return inc;
@@ -613,7 +662,7 @@ export default function IncidentLguScreen() {
                     docStatus: newStatus,
                     docCreatedAt: existingCreated,
                     docUpdatedAt: now,
-                    documentation: docData,
+                    documentation: persistedDoc,
                 } : null);
             }
 

@@ -64,23 +64,6 @@ export default function ReportScreen() {
                     </View>
                 </TouchableOpacity>
 
-                {/* Moderate Report Card */}
-                <TouchableOpacity
-                    style={styles.reportCard}
-                    onPress={() => router.push('/moderate' as any)}
-                    activeOpacity={0.7}
-                >
-                    <View style={[styles.iconContainer, { backgroundColor: '#EFF6FF' }]}>
-                        <Ionicons name="warning-outline" size={26} color="#2563EB" />
-                    </View>
-                    <View style={styles.cardTextContent}>
-                        <Text style={styles.cardTitle}>Moderate Report</Text>
-                        <Text style={styles.cardDescription}>
-                            Provide specific details and upload media for verified incidents that require assessment.
-                        </Text>
-                    </View>
-                </TouchableOpacity>
-
                 {/* General Inquiry Card - Updated to navigate to inquiry.tsx */}
                 <TouchableOpacity
                     style={styles.reportCard}

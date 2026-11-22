@@ -4,7 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
-import { Animated, Dimensions, StatusBar, View, TouchableOpacity, Text, ScrollView, Modal, ActivityIndicator, StyleSheet } from 'react-native';
+import { Alert, Animated, Dimensions, StatusBar, View, TouchableOpacity, Text, ScrollView, Modal, ActivityIndicator, StyleSheet } from 'react-native';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -26,6 +26,7 @@ interface Notification {
 
 const TABS: Category[] = ['All', 'Emergency', 'Updates'];
 const STORAGE_KEY = 'floodwatch_read_notif_ids';
+type ForwardableReport = { report_id: string; hazard_type: string | null; report_type: string; created_at: string };
 
 // Convert timestamp to "time ago" format
 const getTimeAgo = (dateString: string) => {
@@ -108,6 +109,12 @@ export default function NotificationsScreen() {
     const [notifications, setNotifications] = useState<Notification[]>([]);
     const [loading, setLoading] = useState(true);
     const [deleteTarget, setDeleteTarget] = useState<Notification | null>(null);
+    const [canForward, setCanForward] = useState(false);
+    const [forwardModalVisible, setForwardModalVisible] = useState(false);
+    const [forwardReports, setForwardReports] = useState<ForwardableReport[]>([]);
+    const [selectedReport, setSelectedReport] = useState<string | null>(null);
+    const [forwardRole, setForwardRole] = useState<'provincial_admin' | 'national_admin'>('provincial_admin');
+    const [forwardBusy, setForwardBusy] = useState(false);
     const slideAnim = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
 
     // Fetch notifications from Supabase (global alerts + user-specific)
@@ -120,9 +127,12 @@ export default function NotificationsScreen() {
 
             let targetRole = 'user';
             if (userId) {
-                const { data: profile } = await supabase.from('profiles').select('role').eq('id', userId).maybeSingle();
+                const { data: profile } = await supabase.from('profiles').select('role, account_status').eq('id', userId).maybeSingle();
+                setCanForward(['lgu', 'lgu_frontliner', 'lgu_headmaster'].includes(profile?.role || '') && profile?.account_status === 'active');
                 if (profile?.role === 'lgu' || profile?.role === 'lgu_frontliner' || profile?.role === 'lgu_headmaster' || profile?.role === 'admin') {
                     targetRole = 'lgu';
+                } else if (profile?.role === 'provincial_admin' || profile?.role === 'national_admin') {
+                    targetRole = profile.role;
                 }
             }
 
@@ -183,6 +193,53 @@ export default function NotificationsScreen() {
             setNotifications([]);
         } finally {
             setLoading(false);
+        }
+    };
+
+    const openForwardModal = async () => {
+        setForwardModalVisible(true);
+        setForwardReports([]);
+        setSelectedReport(null);
+        setForwardBusy(true);
+        try {
+            const { data: session } = await supabase.auth.getSession();
+            const userId = session.session?.user.id;
+            if (!userId) throw new Error('Please sign in again.');
+            const { data: profile, error: profileError } = await supabase.from('profiles').select('municipality_id').eq('id', userId).single();
+            if (profileError) throw profileError;
+            if (!profile?.municipality_id) throw new Error('No municipality is assigned to your account.');
+            const { data, error } = await supabase.from('incident_report')
+                .select('report_id, hazard_type, report_type, created_at, user_id')
+                .eq('municipality_id', profile.municipality_id)
+                .in('status', ['Verified', 'Dispatched', 'Done'])
+                .in('report_type', ['quick_snap', 'moderate_report', 'general_inquiries'])
+                .order('created_at', { ascending: false }).limit(100);
+            if (error) throw error;
+            const ids = [...new Set((data || []).map(report => report.user_id).filter(Boolean))];
+            if (!ids.length) return;
+            const { data: citizens, error: citizensError } = await supabase.from('profiles').select('id').in('id', ids).eq('role', 'citizen');
+            if (citizensError) throw citizensError;
+            const citizenIds = new Set((citizens || []).map(citizen => citizen.id));
+            setForwardReports((data || []).filter(report => citizenIds.has(report.user_id)));
+        } catch (error: any) {
+            Alert.alert('Could not load reports', error.message || 'Please try again.');
+        } finally {
+            setForwardBusy(false);
+        }
+    };
+
+    const sendVerifiedReport = async () => {
+        if (!selectedReport || forwardBusy) return;
+        setForwardBusy(true);
+        try {
+            const { error } = await supabase.rpc('forward_verified_report', { p_report_id: selectedReport, p_target_role: forwardRole });
+            if (error) throw error;
+            setForwardModalVisible(false);
+            Alert.alert('Report sent', `The verified report was sent to ${forwardRole === 'provincial_admin' ? 'provincial' : 'national'} administrators.`);
+        } catch (error: any) {
+            Alert.alert('Could not send report', error.message || 'Please try again.');
+        } finally {
+            setForwardBusy(false);
         }
     };
 
@@ -314,7 +371,40 @@ export default function NotificationsScreen() {
 
             <View style={styles.titleWrapper}>
                 <Text style={styles.mainTitle}>Notifications</Text>
+                {canForward && <TouchableOpacity style={styles.forwardButton} onPress={openForwardModal}>
+                    <Ionicons name="send-outline" size={17} color="#FFFFFF" />
+                    <Text style={styles.forwardButtonText}>Send verified report</Text>
+                </TouchableOpacity>}
             </View>
+
+            <Modal visible={forwardModalVisible} transparent animationType="slide" onRequestClose={() => setForwardModalVisible(false)}>
+                <View style={styles.forwardOverlay}>
+                    <View style={styles.forwardSheet}>
+                        <Text style={styles.forwardTitle}>Send verified report</Text>
+                        <Text style={styles.forwardHint}>Select a verified citizen report and the higher office to notify.</Text>
+                        <View style={styles.forwardRoles}>
+                            {(['provincial_admin', 'national_admin'] as const).map(role =>
+                                <TouchableOpacity key={role} style={[styles.forwardRole, forwardRole === role && styles.forwardSelected]} onPress={() => setForwardRole(role)}>
+                                    <Text>{role === 'provincial_admin' ? 'Provincial' : 'National'}</Text>
+                                </TouchableOpacity>)}
+                        </View>
+                        <ScrollView style={styles.forwardList}>
+                            {forwardBusy && !forwardReports.length ? <ActivityIndicator color="#2563EB" /> : null}
+                            {!forwardBusy && !forwardReports.length ? <Text style={styles.forwardHint}>No verified reports available.</Text> : null}
+                            {forwardReports.map(report => <TouchableOpacity key={report.report_id}
+                                style={[styles.forwardReport, selectedReport === report.report_id && styles.forwardSelected]}
+                                onPress={() => setSelectedReport(report.report_id)}>
+                                <Text style={styles.forwardReportTitle}>{report.hazard_type || report.report_type} · #{report.report_id.slice(0, 8).toUpperCase()}</Text>
+                                <Text style={styles.forwardHint}>{getFullTime(report.created_at)}</Text>
+                            </TouchableOpacity>)}
+                        </ScrollView>
+                        <TouchableOpacity style={[styles.forwardButton, (!selectedReport || forwardBusy) && { opacity: 0.5 }]} disabled={!selectedReport || forwardBusy} onPress={sendVerifiedReport}>
+                            <Text style={styles.forwardButtonText}>{forwardBusy ? 'Sending...' : 'Send notification'}</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity onPress={() => setForwardModalVisible(false)}><Text style={styles.forwardCancel}>Cancel</Text></TouchableOpacity>
+                    </View>
+                </View>
+            </Modal>
 
             {/* Tabs */}
             <View style={styles.tabBar}>
@@ -522,6 +612,19 @@ const styles = StyleSheet.create({
     blueTextSmall: { color: '#2563EB', fontSize: 14, fontWeight: '600' },
     titleWrapper:  { paddingHorizontal: 20, marginTop: 10 },
     mainTitle:     { fontSize: 32, fontWeight: '800', color: '#0F172A' },
+    forwardButton: { backgroundColor: '#2563EB', borderRadius: 10, padding: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 12 },
+    forwardButtonText: { color: '#FFFFFF', fontWeight: '700' },
+    forwardOverlay: { flex: 1, backgroundColor: '#0008', justifyContent: 'flex-end' },
+    forwardSheet: { backgroundColor: '#FFFFFF', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, maxHeight: '80%' },
+    forwardTitle: { fontSize: 21, fontWeight: '800', color: '#0F172A' },
+    forwardHint: { color: '#64748B', marginTop: 5 },
+    forwardRoles: { flexDirection: 'row', gap: 10, marginTop: 16 },
+    forwardRole: { padding: 12, borderRadius: 9, borderWidth: 1, borderColor: '#CBD5E1', flex: 1, alignItems: 'center' },
+    forwardSelected: { borderColor: '#2563EB', backgroundColor: '#EFF6FF' },
+    forwardList: { marginTop: 14, maxHeight: 320 },
+    forwardReport: { padding: 12, borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 9, marginBottom: 8 },
+    forwardReportTitle: { fontWeight: '700', color: '#0F172A' },
+    forwardCancel: { textAlign: 'center', color: '#64748B', padding: 14 },
 
     // Tabs
     tabBar:   { flexDirection: 'row', backgroundColor: '#F1F5F9', marginHorizontal: 20, borderRadius: 12, padding: 4, marginTop: 18, marginBottom: 4 },
